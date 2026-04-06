@@ -1,3 +1,15 @@
+Am a simple dev looking at browser code.
+the name Gryphon Browser is not locked to me as i would be very surprised with myself if i manage to make a complete browser.
+
+This is my own attempt at adding features on top of a browser that browser extensions can't.
+Reason for chosing lady bird to do this instead of a chrome of firefox based solusion is simply cause i believe in what lady bird is doing and am hoping it will become mine and many others main or at least second or tertiary browser.
+Feel free to look at anything i do here, use anything including names or anything i have made personally but please still comply with the original ladybird terms for things that belong to them.
+
+Until i decide this project is worth something everything written here is CC0 Public Domain.
+If you used anything before a change in licence it is also concidered CC0 Public Domain, no worries :3
+
+original description below
+
 # Ladybird
 
 [Ladybird](https://ladybird.org) is a truly independent web browser, using a novel engine based on web standards.
