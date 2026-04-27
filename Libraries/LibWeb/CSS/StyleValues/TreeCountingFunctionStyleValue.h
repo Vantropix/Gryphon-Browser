@@ -28,7 +28,7 @@ public:
     }
     virtual ~TreeCountingFunctionStyleValue() override = default;
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     size_t resolve(DOM::AbstractElement const&) const;
 
@@ -36,6 +36,8 @@ public:
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     virtual bool equals(StyleValue const& other) const override;
+
+    virtual bool is_computationally_independent() const override { return false; }
 
 private:
     TreeCountingFunctionStyleValue(TreeCountingFunction function, ComputedType computed_type)

@@ -6,8 +6,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/BaseAudioContextPrototype.h>
+#include <LibWeb/Bindings/BaseAudioContext.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/DOM/Document.h>
+#include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/Window.h>
@@ -18,6 +20,7 @@
 #include <LibWeb/WebAudio/BaseAudioContext.h>
 #include <LibWeb/WebAudio/BiquadFilterNode.h>
 #include <LibWeb/WebAudio/ChannelMergerNode.h>
+#include <LibWeb/WebAudio/ControlMessageQueue.h>
 #include <LibWeb/WebAudio/DynamicsCompressorNode.h>
 #include <LibWeb/WebAudio/GainNode.h>
 #include <LibWeb/WebAudio/OscillatorNode.h>
@@ -31,6 +34,7 @@ BaseAudioContext::BaseAudioContext(JS::Realm& realm, float sample_rate)
     : DOM::EventTarget(realm)
     , m_sample_rate(sample_rate)
     , m_listener(AudioListener::create(realm, *this))
+    , m_control_message_queue(make<ControlMessageQueue>())
 {
 }
 
@@ -162,7 +166,8 @@ WebIDL::ExceptionOr<GC::Ref<PeriodicWave>> BaseAudioContext::create_periodic_wav
 
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createscriptprocessor
 WebIDL::ExceptionOr<GC::Ref<ScriptProcessorNode>> BaseAudioContext::create_script_processor(
-    WebIDL::UnsignedLong buffer_size, WebIDL::UnsignedLong number_of_input_channels,
+    WebIDL::UnsignedLong buffer_size,
+    WebIDL::UnsignedLong number_of_input_channels,
     WebIDL::UnsignedLong number_of_output_channels)
 {
     // The bufferSize parameter determines the buffer size in units of sample-frames. If it’s not passed in, or if the
@@ -211,12 +216,18 @@ WebIDL::ExceptionOr<void> BaseAudioContext::verify_audio_options_inside_nominal_
 
 void BaseAudioContext::queue_a_media_element_task(GC::Ref<GC::Function<void()>> steps)
 {
-    auto task = HTML::Task::create(vm(), m_media_element_event_task_source.source, HTML::current_principal_settings_object().responsible_document(), steps);
-    HTML::main_thread_event_loop().task_queue().add(task);
+    auto task = HTML::Task::create(vm(), m_media_element_event_task_source.source, HTML::current_settings_object().responsible_document(), steps);
+    (void)HTML::main_thread_event_loop().task_queue().add(task);
+}
+
+void BaseAudioContext::queue_control_message(ControlMessage message)
+{
+    m_control_message_queue->enqueue(move(message));
+    // FIXME: Should signal the rendering thread when implemented
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-decodeaudiodata
-GC::Ref<WebIDL::Promise> BaseAudioContext::decode_audio_data(GC::Root<WebIDL::BufferSource> audio_data, GC::Ptr<WebIDL::CallbackType> success_callback, GC::Ptr<WebIDL::CallbackType> error_callback)
+GC::Ref<WebIDL::Promise> BaseAudioContext::decode_audio_data(GC::Root<JS::ArrayBuffer> const& audio_data, GC::Ptr<WebIDL::CallbackType> success_callback, GC::Ptr<WebIDL::CallbackType> error_callback)
 {
     auto& realm = this->realm();
 
@@ -241,7 +252,7 @@ GC::Ref<WebIDL::Promise> BaseAudioContext::decode_audio_data(GC::Root<WebIDL::Bu
         // FIXME: 3.2. Detach the audioData ArrayBuffer. If this operations throws, jump to the step 3.
 
         // 3.3. Queue a decoding operation to be performed on another thread.
-        queue_a_decoding_operation(promise, move(audio_data), success_callback, error_callback);
+        queue_a_decoding_operation(promise, audio_data, success_callback, error_callback);
     }
 
     // 4. Else, execute the following error steps:
@@ -270,7 +281,7 @@ GC::Ref<WebIDL::Promise> BaseAudioContext::decode_audio_data(GC::Root<WebIDL::Bu
 }
 
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-decodeaudiodata
-void BaseAudioContext::queue_a_decoding_operation(GC::Ref<JS::PromiseCapability> promise, [[maybe_unused]] GC::Root<WebIDL::BufferSource> audio_data, GC::Ptr<WebIDL::CallbackType> success_callback, GC::Ptr<WebIDL::CallbackType> error_callback)
+void BaseAudioContext::queue_a_decoding_operation(GC::Ref<JS::PromiseCapability> promise, [[maybe_unused]] GC::Root<JS::ArrayBuffer> audio_data, GC::Ptr<WebIDL::CallbackType> success_callback, GC::Ptr<WebIDL::CallbackType> error_callback)
 {
     auto& realm = this->realm();
 

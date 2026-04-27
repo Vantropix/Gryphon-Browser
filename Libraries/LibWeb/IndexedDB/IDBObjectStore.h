@@ -8,7 +8,7 @@
 
 #include <AK/HashMap.h>
 #include <LibGC/Heap.h>
-#include <LibWeb/Bindings/IDBCursorPrototype.h>
+#include <LibWeb/Bindings/IDBCursor.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/IndexedDB/IDBTransaction.h>
 #include <LibWeb/IndexedDB/Internal/Index.h>
@@ -65,6 +65,9 @@ public:
     AK::HashMap<String, GC::Ref<Index>>& index_set() { return m_indexes; }
     WebIDL::ExceptionOr<GC::Ref<IDBRequest>> add_or_put(GC::Ref<IDBObjectStore>, JS::Value, Optional<JS::Value> const&, bool);
     GC::Ref<ObjectStore> store() const { return m_store; }
+
+    void update_name() { m_name = m_store->name(); }
+    void update_index_set() { m_indexes = m_store->index_set(); }
 
 protected:
     explicit IDBObjectStore(JS::Realm&, GC::Ref<ObjectStore>, GC::Ref<IDBTransaction>);

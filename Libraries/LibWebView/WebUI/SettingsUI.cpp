@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2025-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -17,9 +17,6 @@ void SettingsUI::register_interfaces()
     register_interface("loadCurrentSettings"sv, [this](auto const&) {
         load_current_settings();
     });
-    register_interface("restoreDefaultSettings"sv, [this](auto const&) {
-        restore_default_settings();
-    });
 
     register_interface("setNewTabPageURL"sv, [this](auto const& data) {
         set_new_tab_page_url(data);
@@ -29,6 +26,9 @@ void SettingsUI::register_interfaces()
     });
     register_interface("setLanguages"sv, [this](auto const& data) {
         set_languages(data);
+    });
+    register_interface("setBrowsingBehavior"sv, [this](auto const& data) {
+        set_browsing_behavior(data);
     });
 
     register_interface("loadAvailableEngines"sv, [this](auto const&) {
@@ -66,6 +66,9 @@ void SettingsUI::register_interfaces()
     register_interface("estimateBrowsingDataSizes"sv, [this](auto const& data) {
         estimate_browsing_data_sizes(data);
     });
+    register_interface("setBrowsingDataSettings"sv, [this](auto const& data) {
+        set_browsing_data_settings(data);
+    });
     register_interface("clearBrowsingData"sv, [this](auto const& data) {
         clear_browsing_data(data);
     });
@@ -82,12 +85,6 @@ void SettingsUI::load_current_settings()
 {
     auto settings = WebView::Application::settings().serialize_json();
     async_send_message("loadSettings"sv, settings);
-}
-
-void SettingsUI::restore_default_settings()
-{
-    WebView::Application::settings().restore_defaults();
-    load_current_settings();
 }
 
 void SettingsUI::set_new_tab_page_url(JsonValue const& new_tab_page_url)
@@ -115,6 +112,14 @@ void SettingsUI::set_languages(JsonValue const& languages)
 {
     auto parsed_languages = Settings::parse_json_languages(languages);
     WebView::Application::settings().set_languages(move(parsed_languages));
+
+    load_current_settings();
+}
+
+void SettingsUI::set_browsing_behavior(JsonValue const& browsing_behavior)
+{
+    auto parsed_browsing_behavior = Settings::parse_browsing_behavior(browsing_behavior);
+    WebView::Application::settings().set_browsing_behavior(parsed_browsing_behavior);
 
     load_current_settings();
 }
@@ -311,6 +316,12 @@ void SettingsUI::estimate_browsing_data_sizes(JsonValue const& options)
         });
 }
 
+void SettingsUI::set_browsing_data_settings(JsonValue const& settings)
+{
+    Application::settings().set_browsing_data_settings(Settings::parse_browsing_data_settings(settings));
+    load_current_settings();
+}
+
 void SettingsUI::clear_browsing_data(JsonValue const& options)
 {
     if (!options.is_object())
@@ -322,6 +333,10 @@ void SettingsUI::clear_browsing_data(JsonValue const& options)
         clear_browsing_data_options.since = UnixDateTime::from_milliseconds_since_epoch(*since);
 
     clear_browsing_data_options.delete_cached_files = options.as_object().get_bool("cachedFiles"sv).value_or(false)
+        ? Application::ClearBrowsingDataOptions::Delete::Yes
+        : Application::ClearBrowsingDataOptions::Delete::No;
+
+    clear_browsing_data_options.delete_history = options.as_object().get_bool("history"sv).value_or(false)
         ? Application::ClearBrowsingDataOptions::Delete::Yes
         : Application::ClearBrowsingDataOptions::Delete::No;
 

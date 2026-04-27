@@ -17,19 +17,21 @@ namespace Ladybird {
 
 class WebViewBridge final : public WebView::ViewImplementation {
 public:
-    static ErrorOr<NonnullOwnPtr<WebViewBridge>> create(Vector<Web::DevicePixelRect> screen_rects, float device_pixel_ratio, u64 maximum_frames_per_second);
+    static ErrorOr<NonnullOwnPtr<WebViewBridge>> create(Vector<Web::DevicePixelRect> screen_rects, double device_pixel_ratio, u64 maximum_frames_per_second);
     virtual ~WebViewBridge() override;
 
     virtual void initialize_client(CreateNewClient = CreateNewClient::Yes) override;
     void initialize_client_as_child(WebViewBridge& parent, u64 page_index);
 
-    float device_pixel_ratio() const { return m_device_pixel_ratio; }
-    void set_device_pixel_ratio(float device_pixel_ratio);
-    float inverse_device_pixel_ratio() const { return 1.0f / m_device_pixel_ratio; }
+    void set_device_pixel_ratio(double device_pixel_ratio);
+    void set_zoom_level(double zoom_level);
+    double inverse_device_pixel_ratio() const { return 1.0 / device_pixel_ratio(); }
 
     void set_viewport_rect(Gfx::IntRect);
 
     void set_maximum_frames_per_second(u64 maximum_frames_per_second);
+
+    void exit_fullscreen();
 
     void update_palette();
 
@@ -39,7 +41,7 @@ public:
     void enqueue_input_event(Web::PinchEvent);
 
     struct Paintable {
-        Gfx::Bitmap const& bitmap;
+        Gfx::SharedImageBuffer const* shared_image_buffer { nullptr };
         Gfx::IntSize bitmap_size;
     };
     Optional<Paintable> paintable();
@@ -49,7 +51,7 @@ public:
     auto& pinch_state() { return m_pinch_state; }
 
 private:
-    WebViewBridge(Vector<Web::DevicePixelRect> screen_rects, float device_pixel_ratio, u64 maximum_frames_per_second);
+    WebViewBridge(Vector<Web::DevicePixelRect> screen_rects, double device_pixel_ratio, u64 maximum_frames_per_second);
 
     virtual void update_zoom() override;
     virtual Web::DevicePixelSize viewport_size() const override;

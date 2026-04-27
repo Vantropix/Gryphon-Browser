@@ -26,7 +26,7 @@ public:
     virtual double raw_value() const override { return m_percentage.value(); }
     virtual FlyString unit_name() const override { return "percent"_fly_string; }
 
-    virtual String to_string(SerializationMode) const override { return m_percentage.to_string(); }
+    virtual void serialize(StringBuilder& builder, SerializationMode) const override { builder.append(m_percentage.to_string()); }
 
     bool equals(StyleValue const& other) const override
     {
@@ -35,6 +35,8 @@ public:
         auto const& other_percentage = other.as_percentage();
         return m_percentage == other_percentage.m_percentage;
     }
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     PercentageStyleValue(Percentage&& percentage)

@@ -27,6 +27,9 @@ public:
 
     virtual int register_signal(int signal_number, Function<void(int)> handler) override;
     virtual void unregister_signal(int handler_id) override;
+
+    virtual void register_process(pid_t pid, ESCAPING Function<void(pid_t)> exit_handler) override;
+    virtual void unregister_process(pid_t pid) override;
 };
 
 class EventLoopImplementationWindows final : public EventLoopImplementation {
@@ -47,7 +50,7 @@ private:
     int m_exit_code { 0 };
 
     // The wake event handle of this event loop needs to be accessible from other threads.
-    void*& m_wake_event;
+    void* m_wake_event;
 };
 
 using EventLoopManagerPlatform = EventLoopManagerWindows;

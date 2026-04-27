@@ -9,6 +9,7 @@
 #include <AK/Debug.h>
 #include <AK/GenericShorthands.h>
 #include <AK/SourceLocation.h>
+#include <AK/Utf32View.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibWeb/HTML/Parser/Entities.h>
 #include <LibWeb/HTML/Parser/HTMLParser.h>
@@ -2910,6 +2911,15 @@ void HTMLTokenizer::parser_did_run(Badge<HTMLParser>)
     }
 }
 
+String HTMLTokenizer::unparsed_input() const
+{
+    if (m_current_offset < 0 || static_cast<size_t>(m_current_offset) >= m_decoded_input.size())
+        return {};
+    StringBuilder builder;
+    builder.append(Utf32View { m_decoded_input.span().slice(m_current_offset) });
+    return MUST(builder.to_string());
+}
+
 void HTMLTokenizer::insert_input_at_insertion_point(StringView input)
 {
     Vector<u32> new_decoded_input;
@@ -3003,6 +3013,11 @@ String HTMLTokenizer::consume_current_builder()
     auto string = m_current_builder.to_string_without_validation();
     m_current_builder.clear();
     return string;
+}
+
+void HTMLTokenizer::visit_edges(GC::Cell::Visitor& visitor)
+{
+    visitor.visit(m_parser);
 }
 
 }

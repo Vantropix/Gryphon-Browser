@@ -14,8 +14,7 @@
 #include <AK/StringBuilder.h>
 #include <AK/Time.h>
 #include <LibFileSystem/FileSystem.h>
-#include <LibJS/AST.h>
-#include <LibJS/Bytecode/Interpreter.h>
+#include <LibJS/Bytecode/Executable.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
@@ -78,7 +77,10 @@ VM::VM(ErrorMessages error_messages)
     , m_error_messages(move(error_messages))
 {
     s_the = this;
-    m_bytecode_interpreter = make<Bytecode::Interpreter>();
+
+    m_heap.register_sweep_callback([] {
+        Bytecode::StaticPropertyLookupCache::sweep_all();
+    });
 
     m_empty_string = m_heap.allocate<PrimitiveString>(String {});
 
@@ -112,6 +114,10 @@ VM::VM(ErrorMessages error_messages)
 
     host_enqueue_promise_job = [this](GC::Ref<GC::Function<ThrowCompletionOr<Value>()>> job, Realm* realm) {
         enqueue_promise_job(job, realm);
+    };
+
+    host_promise_job_queue_is_empty = [this]() -> bool {
+        return m_promise_jobs.is_empty();
     };
 
     host_make_job_callback = [](FunctionObject& function_object) {
@@ -192,16 +198,19 @@ VM::VM(ErrorMessages error_messages)
         return HandledByHost::Handled;
     };
 
-    // 3.6.1 HostInitializeShadowRealm ( realm, context, O ), https://tc39.es/proposal-shadowrealm/#sec-hostinitializeshadowrealm
-    host_initialize_shadow_realm = [](Realm&, NonnullOwnPtr<ExecutionContext>, ShadowRealm&) -> ThrowCompletionOr<void> {
-        // The host-defined abstract operation HostInitializeShadowRealm takes arguments realm (a Realm Record),
-        // context (an execution context), and O (a ShadowRealm object) and returns either a normal completion
-        // containing unused or a throw completion. It is used to inform the host of any newly created realms
-        // from the ShadowRealm constructor. The idea of this hook is to initialize host data structures related
-        // to the ShadowRealm, e.g., for module loading.
-        //
-        // The host may use this hook to add properties to the ShadowRealm's global object. Those properties must be configurable.
-        return {};
+    // 25.2.2.4 HostGrowSharedArrayBuffer ( buffer, newByteLength ), https://tc39.es/ecma262/#sec-hostgrowsharedarraybuffer
+    host_grow_shared_array_buffer = [](ArrayBuffer&, size_t) -> ThrowCompletionOr<HandledByHost> {
+        // The host-defined abstract operation HostGrowSharedArrayBuffer takes arguments buffer (a SharedArrayBuffer)
+        // and newByteLength (a non-negative integer) and returns either a normal completion containing either handled
+        // or unhandled, or a throw completion. It gives the host an opportunity to perform implementation-defined
+        // growing of buffer. If the host chooses not to handle growing of buffer, it may return unhandled for the default behaviour.
+
+        // The implementation of HostGrowSharedArrayBuffer must conform to the following requirements:
+        // - If the abstract operation does not complete normally with unhandled, and newByteLength < the current byte length of the buffer or newByteLength > buffer.[[ArrayBufferMaxByteLength]], throw a RangeError exception.
+        // - Let AR be the Agent Record of the surrounding agent. Let isLittleEndian be AR.[[LittleEndian]]. If the abstract operation completes normally with handled, a WriteSharedMemory or ReadModifyWriteSharedMemory event whose [[Order]] is seq-cst, [[Payload]] is NumericToRawBytes(biguint64, newByteLength, isLittleEndian), [[Block]] is buffer.[[ArrayBufferByteLengthData]], [[ByteIndex]] is 0, and [[ElementSize]] is 8 is added to the surrounding agent's candidate execution such that racing calls to SharedArrayBuffer.prototype.grow ( newLength ) are not "lost", i.e. silently do nothing.
+
+        // The default implementation of HostGrowSharedArrayBuffer is to return NormalCompletion(unhandled).
+        return HandledByHost::Unhandled;
     };
 
     // 2.3.1 HostSystemUTCEpochNanoseconds ( global ), https://tc39.es/proposal-temporal/#sec-hostsystemutcepochnanoseconds
@@ -243,6 +252,14 @@ struct ExecutionContextRootsCollector : public Cell::Visitor {
     virtual void visit_impl(GC::Cell& cell) override
     {
         roots.set(&cell);
+    }
+
+    virtual void visit_impl(ReadonlySpan<GC::NanBoxedValue> values) override
+    {
+        for (auto const& value : values) {
+            if (value.is_cell())
+                roots.set(value.as_cell());
+        }
     }
 
     virtual void visit_possible_values(ReadonlyBytes) override
@@ -287,17 +304,18 @@ void VM::gather_roots(HashMap<GC::Cell*, GC::HeapRoot>& roots)
     for (auto finalization_registry : m_finalization_registry_cleanup_jobs)
         roots.set(finalization_registry, GC::HeapRoot { .type = GC::HeapRoot::Type::VM });
 
-    auto gather_roots_from_execution_context_stack = [&roots](Vector<ExecutionContext*> const& stack) {
-        for (auto const& execution_context : stack) {
+    auto gather_roots_from_execution_context_stack = [&roots](Vector<ExecutionContext*> const& stack, Vector<ExecutionContext*> const& previous_running_contexts, ExecutionContext* running_execution_context) {
+        for_each_execution_context_top_to_bottom(stack, previous_running_contexts, running_execution_context, [&](ExecutionContext& execution_context) {
             ExecutionContextRootsCollector visitor;
-            execution_context->visit_edges(visitor);
+            execution_context.visit_edges(visitor);
             for (auto cell : visitor.roots)
                 roots.set(cell, GC::HeapRoot { .type = GC::HeapRoot::Type::VM });
-        }
+            return true;
+        });
     };
-    gather_roots_from_execution_context_stack(m_execution_context_stack);
-    for (auto& saved_stack : m_saved_execution_context_stacks)
-        gather_roots_from_execution_context_stack(saved_stack);
+    gather_roots_from_execution_context_stack(m_execution_context_stack, m_execution_context_stack_previous_running_contexts, m_running_execution_context);
+    for (auto const& saved_stack : m_saved_execution_context_stacks)
+        gather_roots_from_execution_context_stack(saved_stack.stack, saved_stack.previous_running_contexts, saved_stack.running_execution_context);
 
     for (auto& job : m_promise_jobs)
         roots.set(job, GC::HeapRoot { .type = GC::HeapRoot::Type::VM });
@@ -498,50 +516,77 @@ void VM::promise_rejection_tracker(Promise& promise, Promise::RejectionOperation
 
 void VM::dump_backtrace() const
 {
-    for (ssize_t i = m_execution_context_stack.size() - 1; i >= 0; --i) {
-        auto& frame = m_execution_context_stack[i];
-
-        if (frame->executable) {
-            auto source_range = frame->executable->source_range_at(frame->program_counter).realize();
-            dbgln("-> {} @ {}:{},{}", frame->function ? frame->function->name_for_call_stack() : ""_utf16, source_range.filename(), source_range.start.line, source_range.start.column);
+    for_each_execution_context_top_to_bottom([&](ExecutionContext const& frame) {
+        if (frame.executable) {
+            if (auto source_range = frame.executable->source_range_at(frame.program_counter); source_range.has_value())
+                dbgln("-> {} @ {}:{},{}", frame.function ? frame.function->name_for_call_stack() : ""_utf16, source_range->filename(), source_range->start.line, source_range->start.column);
+            else
+                dbgln("-> {}", frame.function ? frame.function->name_for_call_stack() : ""_utf16);
         } else {
-            dbgln("-> {}", frame->function ? frame->function->name_for_call_stack() : ""_utf16);
+            dbgln("-> {}", frame.function ? frame.function->name_for_call_stack() : ""_utf16);
         }
-    }
+        return true;
+    });
 }
 
 void VM::save_execution_context_stack()
 {
-    m_saved_execution_context_stacks.append(move(m_execution_context_stack));
+    m_saved_execution_context_stacks.append({
+        .stack = move(m_execution_context_stack),
+        .previous_running_contexts = move(m_execution_context_stack_previous_running_contexts),
+        .running_execution_context = m_running_execution_context,
+    });
+    m_running_execution_context = nullptr;
 }
 
 void VM::clear_execution_context_stack()
 {
     m_execution_context_stack.clear_with_capacity();
+    m_execution_context_stack_previous_running_contexts.clear_with_capacity();
+    m_running_execution_context = nullptr;
 }
 
 void VM::restore_execution_context_stack()
 {
-    m_execution_context_stack = m_saved_execution_context_stacks.take_last();
+    auto saved_stack = m_saved_execution_context_stacks.take_last();
+    m_execution_context_stack = move(saved_stack.stack);
+    m_execution_context_stack_previous_running_contexts = move(saved_stack.previous_running_contexts);
+    m_running_execution_context = saved_stack.running_execution_context;
+}
+
+ExecutionContext* VM::previous_execution_context() const
+{
+    ExecutionContext* previous_execution_context = nullptr;
+    bool found_running_execution_context = false;
+    for_each_execution_context_top_to_bottom([&](ExecutionContext const& execution_context) {
+        if (!found_running_execution_context) {
+            found_running_execution_context = true;
+            return true;
+        }
+        previous_execution_context = const_cast<ExecutionContext*>(&execution_context);
+        return false;
+    });
+    return previous_execution_context;
 }
 
 // 9.4.1 GetActiveScriptOrModule ( ), https://tc39.es/ecma262/#sec-getactivescriptormodule
 ScriptOrModule VM::get_active_script_or_module() const
 {
     // 1. If the execution context stack is empty, return null.
-    if (m_execution_context_stack.is_empty())
+    if (!m_running_execution_context)
         return Empty {};
 
     // 2. Let ec be the topmost execution context on the execution context stack whose ScriptOrModule component is not null.
-    for (auto i = m_execution_context_stack.size() - 1; i > 0; i--) {
-        if (!m_execution_context_stack[i]->script_or_module.has<Empty>())
-            return m_execution_context_stack[i]->script_or_module;
-    }
+    ScriptOrModule script_or_module = Empty {};
+    for_each_execution_context_top_to_bottom([&](ExecutionContext const& execution_context) {
+        if (execution_context.script_or_module.has<Empty>())
+            return true;
+        script_or_module = execution_context.script_or_module;
+        return false;
+    });
 
     // 3. If no such execution context exists, return null. Otherwise, return ec's ScriptOrModule.
-    // Note: Since it is not empty we have 0 and since we got here all the
-    //       above contexts don't have a non-null ScriptOrModule
-    return m_execution_context_stack[0]->script_or_module;
+    return script_or_module;
 }
 
 VM::StoredModule* VM::get_stored_module(ImportedModuleReferrer const&, ByteString const& filename, Utf16String const&)
@@ -564,9 +609,9 @@ VM::StoredModule* VM::get_stored_module(ImportedModuleReferrer const&, ByteStrin
     return &(*end_or_module);
 }
 
-ThrowCompletionOr<void> VM::link_and_eval_module(Badge<Bytecode::Interpreter>, SourceTextModule& module)
+ThrowCompletionOr<void> VM::link_and_eval_module(SourceTextModule& module)
 {
-    return link_and_eval_module(module);
+    return link_and_eval_module(static_cast<CyclicModule&>(module));
 }
 
 ThrowCompletionOr<void> VM::link_and_eval_module(CyclicModule& module)
@@ -588,16 +633,16 @@ ThrowCompletionOr<void> VM::link_and_eval_module(CyclicModule& module)
     if (evaluated_or_error.is_error())
         return evaluated_or_error.throw_completion();
 
-    auto evaluated_value = evaluated_or_error.value();
+    auto const& evaluated_value = static_cast<Promise&>(*evaluated_or_error.value()->promise());
 
     run_queued_promise_jobs();
     VERIFY(m_promise_jobs.is_empty());
 
     // FIXME: This will break if we start doing promises actually asynchronously.
-    VERIFY(evaluated_value->state() != Promise::State::Pending);
+    VERIFY(evaluated_value.state() != Promise::State::Pending);
 
-    if (evaluated_value->state() == Promise::State::Rejected)
-        return JS::throw_completion(evaluated_value->result());
+    if (evaluated_value.state() == Promise::State::Rejected)
+        return JS::throw_completion(evaluated_value.result());
 
     dbgln_if(JS_MODULE_DEBUG, "[JS MODULE] Evaluating passed for module {}", module.filename());
     return {};
@@ -743,7 +788,7 @@ void VM::load_imported_module(ImportedModuleReferrer referrer, ModuleRequest con
         // must either be the Completion Record returned by an invocation of ParseJSONModule or a throw completion.
         if (module_type == "json"sv) {
             dbgln_if(JS_MODULE_DEBUG, "[JS MODULE] reading and parsing JSON module {}", filename);
-            return parse_json_module(*current_realm(), content_view, filename);
+            return TRY(parse_json_module(*current_realm(), content_view, filename));
         }
 
         dbgln_if(JS_MODULE_DEBUG, "[JS MODULE] reading and parsing as SourceTextModule module {}", filename);
@@ -770,33 +815,19 @@ void VM::load_imported_module(ImportedModuleReferrer referrer, ModuleRequest con
     finish_loading_imported_module(referrer, module_request, payload, module);
 }
 
-static GC::Ptr<CachedSourceRange> get_source_range(ExecutionContext* context)
+Vector<StackTraceElement> VM::stack_trace() const
 {
-    // native function
-    if (!context->executable)
-        return {};
-
-    if (!context->rare_data()
-        || !context->rare_data()->cached_source_range
-        || context->rare_data()->cached_source_range->program_counter != context->program_counter) {
-        auto unrealized_source_range = context->executable->source_range_at(context->program_counter);
-        context->ensure_rare_data()->cached_source_range = context->executable->heap().allocate<CachedSourceRange>(
-            context->program_counter,
-            move(unrealized_source_range));
-    }
-    return context->rare_data()->cached_source_range;
-}
-
-GC::ConservativeVector<StackTraceElement> VM::stack_trace() const
-{
-    GC::ConservativeVector<StackTraceElement> stack_trace(heap());
-    stack_trace.ensure_capacity(m_execution_context_stack.size());
-    for (auto* context : m_execution_context_stack.in_reverse()) {
+    Vector<StackTraceElement> stack_trace;
+    for_each_execution_context_top_to_bottom([&](ExecutionContext const& context) {
+        Optional<SourceRange> source_range;
+        if (context.executable)
+            source_range = context.executable->get_source_range(context.program_counter);
         stack_trace.append({
-            .execution_context = context,
-            .source_range = get_source_range(context),
+            .execution_context = const_cast<ExecutionContext*>(&context),
+            .source_range = move(source_range),
         });
-    }
+        return true;
+    });
 
     return stack_trace;
 }

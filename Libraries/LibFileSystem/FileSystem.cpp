@@ -11,12 +11,16 @@
 #include <LibCore/System.h>
 #include <LibFileSystem/FileSystem.h>
 
-#if !defined(AK_OS_IOS) && defined(AK_OS_BSD_GENERIC)
-#    include <sys/disk.h>
-#elif defined(AK_OS_LINUX)
-#    include <linux/fs.h>
-#elif defined(AK_OS_WINDOWS)
+#if defined(AK_OS_WINDOWS)
 #    include <windows.h>
+#else
+#    include <sys/statvfs.h>
+
+#    if !defined(AK_OS_IOS) && defined(AK_OS_BSD_GENERIC)
+#        include <sys/disk.h>
+#    elif defined(AK_OS_LINUX)
+#        include <linux/fs.h>
+#    endif
 #endif
 
 // On Linux distros that use glibc `basename` is defined as a macro that expands to `__xpg_basename`, so we undefine it
@@ -48,9 +52,6 @@ ErrorOr<ByteString> absolute_path(StringView path)
 #ifndef AK_OS_WINDOWS
 ErrorOr<ByteString> real_path(StringView path)
 {
-    if (path.is_null())
-        return Error::from_errno(ENOENT);
-
     ByteString dep_path = path;
     char* real_path = realpath(dep_path.characters(), nullptr);
     ScopeGuard free_path = [real_path]() { free(real_path); };
@@ -278,7 +279,7 @@ ErrorOr<void> copy_file_or_directory(StringView destination_path, StringView sou
             return Error::from_errno(EISDIR);
         }
 
-        return copy_directory(final_destination_path, source_path, source_stat);
+        return copy_directory(final_destination_path, source_path, source_stat, link_mode, preserve_mode);
     }
 
     if (link_mode == LinkMode::Allowed)
@@ -361,6 +362,32 @@ ErrorOr<off_t> size_from_fstat(int fd)
 {
     auto st = TRY(Core::System::fstat(fd));
     return st.st_size;
+}
+
+ErrorOr<DiskSpace> compute_disk_space(LexicalPath const& path)
+{
+#if defined(AK_OS_WINDOWS)
+    ULARGE_INTEGER free_bytes;
+    ULARGE_INTEGER total_bytes;
+
+    if (!GetDiskFreeSpaceExA(path.string().characters(), &free_bytes, &total_bytes, nullptr))
+        return Error::from_windows_error();
+
+    return DiskSpace {
+        .free_bytes = free_bytes.QuadPart,
+        .total_bytes = total_bytes.QuadPart,
+    };
+#else
+    struct statvfs stats {};
+
+    if (::statvfs(path.string().characters(), &stats) != 0)
+        return Error::from_syscall("statvfs"sv, errno);
+
+    return DiskSpace {
+        .free_bytes = stats.f_bavail * stats.f_frsize,
+        .total_bytes = stats.f_blocks * stats.f_frsize,
+    };
+#endif
 }
 
 }

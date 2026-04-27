@@ -18,6 +18,7 @@
 #include <LibMedia/Export.h>
 #include <LibMedia/Forward.h>
 #include <LibMedia/IncrementallyPopulatedStream.h>
+#include <LibMedia/TimeRanges.h>
 #include <LibMedia/Track.h>
 #include <LibThreading/ConditionVariable.h>
 #include <LibThreading/Forward.h>
@@ -36,42 +37,58 @@ public:
     using ErrorHandler = Function<void(DecoderError&&)>;
     using BlockEndTimeHandler = Function<void(AK::Duration)>;
     using SeekCompletionHandler = Function<void()>;
+    using QueueIsFullHandler = Function<void()>;
 
-    static DecoderErrorOr<NonnullRefPtr<AudioDataProvider>> try_create(NonnullRefPtr<Core::WeakEventLoopReference> const& main_thread_event_loop, NonnullRefPtr<MutexedDemuxer> const& demuxer, NonnullRefPtr<IncrementallyPopulatedStream> const&, Track const& track);
+    static DecoderErrorOr<NonnullRefPtr<AudioDataProvider>> try_create(NonnullRefPtr<Core::WeakEventLoopReference> const& main_thread_event_loop, NonnullRefPtr<Demuxer> const& demuxer, Track const& track);
     AudioDataProvider(NonnullRefPtr<ThreadData> const&);
     ~AudioDataProvider();
 
     void set_error_handler(ErrorHandler&&);
-    void set_block_end_time_handler(BlockEndTimeHandler&&);
+    void set_duration_change_handler(BlockEndTimeHandler&&);
+    void set_queue_is_full_handler(QueueIsFullHandler&&);
     void set_output_sample_specification(Audio::SampleSpecification);
 
     void start();
+    void suspend();
+    void resume();
 
     AudioBlock retrieve_block();
 
     void seek(AK::Duration timestamp, SeekCompletionHandler&& = nullptr);
 
+    bool is_blocked() const;
+    i64 queue_end_sample() const;
+
+    TimeRanges buffered_time_ranges() const;
+
 private:
     class ThreadData final : public AtomicRefCounted<ThreadData> {
     public:
-        ThreadData(NonnullRefPtr<Core::WeakEventLoopReference> const& main_thread_event_loop, NonnullRefPtr<MutexedDemuxer> const&, NonnullRefPtr<IncrementallyPopulatedStream::Cursor> const&, Track const&, NonnullOwnPtr<AudioDecoder>&&, NonnullOwnPtr<Audio::AudioConverter>&&);
+        ThreadData(NonnullRefPtr<Core::WeakEventLoopReference> const& main_thread_event_loop, NonnullRefPtr<Demuxer> const&, Track const&, AK::Duration, NonnullOwnPtr<Audio::AudioConverter>&&);
         ~ThreadData();
 
         void set_error_handler(ErrorHandler&&);
-        void set_block_end_time_handler(BlockEndTimeHandler&&);
+        void set_duration_change_handler(BlockEndTimeHandler&&);
+        void set_queue_is_full_handler(QueueIsFullHandler&&);
         void set_output_sample_specification(Audio::SampleSpecification);
 
         void start();
+        DecoderErrorOr<void> create_decoder();
+        void suspend();
+        void resume();
         void exit();
 
         void wait_for_start();
+        bool should_thread_exit_while_locked() const;
         bool should_thread_exit() const;
+        bool handle_suspension();
         template<typename Invokee>
         void invoke_on_main_thread_while_locked(Invokee);
         template<typename Invokee>
         void invoke_on_main_thread(Invokee);
         void dispatch_block_end_time(AudioBlock const&);
         void queue_block(AudioBlock&&);
+        void dispatch_error(DecoderError&&);
         void flush_decoder();
         DecoderErrorOr<void> retrieve_next_block(AudioBlock&);
         bool handle_seek();
@@ -79,6 +96,10 @@ private:
         void process_seek_on_main_thread(u32 seek_id, Callback);
         void resolve_seek(u32 seek_id);
         void push_data_and_decode_a_block();
+        bool is_blocked() const;
+        i64 queue_end_sample() const;
+
+        TimeRanges buffered_time_ranges() const;
 
         void seek(AK::Duration timestamp, SeekCompletionHandler&&);
 
@@ -87,11 +108,13 @@ private:
 
         AudioDecoder const& decoder() const { return *m_decoder; }
         AudioQueue& queue() { return m_queue; }
+        void clear_queue();
 
     private:
         enum class RequestedState : u8 {
             None,
             Running,
+            Suspended,
             Exit,
         };
 
@@ -101,18 +124,21 @@ private:
         mutable Threading::ConditionVariable m_wait_condition { m_mutex };
         RequestedState m_requested_state { RequestedState::None };
 
-        NonnullRefPtr<MutexedDemuxer> m_demuxer;
-        NonnullRefPtr<IncrementallyPopulatedStream::Cursor> m_stream_cursor;
+        NonnullRefPtr<Demuxer> m_demuxer;
         Track m_track;
-        NonnullOwnPtr<AudioDecoder> m_decoder;
+        AK::Duration m_duration;
+        OwnPtr<AudioDecoder> m_decoder;
+        bool m_decoder_needs_keyframe_next_seek { false };
         NonnullOwnPtr<Audio::AudioConverter> m_converter;
         i64 m_last_sample { NumericLimits<i64>::min() };
 
         size_t m_queue_max_size { 8 };
         AudioQueue m_queue;
-        BlockEndTimeHandler m_frame_end_time_handler;
+        BlockEndTimeHandler m_duration_change_handler;
         ErrorHandler m_error_handler;
         bool m_is_in_error_state { false };
+        QueueIsFullHandler m_queue_is_full_handler;
+        i64 m_queue_end_sample { 0 };
 
         u32 m_last_processed_seek_id { 0 };
         Atomic<u32> m_seek_id { 0 };

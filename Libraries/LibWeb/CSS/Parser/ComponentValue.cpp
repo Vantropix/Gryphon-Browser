@@ -33,6 +33,26 @@ bool ComponentValue::is_function(StringView name) const
     return is_function() && function().name.equals_ignoring_ascii_case(name);
 }
 
+bool ComponentValue::is_delim(u32 delim) const
+{
+    switch (delim) {
+    // All of these have their own separate token types, and so passing them to is_delim() is incorrect and will never match.
+    case ':':
+    case ';':
+    case ',':
+    case '[':
+    case ']':
+    case '{':
+    case '}':
+    case '(':
+    case ')':
+        dbgln("Calling is_delim() with a punctuation mark ({}) that has its own token type!", static_cast<char>(delim));
+        VERIFY_NOT_REACHED();
+    default:
+        return is(Token::Type::Delim) && token().delim() == delim;
+    }
+}
+
 bool ComponentValue::is_ident(StringView ident) const
 {
     return is(Token::Type::Ident) && token().ident().equals_ignoring_ascii_case(ident);
@@ -83,6 +103,30 @@ bool ComponentValue::contains_guaranteed_invalid_value() const
         },
         [](GuaranteedInvalidValue const&) {
             return true;
+        });
+}
+
+bool ComponentValue::contains_attr_tainted_value() const
+{
+    if (m_attr_tainted)
+        return true;
+
+    return m_value.visit(
+        [](Token const&) {
+            return false;
+        },
+        [](SimpleBlock const& block) {
+            return block.value
+                .first_matching([](auto const& it) { return it.contains_attr_tainted_value(); })
+                .has_value();
+        },
+        [](Function const& function) {
+            return function.value
+                .first_matching([](auto const& it) { return it.contains_attr_tainted_value(); })
+                .has_value();
+        },
+        [](GuaranteedInvalidValue const&) {
+            return false;
         });
 }
 

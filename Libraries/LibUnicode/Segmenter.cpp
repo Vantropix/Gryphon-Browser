@@ -21,6 +21,8 @@ SegmenterGranularity segmenter_granularity_from_string(StringView segmenter_gran
 {
     if (segmenter_granularity == "grapheme"sv)
         return SegmenterGranularity::Grapheme;
+    if (segmenter_granularity == "line"sv)
+        return SegmenterGranularity::Line;
     if (segmenter_granularity == "sentence"sv)
         return SegmenterGranularity::Sentence;
     if (segmenter_granularity == "word"sv)
@@ -33,6 +35,8 @@ StringView segmenter_granularity_to_string(SegmenterGranularity segmenter_granul
     switch (segmenter_granularity) {
     case SegmenterGranularity::Grapheme:
         return "grapheme"sv;
+    case SegmenterGranularity::Line:
+        return "line"sv;
     case SegmenterGranularity::Sentence:
         return "sentence"sv;
     case SegmenterGranularity::Word:
@@ -40,6 +44,92 @@ StringView segmenter_granularity_to_string(SegmenterGranularity segmenter_granul
     }
     VERIFY_NOT_REACHED();
 }
+
+// Fast path segmenter for ASCII text where every character is its own grapheme.
+// This avoids all ICU overhead for the common case of ASCII-only text.
+class AsciiGraphemeSegmenter : public Segmenter {
+public:
+    explicit AsciiGraphemeSegmenter(size_t length)
+        : Segmenter(SegmenterGranularity::Grapheme)
+        , m_length(length)
+    {
+    }
+
+    virtual ~AsciiGraphemeSegmenter() override = default;
+
+    virtual NonnullOwnPtr<Segmenter> clone() const override
+    {
+        return make<AsciiGraphemeSegmenter>(m_length);
+    }
+
+    virtual void set_segmented_text(String text) override
+    {
+        m_length = text.byte_count();
+    }
+
+    virtual void set_segmented_text(Utf16View const& text) override
+    {
+        m_length = text.length_in_code_units();
+    }
+
+    virtual size_t current_boundary() override
+    {
+        return m_current;
+    }
+
+    virtual Optional<size_t> previous_boundary(size_t index, Inclusive inclusive) override
+    {
+        if (inclusive == Inclusive::Yes && index <= m_length)
+            return index;
+        if (index == 0)
+            return {};
+        return index - 1;
+    }
+
+    virtual Optional<size_t> next_boundary(size_t index, Inclusive inclusive) override
+    {
+        if (inclusive == Inclusive::Yes && index <= m_length)
+            return index;
+        if (index >= m_length)
+            return {};
+        return index + 1;
+    }
+
+    virtual void for_each_boundary(String text, SegmentationCallback callback) override
+    {
+        set_segmented_text(move(text));
+        for_each_boundary_impl(callback);
+    }
+
+    virtual void for_each_boundary(Utf16View const& text, SegmentationCallback callback) override
+    {
+        set_segmented_text(text);
+        for_each_boundary_impl(callback);
+    }
+
+    virtual void for_each_boundary(Utf32View const& text, SegmentationCallback callback) override
+    {
+        m_length = text.length();
+        for_each_boundary_impl(callback);
+    }
+
+    virtual bool is_current_boundary_word_like() const override
+    {
+        return false;
+    }
+
+private:
+    void for_each_boundary_impl(SegmentationCallback& callback)
+    {
+        for (size_t i = 0; i <= m_length; ++i) {
+            if (callback(i) == IterationDecision::Break)
+                return;
+        }
+    }
+
+    size_t m_length { 0 };
+    size_t m_current { 0 };
+};
 
 class SegmenterImpl : public Segmenter {
 public:
@@ -65,10 +155,10 @@ public:
 
         UText utext = UTEXT_INITIALIZER;
         utext_openUTF8(&utext, view.characters_without_null_termination(), static_cast<i64>(view.length()), &status);
-        VERIFY(icu_success(status));
+        verify_icu_success(status);
 
         m_segmenter->setText(&utext, status);
-        VERIFY(icu_success(status));
+        verify_icu_success(status);
 
         utext_close(&utext);
     }
@@ -234,6 +324,8 @@ NonnullOwnPtr<Segmenter> Segmenter::create(StringView locale, SegmenterGranulari
         switch (segmenter_granularity) {
         case SegmenterGranularity::Grapheme:
             return icu::BreakIterator::createCharacterInstance(locale_data->locale(), status);
+        case SegmenterGranularity::Line:
+            return icu::BreakIterator::createLineInstance(locale_data->locale(), status);
         case SegmenterGranularity::Sentence:
             return icu::BreakIterator::createSentenceInstance(locale_data->locale(), status);
         case SegmenterGranularity::Word:
@@ -242,9 +334,14 @@ NonnullOwnPtr<Segmenter> Segmenter::create(StringView locale, SegmenterGranulari
         VERIFY_NOT_REACHED();
     }());
 
-    VERIFY(icu_success(status));
+    verify_icu_success(status);
 
     return make<SegmenterImpl>(segmenter.release_nonnull(), segmenter_granularity);
+}
+
+NonnullOwnPtr<Segmenter> Segmenter::create_for_ascii_grapheme(size_t length)
+{
+    return make<AsciiGraphemeSegmenter>(length);
 }
 
 bool Segmenter::should_continue_beyond_word(Utf16View const& word)

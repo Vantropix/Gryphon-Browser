@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/ByteString.h>
+#include <AK/Vector.h>
 #include <LibIDL/ExposedTo.h>
 
 static ByteString s_error_string;
@@ -40,8 +42,6 @@ ErrorOr<ExposedTo> parse_exposure_set(StringView interface_name, StringView expo
             return ExposedTo::PaintWorklet;
         if (string == "Worklet"sv)
             return ExposedTo::Worklet;
-        if (string == "ShadowRealm"sv)
-            return ExposedTo::ShadowRealm;
         return {};
     };
     if (auto parsed_exposed = exposed_from_string(exposed_trimmed); parsed_exposed.has_value())

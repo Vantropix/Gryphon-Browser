@@ -37,13 +37,15 @@ public:
 
     bool is_token() const { return m_value.has<Token>(); }
     bool is(Token::Type type) const { return is_token() && token().is(type); }
-    bool is_delim(u32 delim) const { return is(Token::Type::Delim) && token().delim() == delim; }
+    bool is_delim(u32 delim) const;
     bool is_ident(StringView ident) const;
     Token const& token() const { return m_value.get<Token>(); }
     operator Token() const { return m_value.get<Token>(); }
 
     bool is_guaranteed_invalid() const { return m_value.has<GuaranteedInvalidValue>(); }
     bool contains_guaranteed_invalid_value() const;
+    bool contains_attr_tainted_value() const;
+    void set_attr_tainted() { m_attr_tainted = true; }
 
     String to_string() const;
     String to_debug_string() const;
@@ -53,6 +55,7 @@ public:
 
 private:
     Variant<Token, Function, SimpleBlock, GuaranteedInvalidValue> m_value;
+    bool m_attr_tainted { false };
 };
 
 }

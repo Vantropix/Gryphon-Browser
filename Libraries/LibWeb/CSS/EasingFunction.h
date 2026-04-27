@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
@@ -30,19 +29,11 @@ struct CubicBezierEasingFunction {
     double y2;
     String stringified;
 
-    struct CachedSample {
-        double x;
-        double y;
-        double t;
-    };
-
-    mutable Vector<CachedSample> m_cached_x_samples {};
-
     double evaluate_at(double input_progress, bool before_flag) const;
 };
 
 struct StepsEasingFunction {
-    i64 interval_count;
+    i32 interval_count;
     StepPosition position;
     String stringified;
 

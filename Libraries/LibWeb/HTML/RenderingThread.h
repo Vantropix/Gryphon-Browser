@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2025-2026, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -7,8 +7,9 @@
 #pragma once
 
 #include <AK/Noncopyable.h>
+#include <AK/NonnullRefPtr.h>
 #include <AK/Queue.h>
-#include <LibCore/Promise.h>
+#include <AK/Variant.h>
 #include <LibThreading/ConditionVariable.h>
 #include <LibThreading/Forward.h>
 #include <LibThreading/Mutex.h>
@@ -21,37 +22,35 @@ class RenderingThread {
     AK_MAKE_NONCOPYABLE(RenderingThread);
     AK_MAKE_NONMOVABLE(RenderingThread);
 
+    class ThreadData;
+
 public:
-    RenderingThread();
+    using PresentationCallback = Function<void(Gfx::IntRect const&, i32)>;
+    struct PresentToUI {
+    };
+    struct PublishToExternalContent {
+        NonnullRefPtr<Painting::ExternalContentSource> source;
+    };
+    using PresentationMode = Variant<PresentToUI, PublishToExternalContent>;
+
+    explicit RenderingThread(PresentationCallback);
     ~RenderingThread();
 
     void start(DisplayListPlayerType);
     void set_skia_player(OwnPtr<Painting::DisplayListPlayerSkia>&& player);
-    void enqueue_rendering_task(NonnullRefPtr<Painting::DisplayList>, Painting::ScrollStateSnapshotByDisplayList&&, NonnullRefPtr<Gfx::PaintingSurface>, Function<void()>&& callback);
+    void set_presentation_mode(PresentationMode);
+
+    void update_display_list(NonnullRefPtr<Painting::DisplayList>, Painting::ScrollStateSnapshot&&);
+    void update_backing_stores(RefPtr<Gfx::PaintingSurface> front, RefPtr<Gfx::PaintingSurface> back, i32 front_id, i32 back_id);
+    u64 present_frame(Gfx::IntRect);
+    void wait_for_frame(u64 frame_id);
+    void request_screenshot(NonnullRefPtr<Gfx::PaintingSurface>, Function<void()>&& callback);
+
+    void ready_to_paint();
 
 private:
-    void rendering_thread_loop();
-
-    Core::EventLoop& m_main_thread_event_loop;
-    DisplayListPlayerType m_display_list_player_type;
-
-    OwnPtr<Painting::DisplayListPlayerSkia> m_skia_player;
-
+    NonnullRefPtr<ThreadData> m_thread_data;
     RefPtr<Threading::Thread> m_thread;
-    Atomic<bool> m_exit { false };
-    NonnullRefPtr<Core::Promise<NonnullRefPtr<Core::EventReceiver>>> m_main_thread_exit_promise;
-
-    struct Task {
-        NonnullRefPtr<Painting::DisplayList> display_list;
-        Painting::ScrollStateSnapshotByDisplayList scroll_state_snapshot_by_display_list;
-        NonnullRefPtr<Gfx::PaintingSurface> painting_surface;
-        Function<void()> callback;
-    };
-    // NOTE: Queue will only contain multiple items in case tasks were scheduled by screenshot requests.
-    //       Otherwise, it will contain only one item at a time.
-    Queue<Task> m_rendering_tasks;
-    Threading::Mutex m_rendering_task_mutex;
-    Threading::ConditionVariable m_rendering_task_ready_wake_condition { m_rendering_task_mutex };
 };
 
 }

@@ -6,32 +6,29 @@
 
 #pragma once
 
-#include <AK/IterationDecision.h>
 #include <AK/Optional.h>
 #include <LibWeb/ARIA/ARIAMixin.h>
-#include <LibWeb/ARIA/AttributeNames.h>
 #include <LibWeb/Animations/Animatable.h>
-#include <LibWeb/Bindings/ElementPrototype.h>
+#include <LibWeb/Bindings/Element.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ShadowRootPrototype.h>
-#include <LibWeb/CSS/CascadedProperties.h>
+#include <LibWeb/Bindings/ShadowRoot.h>
 #include <LibWeb/CSS/Selector.h>
-#include <LibWeb/CSS/StyleInvalidation.h>
 #include <LibWeb/CSS/StyleProperty.h>
-#include <LibWeb/CSS/StylePropertyMapReadOnly.h>
 #include <LibWeb/DOM/ChildNode.h>
 #include <LibWeb/DOM/NonDocumentTypeChildNode.h>
 #include <LibWeb/DOM/ParentNode.h>
 #include <LibWeb/DOM/PseudoElement.h>
 #include <LibWeb/DOM/QualifiedName.h>
+#include <LibWeb/DOM/RequestFullscreenError.h>
 #include <LibWeb/DOM/Slottable.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/AttributeNames.h>
 #include <LibWeb/HTML/EventLoop/Task.h>
-#include <LibWeb/HTML/LazyLoadingElement.h>
+#include <LibWeb/HTML/Parser/ParserScriptingMode.h>
 #include <LibWeb/HTML/ScrollOptions.h>
 #include <LibWeb/HTML/TagNames.h>
-#include <LibWeb/IntersectionObserver/IntersectionObserver.h>
+#include <LibWeb/HTML/TokenizedFeatures.h>
+#include <LibWeb/HTML/UserNavigationInvolvement.h>
 #include <LibWeb/TrustedTypes/TrustedHTML.h>
 #include <LibWeb/TrustedTypes/TrustedScript.h>
 #include <LibWeb/TrustedTypes/TrustedScriptURL.h>
@@ -46,6 +43,7 @@ struct ShadowRootInit {
     Bindings::SlotAssignmentMode slot_assignment { Bindings::SlotAssignmentMode::Named };
     bool clonable = false;
     bool serializable = false;
+    Optional<GC::Ptr<HTML::CustomElementRegistry>> custom_element_registry {};
 };
 
 struct GetHTMLOptions {
@@ -116,11 +114,14 @@ class WEB_API Element
     , public ARIA::ARIAMixin
     , public Animations::Animatable {
     WEB_PLATFORM_OBJECT(Element, ParentNode);
+    GC_DECLARE_ALLOCATOR(Element);
 
 public:
     virtual ~Element() override;
 
     virtual bool is_dom_element() const final { return true; }
+
+    virtual Node& slottable_as_node() override { return *this; }
 
     FlyString const& qualified_name() const { return m_qualified_name.as_string(); }
     FlyString const& html_uppercased_qualified_name() const;
@@ -151,6 +152,13 @@ public:
     Optional<String> get_attribute(FlyString const& name) const;
     Optional<String> get_attribute_ns(Optional<FlyString> const& namespace_, FlyString const& name) const;
     String get_attribute_value(FlyString const& local_name, Optional<FlyString> const& namespace_ = {}) const;
+
+    String get_an_elements_target(Optional<String> target = {}) const;
+    HTML::TokenizedFeature::NoOpener get_an_elements_noopener(URL::URL const& url, StringView target) const;
+
+    bool cannot_navigate() const;
+
+    void follow_the_hyperlink(Optional<String> hyperlink_suffix, HTML::UserNavigationInvolvement = HTML::UserNavigationInvolvement::None);
 
     Optional<String> lang() const;
     void invalidate_lang_value();
@@ -188,7 +196,7 @@ public:
     ReadonlySpan<FlyString> part_names() const { return m_parts; }
 
     WebIDL::ExceptionOr<GC::Ref<ShadowRoot>> attach_shadow(ShadowRootInit init);
-    WebIDL::ExceptionOr<void> attach_a_shadow_root(Bindings::ShadowRootMode mode, bool clonable, bool serializable, bool delegates_focus, Bindings::SlotAssignmentMode slot_assignment);
+    WebIDL::ExceptionOr<void> attach_a_shadow_root(Bindings::ShadowRootMode mode, bool clonable, bool serializable, bool delegates_focus, Bindings::SlotAssignmentMode slot_assignment, GC::Ptr<HTML::CustomElementRegistry> registry);
     GC::Ptr<ShadowRoot> shadow_root_for_bindings() const;
 
     WebIDL::ExceptionOr<bool> matches(StringView selectors) const;
@@ -224,6 +232,9 @@ public:
     GC::Ptr<Layout::NodeWithStyle> layout_node();
     GC::Ptr<Layout::NodeWithStyle const> layout_node() const;
 
+    GC::Ptr<Layout::NodeWithStyle> unsafe_layout_node();
+    GC::Ptr<Layout::NodeWithStyle const> unsafe_layout_node() const;
+
     GC::Ptr<CSS::ComputedProperties> computed_properties(Optional<CSS::PseudoElement> = {});
     GC::Ptr<CSS::ComputedProperties const> computed_properties(Optional<CSS::PseudoElement> = {}) const;
     void set_computed_properties(Optional<CSS::PseudoElement>, GC::Ptr<CSS::ComputedProperties>);
@@ -243,7 +254,7 @@ public:
     CSS::StyleSheetList& document_or_shadow_root_style_sheets();
     ElementByIdMap& document_or_shadow_root_element_by_id_map();
 
-    WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> parse_fragment(StringView markup);
+    WebIDL::ExceptionOr<GC::Ref<DOM::DocumentFragment>> parse_fragment(StringView markup, HTML::ParserScriptingMode = HTML::ParserScriptingMode::Inert);
 
     [[nodiscard]] GC::Ptr<Element const> element_to_inherit_style_from(Optional<CSS::PseudoElement>) const;
 
@@ -256,11 +267,33 @@ public:
 
     WebIDL::ExceptionOr<void> insert_adjacent_html(String const& position, TrustedTypes::TrustedHTMLOrString const&);
 
+    enum class FullscreenRequester {
+        Bindings,
+        WebDriver,
+    };
+    GC::Ref<WebIDL::Promise> request_fullscreen(FullscreenRequester = FullscreenRequester::Bindings);
+
+    RequestFullscreenError is_element_allowed_to_enter_fullscreen(FullscreenRequester) const;
+    bool is_element_ready_for_fullscreen() const;
+
+    void set_fullscreen_flag(bool is_fullscreen) { m_fullscreen_flag = is_fullscreen; }
+    bool is_fullscreen_element() const { return m_fullscreen_flag; }
+
+    GC::Ptr<WebIDL::CallbackType> onfullscreenchange();
+    void set_onfullscreenchange(GC::Ptr<WebIDL::CallbackType>);
+
+    GC::Ptr<WebIDL::CallbackType> onfullscreenerror();
+    void set_onfullscreenerror(GC::Ptr<WebIDL::CallbackType>);
+
     WebIDL::ExceptionOr<TrustedTypes::TrustedHTMLOrString> outer_html() const;
     WebIDL::ExceptionOr<void> set_outer_html(TrustedTypes::TrustedHTMLOrString const&);
 
     bool is_focused() const;
-    bool is_active() const;
+    bool is_the_active_element() const;
+
+    bool is_being_activated() const;
+    virtual void set_being_activated(bool);
+
     bool is_target() const;
     bool is_document_element() const;
 
@@ -269,11 +302,9 @@ public:
     GC::Ptr<ShadowRoot const> shadow_root() const { return m_shadow_root; }
     void set_shadow_root(GC::Ptr<ShadowRoot>);
 
-    void set_custom_properties(Optional<CSS::PseudoElement>, OrderedHashMap<FlyString, CSS::StyleProperty> custom_properties);
-    [[nodiscard]] OrderedHashMap<FlyString, CSS::StyleProperty> const& custom_properties(Optional<CSS::PseudoElement>) const;
+    void set_custom_property_data(Optional<CSS::PseudoElement>, RefPtr<CSS::CustomPropertyData const>);
+    [[nodiscard]] RefPtr<CSS::CustomPropertyData const> custom_property_data(Optional<CSS::PseudoElement>) const;
 
-    // FIXME: None of these flags ever get unset should this element's style change so that it no longer relies on these
-    //        things - doing so would potentially improve performance by avoiding unnecessary style invalidations.
     bool style_uses_attr_css_function() const { return m_style_uses_attr_css_function; }
     void set_style_uses_attr_css_function() { m_style_uses_attr_css_function = true; }
     bool style_uses_var_css_function() const { return m_style_uses_var_css_function; }
@@ -286,6 +317,10 @@ public:
 
         m_style_uses_tree_counting_function = true;
     }
+    bool style_uses_if_css_function() const { return m_style_uses_if_css_function; }
+    void set_style_uses_if_css_function() { m_style_uses_if_css_function = true; }
+    bool style_uses_inherit_css_function() const { return m_style_uses_inherit_css_function; }
+    void set_style_uses_inherit_css_function() { m_style_uses_inherit_css_function = true; }
 
     bool child_style_uses_tree_counting_function() const { return m_child_style_uses_tree_counting_function; }
     void set_child_style_uses_tree_counting_function() { m_child_style_uses_tree_counting_function = true; }
@@ -320,13 +355,19 @@ public:
     bool has_pseudo_element(CSS::PseudoElement) const;
     bool has_pseudo_elements() const;
     void clear_pseudo_element_nodes(Badge<Layout::TreeBuilder>);
+    void clear_pseudo_element_layout_nodes(Badge<Document>);
 
     void serialize_children_as_json(JsonObjectSerializer<StringBuilder>&) const;
 
     i32 tab_index() const;
     void set_tab_index(i32 tab_index);
 
-    bool is_potentially_scrollable() const;
+    enum class TreatOverflowClipOnBodyParentAsOverflowHidden {
+        No,
+        Yes,
+    };
+    bool is_potentially_scrollable(TreatOverflowClipOnBodyParentAsOverflowHidden) const;
+    bool is_scroll_container() const;
 
     double scroll_top() const;
     double scroll_left() const;
@@ -394,9 +435,8 @@ public:
 
     bool check_visibility(Optional<CheckVisibilityOptions>);
 
-    void register_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, IntersectionObserver::IntersectionObserverRegistration);
+    void register_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, GC::Ref<IntersectionObserver::IntersectionObserver>);
     void unregister_intersection_observer(Badge<IntersectionObserver::IntersectionObserver>, GC::Ref<IntersectionObserver::IntersectionObserver>);
-    IntersectionObserver::IntersectionObserverRegistration& get_intersection_observer_registration(Badge<DOM::Document>, IntersectionObserver::IntersectionObserver const&);
 
     CSSPixelPoint scroll_offset(Optional<CSS::PseudoElement> type) const;
     void set_scroll_offset(Optional<CSS::PseudoElement> type, CSSPixelPoint offset);
@@ -469,6 +509,19 @@ public:
 
     bool affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator() const { return m_affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator; }
     void set_affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator(bool value) { m_affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator = value; }
+    // Set on any element reached by stepping through a + or ~ combinator while
+    // matching a :has() argument. Lets generic invalidation defer ancestor
+    // sibling scans until it reaches the sibling subtree root. Write-once,
+    // intentionally never cleared.
+    bool in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator() const { return m_in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator; }
+    void set_in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator(bool value) { m_in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator = value; }
+
+    // Set on any element that was traversed during matching of a :has() argument
+    // selector (i.e. the descendant/child/sibling walk inside :has()). Lets the
+    // invalidation walker terminate once it reaches an element whose state cannot
+    // affect any :has() anchor. Write-once, intentionally never cleared.
+    bool in_has_scope() const { return m_in_has_scope; }
+    void set_in_has_scope(bool value) { m_in_has_scope = value; }
 
     bool affected_by_direct_sibling_combinator() const { return m_affected_by_direct_sibling_combinator; }
     void set_affected_by_direct_sibling_combinator(bool value) { m_affected_by_direct_sibling_combinator = value; }
@@ -476,18 +529,29 @@ public:
     bool affected_by_indirect_sibling_combinator() const { return m_affected_by_indirect_sibling_combinator; }
     void set_affected_by_indirect_sibling_combinator(bool value) { m_affected_by_indirect_sibling_combinator = value; }
 
-    bool affected_by_sibling_position_or_count_pseudo_class() const { return m_affected_by_sibling_position_or_count_pseudo_class; }
-    void set_affected_by_sibling_position_or_count_pseudo_class(bool value) { m_affected_by_sibling_position_or_count_pseudo_class = value; }
+    bool affected_by_first_child_pseudo_class() const { return m_affected_by_first_child_pseudo_class; }
+    void set_affected_by_first_child_pseudo_class(bool value) { m_affected_by_first_child_pseudo_class = value; }
 
-    bool affected_by_nth_child_pseudo_class() const { return m_affected_by_nth_child_pseudo_class; }
-    void set_affected_by_nth_child_pseudo_class(bool value) { m_affected_by_nth_child_pseudo_class = value; }
+    bool affected_by_last_child_pseudo_class() const { return m_affected_by_last_child_pseudo_class; }
+    void set_affected_by_last_child_pseudo_class(bool value);
+
+    bool affected_by_forward_positional_pseudo_class() const { return m_affected_by_forward_positional_pseudo_class; }
+    void set_affected_by_forward_positional_pseudo_class(bool value) { m_affected_by_forward_positional_pseudo_class = value; }
+
+    bool affected_by_backward_positional_pseudo_class() const { return m_affected_by_backward_positional_pseudo_class; }
+    void set_affected_by_backward_positional_pseudo_class(bool value);
 
     size_t sibling_invalidation_distance() const { return m_sibling_invalidation_distance; }
     void set_sibling_invalidation_distance(size_t value) { m_sibling_invalidation_distance = value; }
 
-    bool style_affected_by_structural_changes() const
+    bool affected_by_forward_structural_changes() const
     {
-        return affected_by_direct_sibling_combinator() || affected_by_indirect_sibling_combinator() || affected_by_sibling_position_or_count_pseudo_class() || affected_by_nth_child_pseudo_class();
+        return affected_by_direct_sibling_combinator() || affected_by_indirect_sibling_combinator() || affected_by_first_child_pseudo_class() || affected_by_forward_positional_pseudo_class();
+    }
+
+    bool affected_by_backward_structural_changes() const
+    {
+        return affected_by_last_child_pseudo_class() || affected_by_backward_positional_pseudo_class();
     }
 
     i32 number_of_owned_list_items() const;
@@ -531,19 +595,22 @@ public:
 
     GC::Ref<WebIDL::Promise> request_pointer_lock(Optional<PointerLockOptions>);
 
+    GC::Ptr<HTML::CustomElementRegistry> custom_element_registry() const { return m_custom_element_registry; }
+    void set_custom_element_registry(GC::Ptr<HTML::CustomElementRegistry> registry) { m_custom_element_registry = registry; }
+
 protected:
     Element(Document&, DOM::QualifiedName);
     virtual void initialize(JS::Realm&) override;
 
     virtual void inserted() override;
-    virtual void removed_from(Node* old_parent, Node& old_root) override;
-    virtual void moved_from(GC::Ptr<Node> old_parent) override;
+    virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
+    virtual void moved_from(IsSubtreeRoot, GC::Ptr<Node> old_ancestor) override;
 
-    virtual void children_changed(ChildrenChangedMetadata const*) override;
+    virtual void children_changed(ChildrenChangedMetadata const&) override;
     virtual i32 default_tab_index_value() const;
 
     // https://dom.spec.whatwg.org/#concept-element-attributes-change-ext
-    virtual void attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_);
+    MUST_UPCALL virtual void attribute_changed(FlyString const& local_name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_);
 
     virtual void computed_properties_changed() { }
 
@@ -552,6 +619,7 @@ protected:
     virtual bool id_reference_exists(String const&) const override;
 
     CustomElementState custom_element_state() const { return m_custom_element_state; }
+    GC::Ptr<HTML::CustomElementDefinition> custom_element_definition() const { return m_custom_element_definition; }
 
     void play_or_cancel_animations_after_display_property_change();
 
@@ -559,6 +627,8 @@ private:
     FlyString make_html_uppercased_qualified_name() const;
 
     void invalidate_style_after_attribute_change(FlyString const& attribute_name, Optional<String> const& old_value, Optional<String> const& new_value);
+
+    void exit_fullscreen_on_element_removal();
 
     WebIDL::ExceptionOr<GC::Ptr<Node>> insert_adjacent(StringView where, GC::Ref<Node> node);
 
@@ -589,7 +659,7 @@ private:
 
     GC::Ptr<CSS::CascadedProperties> m_cascaded_properties;
     GC::Ptr<CSS::ComputedProperties> m_computed_properties;
-    OrderedHashMap<FlyString, CSS::StyleProperty> m_custom_properties;
+    RefPtr<CSS::CustomPropertyData const> m_custom_property_data;
 
     using PseudoElementData = HashMap<CSS::PseudoElement, GC::Ref<PseudoElement>>;
     mutable OwnPtr<PseudoElementData> m_pseudo_element_data;
@@ -609,6 +679,9 @@ private:
     // NOTE: See the structs at the top of this header.
     OwnPtr<CustomElementReactionQueue> m_custom_element_reaction_queue;
 
+    // https://dom.spec.whatwg.org/#element-custom-element-registry
+    GC::Ptr<HTML::CustomElementRegistry> m_custom_element_registry;
+
     // https://dom.spec.whatwg.org/#concept-element-custom-element-definition
     GC::Ptr<HTML::CustomElementDefinition> m_custom_element_definition;
 
@@ -620,7 +693,7 @@ private:
 
     // https://www.w3.org/TR/intersection-observer/#dom-element-registeredintersectionobservers-slot
     // Element objects have an internal [[RegisteredIntersectionObservers]] slot, which is initialized to an empty list.
-    OwnPtr<Vector<IntersectionObserver::IntersectionObserverRegistration>> m_registered_intersection_observers;
+    OwnPtr<Vector<GC::Ref<IntersectionObserver::IntersectionObserver>>> m_registered_intersection_observers;
 
     // https://drafts.css-houdini.org/css-typed-om-1/#dom-element-computedstylemapcache-slot
     // Every Element has a [[computedStyleMapCache]] internal slot, initially set to null, which caches the result of
@@ -629,19 +702,27 @@ private:
 
     CSSPixelPoint m_scroll_offset;
 
+    bool m_is_being_activated : 1 { false };
     bool m_in_top_layer : 1 { false };
     bool m_rendered_in_top_layer : 1 { false };
     bool m_style_uses_attr_css_function : 1 { false };
     bool m_style_uses_var_css_function : 1 { false };
     bool m_style_uses_tree_counting_function : 1 { false };
+    bool m_style_uses_if_css_function : 1 { false };
+    bool m_style_uses_inherit_css_function : 1 { false };
     bool m_child_style_uses_tree_counting_function : 1 { false };
     bool m_affected_by_has_pseudo_class_in_subject_position : 1 { false };
     bool m_affected_by_has_pseudo_class_in_non_subject_position : 1 { false };
     bool m_affected_by_direct_sibling_combinator : 1 { false };
     bool m_affected_by_indirect_sibling_combinator : 1 { false };
-    bool m_affected_by_sibling_position_or_count_pseudo_class : 1 { false };
-    bool m_affected_by_nth_child_pseudo_class : 1 { false };
+    bool m_affected_by_first_child_pseudo_class : 1 { false };
+    bool m_affected_by_last_child_pseudo_class : 1 { false };
+    bool m_affected_by_forward_positional_pseudo_class : 1 { false };
+    bool m_affected_by_backward_positional_pseudo_class : 1 { false };
     bool m_affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator : 1 { false };
+    bool m_in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator : 1 { false };
+    bool m_in_has_scope : 1 { false };
+    bool m_fullscreen_flag : 1 { false };
 
     size_t m_sibling_invalidation_distance { 0 };
 

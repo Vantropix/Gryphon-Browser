@@ -21,7 +21,7 @@ public:
 
     virtual ~Selection() override;
 
-    enum class Direction {
+    enum class Direction : u8 {
         Forwards,
         Backwards,
         Directionless,
@@ -56,6 +56,7 @@ public:
 
     // Non-standard convenience accessor for the selection's range.
     GC::Ptr<DOM::Range> range() const;
+    Optional<Utf16String> try_form_control_selected_text_for_stringifier() const;
 
     // Non-standard accessor for the selection's document.
     GC::Ref<DOM::Document> document() const;
@@ -64,6 +65,7 @@ public:
     GC::Ptr<DOM::Position> cursor_position() const;
 
     // Non-standard
+    void scroll_focus_into_view();
     void move_offset_to_next_character(bool collapse_selection);
     void move_offset_to_previous_character(bool collapse_selection);
     void move_offset_to_next_word(bool collapse_selection);

@@ -16,9 +16,8 @@
 
 namespace Web::WebGL {
 
-class WebGLRenderingContext final : public Bindings::PlatformObject
-    , public WebGLRenderingContextOverloads {
-    WEB_PLATFORM_OBJECT(WebGLRenderingContext, Bindings::PlatformObject);
+class WebGLRenderingContext final : public WebGLRenderingContextOverloads {
+    WEB_PLATFORM_OBJECT(WebGLRenderingContext, WebGLRenderingContextOverloads);
     GC_DECLARE_ALLOCATOR(WebGLRenderingContext);
 
 public:
@@ -26,16 +25,11 @@ public:
 
     virtual ~WebGLRenderingContext() override;
 
-    // FIXME: This is a hack required to visit context from WebGLObject.
-    //        It should be gone once WebGLRenderingContextBase inherits from PlatformObject.
-    GC::Cell const* gc_cell() const override { return this; }
-
     void present() override;
     void needs_to_present() override;
 
     GC::Ref<HTML::HTMLCanvasElement> canvas_for_binding() const;
 
-    bool is_context_lost() const;
     Optional<WebGLContextAttributes> get_context_attributes();
 
     RefPtr<Gfx::PaintingSurface> surface();
@@ -44,17 +38,8 @@ public:
     void set_size(Gfx::IntSize const&);
     void reset_to_default_state();
 
-    Optional<Vector<String>> get_supported_extensions();
-    JS::Object* get_extension(String const& name);
-
     WebIDL::Long drawing_buffer_width() const;
     WebIDL::Long drawing_buffer_height() const;
-
-    virtual bool ext_texture_filter_anisotropic_extension_enabled() const override;
-    virtual bool angle_instanced_arrays_extension_enabled() const override;
-    virtual bool oes_standard_derivatives_extension_enabled() const override;
-    virtual bool webgl_draw_buffers_extension_enabled() const override;
-    virtual ReadonlySpan<WebIDL::UnsignedLong> enabled_compressed_texture_formats() const override;
 
 private:
     virtual void initialize(JS::Realm&) override;
@@ -72,29 +57,6 @@ private:
     // https://www.khronos.org/registry/webgl/specs/latest/1.0/#actual-context-parameters
     // Each WebGLRenderingContext has actual context parameters, set each time the drawing buffer is created, in a WebGLContextAttributes object.
     WebGLContextAttributes m_actual_context_parameters {};
-
-    // https://www.khronos.org/registry/webgl/specs/latest/1.0/#webgl-context-lost-flag
-    // Each WebGLRenderingContext has a webgl context lost flag, which is initially unset.
-    bool m_context_lost { false };
-
-    // WebGL presents its drawing buffer to the HTML page compositor immediately before a compositing operation, but only if at least one of the following has occurred since the previous compositing operation:
-    // - Context creation
-    // - Canvas resize
-    // - clear, drawArrays, or drawElements has been called while the drawing buffer is the currently bound framebuffer
-    bool m_should_present { true };
-
-    Vector<WebIDL::UnsignedLong> m_enabled_compressed_texture_formats;
-
-    // Extensions
-    // "Multiple calls to getExtension with the same extension string, taking into account case-insensitive comparison, must return the same object as long as the extension is enabled."
-    GC::Ptr<Extensions::ANGLEInstancedArrays> m_angle_instanced_arrays_extension;
-    GC::Ptr<Extensions::EXTBlendMinMax> m_ext_blend_min_max_extension;
-    GC::Ptr<Extensions::EXTTextureFilterAnisotropic> m_ext_texture_filter_anisotropic;
-    GC::Ptr<Extensions::OESStandardDerivatives> m_oes_standard_derivatives_object_extension;
-    GC::Ptr<Extensions::OESVertexArrayObject> m_oes_vertex_array_object_extension;
-    GC::Ptr<Extensions::WebGLCompressedTextureS3tc> m_webgl_compressed_texture_s3tc_extension;
-    GC::Ptr<Extensions::WebGLCompressedTextureS3tcSrgb> m_webgl_compressed_texture_s3tc_srgb_extension;
-    GC::Ptr<Extensions::WebGLDrawBuffers> m_webgl_draw_buffers_extension;
 };
 
 void fire_webgl_context_event(HTML::HTMLCanvasElement& canvas_element, FlyString const& type);

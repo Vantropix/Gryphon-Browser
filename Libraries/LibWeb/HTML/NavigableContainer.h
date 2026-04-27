@@ -13,9 +13,11 @@
 namespace Web::HTML {
 
 class WEB_API NavigableContainer : public HTMLElement {
-    WEB_PLATFORM_OBJECT(NavigableContainer, HTMLElement);
+    WEB_NON_IDL_PLATFORM_OBJECT(NavigableContainer, HTMLElement);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     static GC::Ptr<NavigableContainer> navigable_container_with_content_navigable(GC::Ref<Navigable> navigable);
 
     virtual ~NavigableContainer() override;
@@ -52,17 +54,20 @@ protected:
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#navigate-an-iframe-or-frame
     void navigate_an_iframe_or_frame(URL::URL url, ReferrerPolicy::ReferrerPolicy referrer_policy, Optional<String> srcdoc_string = {}, InitialInsertion = InitialInsertion::No);
 
-    WebIDL::ExceptionOr<void> create_new_child_navigable(GC::Ptr<GC::Function<void()>> after_session_history_update = {});
+    void create_new_child_navigable();
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#content-navigable
     GC::Ptr<Navigable> m_content_navigable { nullptr };
 
-    void set_potentially_delays_the_load_event(bool value) { m_potentially_delays_the_load_event = value; }
+    void set_potentially_delays_the_load_event(bool value);
 
     void set_content_navigable_has_session_history_entry_and_ready_for_navigation();
 
 private:
     virtual bool is_navigable_container() const override { return true; }
+
+    virtual void finalize() override;
+
     bool m_potentially_delays_the_load_event { true };
 };
 

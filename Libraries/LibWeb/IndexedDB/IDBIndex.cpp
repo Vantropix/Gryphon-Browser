@@ -5,7 +5,7 @@
  */
 
 #include <LibJS/Runtime/Array.h>
-#include <LibWeb/Bindings/IDBIndexPrototype.h>
+#include <LibWeb/Bindings/IDBIndex.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/IndexedDB/IDBCursor.h>
@@ -28,7 +28,9 @@ IDBIndex::IDBIndex(JS::Realm& realm, GC::Ref<Index> index, GC::Ref<IDBObjectStor
 
 GC::Ref<IDBIndex> IDBIndex::create(JS::Realm& realm, GC::Ref<Index> index, GC::Ref<IDBObjectStore> object_store)
 {
-    return realm.create<IDBIndex>(realm, index, object_store);
+    auto handle = realm.create<IDBIndex>(realm, index, object_store);
+    object_store->transaction()->register_index_handle({}, handle);
+    return handle;
 }
 
 void IDBIndex::initialize(JS::Realm& realm)
@@ -66,7 +68,9 @@ WebIDL::ExceptionOr<void> IDBIndex::set_name(String const& value)
     if (!transaction->is_active())
         return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while updating index name"_utf16);
 
-    // FIXME: 6. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 6. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (index->is_deleted() || index->object_store()->is_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Index or its object store has been deleted"_utf16);
 
     // 7. If index’s name is equal to name, terminate these steps.
     if (index->name() == name)
@@ -75,6 +79,9 @@ WebIDL::ExceptionOr<void> IDBIndex::set_name(String const& value)
     // 8. If an index named name already exists in index’s object store, throw a "ConstraintError" DOMException.
     if (index->object_store()->index_set().contains(name))
         return WebIDL::ConstraintError::create(realm, "An index with the given name already exists"_utf16);
+
+    // AD-HOC: Log the rename for potential revert on abort.
+    m_object_store_handle->store()->mutation_log()->note_index_renamed(index, index->name());
 
     // 9. Set index’s name to name.
     index->set_name(name);
@@ -112,9 +119,11 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBIndex::open_cursor(JS::Value query, 
     auto transaction = this->transaction();
 
     // 2. Let index be this’s index.
-    [[maybe_unused]] auto index = this->index();
+    auto index = this->index();
 
-    // FIXME: 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (index->is_deleted() || index->object_store()->is_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Index or its object store has been deleted"_utf16);
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
@@ -152,7 +161,9 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBIndex::get(JS::Value query)
     // 2. Let index be this’s index.
     auto index = this->index();
 
-    // FIXME: 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (index->is_deleted() || index->object_store()->is_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Index or its object store has been deleted"_utf16);
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
@@ -183,7 +194,9 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBIndex::get_key(JS::Value query)
     // 2. Let index be this’s index.
     auto index = this->index();
 
-    // FIXME: 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (index->is_deleted() || index->object_store()->is_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Index or its object store has been deleted"_utf16);
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
@@ -230,7 +243,9 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBIndex::count(JS::Value query)
     // 2. Let index be this’s index.
     auto index = this->index();
 
-    // FIXME: 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (index->is_deleted() || index->object_store()->is_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Index or its object store has been deleted"_utf16);
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())
@@ -259,9 +274,11 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBIndex::open_key_cursor(JS::Value que
     auto transaction = this->transaction();
 
     // 2. Let index be this’s index.
-    [[maybe_unused]] auto index = this->index();
+    auto index = this->index();
 
-    // FIXME: 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 3. If index or index’s object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (index->is_deleted() || index->object_store()->is_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Index or its object store has been deleted"_utf16);
 
     // 4. If transaction’s state is not active, then throw a "TransactionInactiveError" DOMException.
     if (!transaction->is_active())

@@ -13,8 +13,9 @@
 #include <LibJS/Runtime/PropertyDescriptor.h>
 #include <LibJS/Runtime/PropertyKey.h>
 #include <LibURL/Parser.h>
-#include <LibWeb/Bindings/LocationPrototype.h>
+#include <LibWeb/Bindings/Location.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CrossOrigin/AbstractOperations.h>
 #include <LibWeb/HTML/Location.h>
 #include <LibWeb/HTML/Navigable.h>
@@ -38,6 +39,8 @@ void Location::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_default_properties);
+    for (auto& descriptor : m_cross_origin_property_descriptor_map)
+        descriptor.value.visit_edges(visitor);
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#the-location-interface
@@ -536,7 +539,8 @@ void Location::reload() const
     // FIXME: 3. If document's origin is not same origin-domain with the entry settings object's origin, then throw a "SecurityError" DOMException.
 
     // 4. Reload document's node navigable.
-    document->navigable()->reload();
+    if (auto navigable = document->navigable())
+        navigable->reload();
 }
 
 // https://html.spec.whatwg.org/multipage/history.html#dom-location-replace

@@ -6,6 +6,7 @@
  */
 
 #include <AK/Enumerate.h>
+#include <AK/StringView.h>
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/Date.h>
 #include <LibJS/Runtime/TypedArray.h>
@@ -13,16 +14,22 @@
 #include <LibTest/JavaScriptTestRunner.h>
 #include <LibUnicode/TimeZone.h>
 
-TEST_ROOT("Libraries/LibJS/Tests");
+TEST_ROOT("Tests/LibJS/Runtime");
 
 TESTJS_PROGRAM_FLAG(test262_parser_tests, "Run test262 parser tests", "test262-parser-tests", 0);
 
 TESTJS_GLOBAL_FUNCTION(can_parse_source, canParseSource)
 {
-    auto source = TRY(vm.argument(0).to_utf16_string(vm));
-    auto parser = JS::Parser(JS::Lexer(JS::SourceCode::create({}, source)));
-    (void)parser.parse_program();
-    return JS::Value(!parser.has_errors());
+    auto& realm = *vm.current_realm();
+    auto source = TRY(vm.argument(0).to_string(vm));
+    auto script = JS::Script::parse(source, realm);
+    return JS::Value(!script.is_error());
+}
+
+TESTJS_GLOBAL_FUNCTION(collect_garbage, gc)
+{
+    vm.heap().collect_garbage();
+    return JS::js_undefined();
 }
 
 // Based on $262.evalScript
@@ -36,7 +43,7 @@ TESTJS_GLOBAL_FUNCTION(evaluate_source, evaluateSource)
     if (script.is_error())
         return vm.throw_completion<JS::SyntaxError>(script.error().first().to_string());
 
-    return vm.bytecode_interpreter().run(script.value());
+    return vm.run(script.value());
 }
 
 TESTJS_GLOBAL_FUNCTION(run_queued_promise_jobs, runQueuedPromiseJobs)
@@ -72,7 +79,7 @@ TESTJS_GLOBAL_FUNCTION(mark_as_garbage, markAsGarbage)
     auto& variable_name = argument.as_string();
 
     // In native functions we don't have a lexical environment so get the outer via the execution stack.
-    auto outer_environment = vm.execution_context_stack().last_matching([&](auto& execution_context) {
+    auto outer_environment = vm.last_execution_context_matching([&](auto* execution_context) {
         return execution_context->lexical_environment != nullptr;
     });
     if (!outer_environment.has_value())
@@ -93,12 +100,11 @@ TESTJS_GLOBAL_FUNCTION(mark_as_garbage, markAsGarbage)
 
 TESTJS_GLOBAL_FUNCTION(detach_array_buffer, detachArrayBuffer)
 {
-    auto array_buffer = vm.argument(0);
-    if (!array_buffer.is_object() || !is<JS::ArrayBuffer>(array_buffer.as_object()))
+    auto array_buffer = vm.argument(0).as_if<JS::ArrayBuffer>();
+    if (!array_buffer)
         return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "ArrayBuffer");
 
-    auto& array_buffer_object = static_cast<JS::ArrayBuffer&>(array_buffer.as_object());
-    TRY(JS::detach_array_buffer(vm, array_buffer_object, vm.argument(1)));
+    TRY(JS::detach_array_buffer(vm, *array_buffer, vm.argument(1)));
     return JS::js_null();
 }
 
@@ -154,9 +160,9 @@ TESTJS_RUN_FILE_FUNCTION(ByteString const& test_file, JS::Realm& realm, JS::Exec
     else
         return Test::JS::RunFileHookResult::SkipFile;
 
-    auto program_type = path.basename().ends_with(".module.js"sv) ? JS::Program::Type::Module : JS::Program::Type::Script;
+    bool const is_module = path.basename().ends_with(".module.js"sv);
     bool parse_succeeded = false;
-    if (program_type == JS::Program::Type::Module)
+    if (is_module)
         parse_succeeded = !Test::JS::parse_module(test_file, realm).is_error();
     else
         parse_succeeded = !Test::JS::parse_script(test_file, realm).is_error();

@@ -9,10 +9,12 @@
 
 #include <AK/Concepts.h>
 #include <AK/HashMap.h>
+#include <AK/IPv4Address.h>
 #include <AK/StdLibExtras.h>
 #include <AK/Variant.h>
 #include <LibCore/Forward.h>
 #include <LibCore/SharedCircularQueue.h>
+#include <LibIPC/Attachment.h>
 #include <LibIPC/Concepts.h>
 #include <LibIPC/File.h>
 #include <LibIPC/Forward.h>
@@ -50,9 +52,9 @@ public:
         return {};
     }
 
-    ErrorOr<void> append_file_descriptor(int fd)
+    ErrorOr<void> append_attachment(Attachment attachment)
     {
-        TRY(m_buffer.append_file_descriptor(fd));
+        TRY(m_buffer.append_attachment(move(attachment)));
         return {};
     }
 
@@ -109,6 +111,12 @@ template<>
 ErrorOr<void> encode(Encoder&, UnixDateTime const&);
 
 template<>
+ErrorOr<void> encode(Encoder&, IPv4Address const&);
+
+template<>
+ErrorOr<void> encode(Encoder&, IPv6Address const&);
+
+template<>
 ErrorOr<void> encode(Encoder&, URL::URL const&);
 
 template<>
@@ -121,13 +129,13 @@ template<>
 ErrorOr<void> encode(Encoder&, File const&);
 
 template<>
+ErrorOr<void> encode(Encoder&, TransportHandle const&);
+
+template<>
 ErrorOr<void> encode(Encoder&, Empty const&);
 
 template<>
 ErrorOr<void> encode(Encoder&, Core::AnonymousBuffer const&);
-
-template<>
-ErrorOr<void> encode(Encoder&, Core::DateTime const&);
 
 template<>
 ErrorOr<void> encode(Encoder&, Core::ProxyData const&);

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/ChannelSplitterNodePrototype.h>
+#include <LibWeb/Bindings/ChannelSplitterNode.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/WebAudio/BaseAudioContext.h>
 #include <LibWeb/WebAudio/ChannelSplitterNode.h>
@@ -51,7 +51,7 @@ WebIDL::ExceptionOr<GC::Ref<ChannelSplitterNode>> ChannelSplitterNode::construct
 void ChannelSplitterNode::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(ChannelSplitterNode);
-    AudioNode::initialize(realm);
+    Base::initialize(realm);
 }
 
 WebIDL::ExceptionOr<void> ChannelSplitterNode::set_channel_count(WebIDL::UnsignedLong channel_count)

@@ -7,6 +7,7 @@
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
 #include <LibWeb/Page/InputEvent.h>
+#include <math.h>
 
 namespace Web {
 
@@ -17,7 +18,7 @@ KeyEvent KeyEvent::clone_without_browser_data() const
 
 MouseEvent MouseEvent::clone_without_browser_data() const
 {
-    return { type, position, screen_position, button, buttons, modifiers, wheel_delta_x, wheel_delta_y, nullptr };
+    return { type, position, screen_position, button, buttons, modifiers, wheel_delta_x, wheel_delta_y, click_count, nullptr };
 }
 
 DragEvent DragEvent::clone_without_browser_data() const
@@ -61,6 +62,7 @@ ErrorOr<void> IPC::encode(Encoder& encoder, Web::MouseEvent const& event)
     TRY(encoder.encode(event.modifiers));
     TRY(encoder.encode(event.wheel_delta_x));
     TRY(encoder.encode(event.wheel_delta_y));
+    TRY(encoder.encode(event.click_count));
     return {};
 }
 
@@ -75,8 +77,9 @@ ErrorOr<Web::MouseEvent> IPC::decode(Decoder& decoder)
     auto modifiers = TRY(decoder.decode<Web::UIEvents::KeyModifier>());
     auto wheel_delta_x = TRY(decoder.decode<int>());
     auto wheel_delta_y = TRY(decoder.decode<int>());
+    auto click_count = TRY(decoder.decode<int>());
 
-    return Web::MouseEvent { type, position, screen_position, button, buttons, modifiers, wheel_delta_x, wheel_delta_y, nullptr };
+    return Web::MouseEvent { type, position, screen_position, button, buttons, modifiers, wheel_delta_x, wheel_delta_y, click_count, nullptr };
 }
 
 template<>
@@ -119,5 +122,9 @@ WEB_API ErrorOr<Web::PinchEvent> IPC::decode(Decoder& decoder)
 {
     auto position = TRY(decoder.decode<Web::DevicePixelPoint>());
     auto scale_delta = TRY(decoder.decode<double>());
+
+    if (isnan(scale_delta) || isinf(scale_delta))
+        return Error::from_string_literal("IPC: Invalid scale_delta value");
+
     return Web::PinchEvent { position, scale_delta };
 }

@@ -24,9 +24,11 @@ public:
 
     Vector<String> const& schemes() const { return m_properties.schemes; }
     bool const& only() const { return m_properties.only; }
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(ColorSchemeStyleValue const& other) const { return m_properties == other.m_properties; }
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     ColorSchemeStyleValue(Vector<String> schemes, bool only)

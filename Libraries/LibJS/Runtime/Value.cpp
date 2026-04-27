@@ -11,7 +11,7 @@
 #include <AK/ByteString.h>
 #include <AK/CharacterTypes.h>
 #include <AK/StringBuilder.h>
-#include <AK/StringFloatingPointConversions.h>
+#include <AK/StringConversions.h>
 #include <AK/Utf16String.h>
 #include <AK/Utf8View.h>
 #include <LibCrypto/BigInt/SignedBigInteger.h>
@@ -72,7 +72,7 @@ static ALWAYS_INLINE bool both_bigint(Value const& lhs, Value const& rhs)
 
 // 6.1.6.1.20 Number::toString ( x ), https://tc39.es/ecma262/#sec-numeric-types-number-tostring
 // Implementation for radix = 10
-static void number_to_string_impl(StringBuilder& builder, double d, NumberToStringMode mode)
+void number_to_string(StringBuilder& builder, double d, NumberToStringMode mode)
 {
     auto convert_to_decimal_digits_array = [](auto x, auto& digits, auto& length) {
         for (; x; x /= 10)
@@ -104,14 +104,13 @@ static void number_to_string_impl(StringBuilder& builder, double d, NumberToStri
         return;
     }
 
-    // 5. Let n, k, and s be integers such that k ≥ 1, radix ^ (k - 1) ≤ s < radix ^ k,
-    // 𝔽(s × radix ^ (n - k)) is x, and k is as small as possible. Note that k is the number of
-    // digits in the representation of s using radix radix, that s is not divisible by radix, and
-    // that the least significant digit of s is not necessarily uniquely determined by these criteria.
+    // 5. Let n, k, and s be integers such that k ≥ 1, radix ^ (k - 1) ≤ s < radix ^ k, 𝔽(s × radix ^ (n - k)) is x, and
+    //    k is as small as possible. Note that k is the number of digits in the representation of s using radix radix,
+    //    that s is not divisible by radix, and that the least significant digit of s is not necessarily uniquely
+    //    determined by these criteria.
     //
-    // Note: guarantees provided by convert_floating_point_to_decimal_exponential_form satisfy
-    //       requirements of NOTE 2.
-    auto [sign, mantissa, exponent] = convert_floating_point_to_decimal_exponential_form(d);
+    // NB: guarantees provided by convert_to_decimal_exponential_form satisfy requirements of NOTE 2.
+    auto [sign, mantissa, exponent] = AK::convert_to_decimal_exponential_form(d);
     i32 k = 0;
     AK::Array<char, 20> mantissa_digits;
     convert_to_decimal_digits_array(mantissa, mantissa_digits, k);
@@ -207,21 +206,21 @@ static void number_to_string_impl(StringBuilder& builder, double d, NumberToStri
 String number_to_string(double d, NumberToStringMode mode)
 {
     StringBuilder builder;
-    number_to_string_impl(builder, d, mode);
+    number_to_string(builder, d, mode);
     return MUST(builder.to_string());
 }
 
 Utf16String number_to_utf16_string(double d, NumberToStringMode mode)
 {
     StringBuilder builder(StringBuilder::Mode::UTF16);
-    number_to_string_impl(builder, d, mode);
+    number_to_string(builder, d, mode);
     return builder.to_utf16_string();
 }
 
 ByteString number_to_byte_string(double d, NumberToStringMode mode)
 {
     StringBuilder builder;
-    number_to_string_impl(builder, d, mode);
+    number_to_string(builder, d, mode);
     return builder.to_byte_string();
 }
 
@@ -235,17 +234,16 @@ ThrowCompletionOr<bool> Value::is_array(VM& vm) const
     auto const& object = as_object();
 
     // 2. If argument is an Array exotic object, return true.
-    if (is<Array>(object))
+    if (::is<Array>(object))
         return true;
 
     // 3. If argument is a Proxy exotic object, then
-    if (auto const* proxy = as_if<ProxyObject>(object)) {
-
+    if (auto const* proxy = ::as_if<ProxyObject>(object)) {
         // a. Perform ? ValidateNonRevokedProxy(argument).
         TRY(proxy->validate_non_revoked_proxy());
 
         // b. Let proxyTarget be argument.[[ProxyTarget]].
-        auto& proxy_target = proxy->target();
+        auto const& proxy_target = proxy->target();
 
         // c. Return ? IsArray(proxyTarget).
         return Value(&proxy_target).is_array(vm);
@@ -255,10 +253,11 @@ ThrowCompletionOr<bool> Value::is_array(VM& vm) const
     return false;
 }
 
-Array& Value::as_array()
+Array& Value::as_array_exotic_object()
 {
-    ASSERT(is_object() && is<Array>(as_object()));
-    return static_cast<Array&>(as_object());
+    auto ptr = as_if<Array>();
+    ASSERT(ptr);
+    return *ptr;
 }
 
 // 7.2.3 IsCallable ( argument ), https://tc39.es/ecma262/#sec-iscallable
@@ -272,14 +271,16 @@ bool Value::is_function() const
 
 FunctionObject& Value::as_function()
 {
-    ASSERT(is_function());
-    return static_cast<FunctionObject&>(as_object());
+    auto ptr = as_if<FunctionObject>();
+    ASSERT(ptr);
+    return *ptr;
 }
 
 FunctionObject const& Value::as_function() const
 {
-    ASSERT(is_function());
-    return static_cast<FunctionObject const&>(as_object());
+    auto ptr = as_if<FunctionObject>();
+    ASSERT(ptr);
+    return *ptr;
 }
 
 // 7.2.4 IsConstructor ( argument ), https://tc39.es/ecma262/#sec-isconstructor
@@ -305,7 +306,7 @@ ThrowCompletionOr<bool> Value::is_regexp(VM& vm) const
         return false;
 
     // 2. Let matcher be ? Get(argument, @@match).
-    static Bytecode::PropertyLookupCache cache;
+    static Bytecode::StaticPropertyLookupCache cache;
     auto matcher = TRY(as_object().get(vm.well_known_symbol_match(), cache));
 
     // 3. If matcher is not undefined, return ToBoolean(matcher).
@@ -314,7 +315,7 @@ ThrowCompletionOr<bool> Value::is_regexp(VM& vm) const
 
     // 4. If argument has a [[RegExpMatcher]] internal slot, return true.
     // 5. Return false.
-    return is<RegExpObject>(as_object());
+    return ::is<RegExpObject>(as_object());
 }
 
 // 13.5.3 The typeof Operator, https://tc39.es/ecma262/#sec-typeof-operator
@@ -574,7 +575,7 @@ ThrowCompletionOr<Value> Value::to_primitive_slow_case(VM& vm, PreferredType pre
     // 1. If input is an Object, then
     if (is_object()) {
         // a. Let exoticToPrim be ? GetMethod(input, @@toPrimitive).
-        static Bytecode::PropertyLookupCache cache;
+        static Bytecode::StaticPropertyLookupCache cache;
         auto exotic_to_primitive = TRY(get_method(vm, vm.well_known_symbol_to_primitive(), cache));
 
         // b. If exoticToPrim is not undefined, then
@@ -2152,7 +2153,7 @@ ThrowCompletionOr<Value> instance_of(VM& vm, Value value, Value target)
         return vm.throw_completion<TypeError>(ErrorType::NotAnObject, target);
 
     // 2. Let instOfHandler be ? GetMethod(target, @@hasInstance).
-    static Bytecode::PropertyLookupCache cache;
+    static Bytecode::StaticPropertyLookupCache cache;
     auto instance_of_handler = TRY(target.get_method(vm, vm.well_known_symbol_has_instance(), cache));
 
     // 3. If instOfHandler is not undefined, then
@@ -2185,12 +2186,10 @@ ThrowCompletionOr<Value> ordinary_has_instance(VM& vm, Value lhs, Value rhs)
     auto& rhs_function = rhs.as_function();
 
     // 2. If C has a [[BoundTargetFunction]] internal slot, then
-    if (is<BoundFunction>(rhs_function)) {
-        auto const& bound_target = static_cast<BoundFunction const&>(rhs_function);
-
+    if (auto const* bound_target = as_if<BoundFunction>(rhs_function)) {
         // a. Let BC be C.[[BoundTargetFunction]].
         // b. Return ? InstanceofOperator(O, BC).
-        return instance_of(vm, lhs, Value(&bound_target.bound_target_function()));
+        return instance_of(vm, lhs, Value(&bound_target->bound_target_function()));
     }
 
     // 3. If O is not an Object, return false.
@@ -2200,7 +2199,7 @@ ThrowCompletionOr<Value> ordinary_has_instance(VM& vm, Value lhs, Value rhs)
     auto* lhs_object = &lhs.as_object();
 
     // 4. Let P be ? Get(C, "prototype").
-    static Bytecode::PropertyLookupCache cache;
+    static Bytecode::StaticPropertyLookupCache cache;
     auto rhs_prototype = TRY(rhs.get(vm, vm.names.prototype, cache));
 
     // 5. If P is not an Object, throw a TypeError exception.

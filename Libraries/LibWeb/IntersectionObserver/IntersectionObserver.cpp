@@ -5,12 +5,13 @@
  */
 
 #include <AK/QuickSort.h>
-#include <LibWeb/Bindings/IntersectionObserverPrototype.h>
+#include <LibWeb/Bindings/IntersectionObserver.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
+#include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/IntersectionObserver/IntersectionObserver.h>
@@ -83,7 +84,7 @@ WebIDL::ExceptionOr<GC::Ref<IntersectionObserver>> IntersectionObserver::constru
     return realm.create<IntersectionObserver>(realm, callback, options.root, move(root_margin.value()), move(scroll_margin.value()), move(thresholds), move(delay), move(options.track_visibility));
 }
 
-IntersectionObserver::IntersectionObserver(JS::Realm& realm, GC::Ptr<WebIDL::CallbackType> callback, Optional<Variant<GC::Root<DOM::Element>, GC::Root<DOM::Document>>> const& root, Vector<CSS::LengthPercentage> root_margin, Vector<CSS::LengthPercentage> scroll_margin, Vector<double>&& thresholds, double delay, bool track_visibility)
+IntersectionObserver::IntersectionObserver(JS::Realm& realm, GC::Ptr<WebIDL::CallbackType> callback, NullableIntersectionObserverRoot const& root, Vector<CSS::LengthPercentage> root_margin, Vector<CSS::LengthPercentage> scroll_margin, Vector<double>&& thresholds, double delay, bool track_visibility)
     : PlatformObject(realm)
     , m_callback(callback)
     , m_root_margin(root_margin)
@@ -92,7 +93,7 @@ IntersectionObserver::IntersectionObserver(JS::Realm& realm, GC::Ptr<WebIDL::Cal
     , m_delay(delay)
     , m_track_visibility(track_visibility)
 {
-    m_root = root.has_value() ? root->visit([](auto& value) -> GC::Ptr<DOM::Node> { return *value; }) : nullptr;
+    m_root = root.has<Empty>() ? nullptr : root.visit([](GC::Root<DOM::Element> const& value) -> GC::Ptr<DOM::Node> { return *value; }, [](GC::Root<DOM::Document> const& value) -> GC::Ptr<DOM::Node> { return *value; }, [](Empty) -> GC::Ptr<DOM::Node> { return nullptr; });
     intersection_root().visit([this](auto& node) {
         m_document = node->document();
     });
@@ -103,6 +104,7 @@ IntersectionObserver::~IntersectionObserver() = default;
 
 void IntersectionObserver::finalize()
 {
+    Base::finalize();
     if (m_document)
         m_document->unregister_intersection_observer({}, *this);
 }
@@ -119,7 +121,8 @@ void IntersectionObserver::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_root);
     visitor.visit(m_callback);
     visitor.visit(m_queued_entries);
-    visitor.visit(m_observation_targets);
+    for (auto& observed_target : m_observation_targets)
+        visitor.visit(observed_target.target);
 }
 
 // https://w3c.github.io/IntersectionObserver/#dom-intersectionobserver-observe
@@ -128,23 +131,30 @@ void IntersectionObserver::observe(DOM::Element& target)
     // Run the observe a target Element algorithm, providing this and target.
     // https://www.w3.org/TR/intersection-observer/#observe-a-target-element
     // 1. If target is in observer’s internal [[ObservationTargets]] slot, return.
-    if (m_observation_targets.contains_slow(GC::Ref { target }))
+    auto observed_target = m_observation_targets.find_if([&target](auto const& entry) {
+        return entry.target.ptr() == &target;
+    });
+    if (!observed_target.is_end())
         return;
 
     // 2. Let intersectionObserverRegistration be an IntersectionObserverRegistration record with an observer
     //    property set to observer, a previousThresholdIndex property set to -1, and a previousIsIntersecting
     //    property set to false.
-    auto intersection_observer_registration = IntersectionObserverRegistration {
-        .observer = *this,
-        .previous_threshold_index = OptionalNone {},
-        .previous_is_intersecting = false,
-    };
+    // NB: This implementation deviates from the spec's storage model. target's
+    //     [[RegisteredIntersectionObservers]] only keeps a strong reference to the observer for lifetime
+    //     management, while the mutable registration fields live in the observer-side observation target below.
+    target.register_intersection_observer({}, *this);
 
     // 3. Append intersectionObserverRegistration to target’s internal [[RegisteredIntersectionObservers]] slot.
-    target.register_intersection_observer({}, move(intersection_observer_registration));
-
+    // NB: Keeping previousThresholdIndex and previousIsIntersecting on the observer-side observation target lets
+    //     the update loop read and write them without a second lookup through target’s registered observers.
+    //
     // 4. Add target to observer’s internal [[ObservationTargets]] slot.
-    m_observation_targets.append(target);
+    m_observation_targets.append(ObservationTarget {
+        .target = target,
+        .previous_threshold_index = OptionalNone {},
+        .previous_is_intersecting = false,
+    });
 }
 
 // https://w3c.github.io/IntersectionObserver/#dom-intersectionobserver-unobserve
@@ -156,8 +166,8 @@ void IntersectionObserver::unobserve(DOM::Element& target)
     target.unregister_intersection_observer({}, *this);
 
     // 2. Remove target from this’s internal [[ObservationTargets]] slot, if present
-    m_observation_targets.remove_first_matching([&target](GC::Ref<DOM::Element> const& entry) {
-        return entry.ptr() == &target;
+    m_observation_targets.remove_first_matching([&target](ObservationTarget const& entry) {
+        return entry.target.ptr() == &target;
     });
 }
 
@@ -168,8 +178,8 @@ void IntersectionObserver::disconnect()
     // 1. Remove the IntersectionObserverRegistration record whose observer property is equal to this from target’s internal
     //    [[RegisteredIntersectionObservers]] slot.
     // 2. Remove target from this’s internal [[ObservationTargets]] slot.
-    for (auto& target : m_observation_targets) {
-        target->unregister_intersection_observer({}, *this);
+    for (auto& observed_target : m_observation_targets) {
+        observed_target.target->unregister_intersection_observer({}, *this);
     }
     m_observation_targets.clear();
 }
@@ -189,7 +199,7 @@ Vector<GC::Root<IntersectionObserverEntry>> IntersectionObserver::take_records()
     return queue;
 }
 
-Variant<GC::Root<DOM::Element>, GC::Root<DOM::Document>, Empty> IntersectionObserver::root() const
+NullableIntersectionObserverRoot IntersectionObserver::root() const
 {
     if (!m_root)
         return Empty {};
@@ -241,18 +251,19 @@ String IntersectionObserver::scroll_margin() const
 // https://www.w3.org/TR/intersection-observer/#intersectionobserver-intersection-root
 Variant<GC::Root<DOM::Element>, GC::Root<DOM::Document>> IntersectionObserver::intersection_root() const
 {
-    // The intersection root for an IntersectionObserver is the value of its root attribute
-    // if the attribute is non-null;
-    if (m_root) {
-        if (m_root->is_element())
-            return GC::make_root(static_cast<DOM::Element&>(*m_root));
-        if (m_root->is_document())
-            return GC::make_root(static_cast<DOM::Document&>(*m_root));
-        VERIFY_NOT_REACHED();
-    }
+    auto root_node = intersection_root_node();
+    if (root_node->is_element())
+        return GC::make_root(static_cast<DOM::Element&>(*root_node));
+    return GC::make_root(static_cast<DOM::Document&>(*root_node));
+}
 
-    // otherwise, it is the top-level browsing context’s document node, referred to as the implicit root.
-    return GC::make_root(as<HTML::Window>(HTML::relevant_global_object(*this)).page().top_level_browsing_context().active_document());
+GC::Ref<DOM::Node> IntersectionObserver::intersection_root_node() const
+{
+    if (m_root)
+        return *m_root;
+
+    // The implicit root is the top-level browsing context’s document node.
+    return *as<HTML::Window>(HTML::relevant_global_object(*this)).page().top_level_browsing_context().active_document();
 }
 
 // https://www.w3.org/TR/intersection-observer/#intersectionobserver-root-intersection-rectangle

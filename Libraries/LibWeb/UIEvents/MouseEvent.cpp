@@ -6,7 +6,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/MouseEventPrototype.h>
+#include <LibWeb/Bindings/MouseEvent.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/UIEvents/EventNames.h>
 #include <LibWeb/UIEvents/KeyCode.h>
@@ -130,12 +130,48 @@ GC::Ref<MouseEvent> MouseEvent::create(JS::Realm& realm, FlyString const& event_
 
 WebIDL::ExceptionOr<GC::Ref<MouseEvent>> MouseEvent::construct_impl(JS::Realm& realm, FlyString const& event_name, MouseEventInit const& event_init)
 {
-    return create(realm, event_name, event_init);
+    // https://drafts.csswg.org/cssom-view/#dom-mouseevent-pagex
+    // For a newly constructed event, pageX/pageY default to clientX/clientY (scrollX/scrollY are 0).
+    // https://drafts.csswg.org/cssom-view/#dom-mouseevent-offsetx
+    // For a newly constructed event with no target, offsetX/offsetY default to clientX/clientY.
+    return create(realm, event_name, event_init, event_init.client_x, event_init.client_y, event_init.client_x, event_init.client_y);
 }
 
-WebIDL::ExceptionOr<GC::Ref<MouseEvent>> MouseEvent::create_from_platform_event(JS::Realm& realm, GC::Ptr<HTML::WindowProxy> window_proxy, FlyString const& event_name, CSSPixelPoint screen, CSSPixelPoint page, CSSPixelPoint client, CSSPixelPoint offset, Optional<CSSPixelPoint> movement, unsigned button, unsigned buttons, unsigned modifiers)
+GC::Ref<MouseEvent> MouseEvent::clone() const
+{
+    MouseEventInit init {};
+    init.screen_x = m_screen_x;
+    init.screen_y = m_screen_y;
+    init.client_x = m_client_x;
+    init.client_y = m_client_y;
+    init.movement_x = m_movement_x;
+    init.movement_y = m_movement_y;
+    init.button = m_button;
+    init.buttons = m_buttons;
+    init.related_target = m_related_target;
+    init.ctrl_key = m_ctrl_key;
+    init.shift_key = m_shift_key;
+    init.alt_key = m_alt_key;
+    init.meta_key = m_meta_key;
+    init.modifier_alt_graph = m_modifier_alt_graph;
+    init.modifier_caps_lock = m_modifier_caps_lock;
+    init.modifier_fn = m_modifier_fn;
+    init.modifier_fn_lock = m_modifier_fn_lock;
+    init.modifier_hyper = m_modifier_hyper;
+    init.modifier_num_lock = m_modifier_num_lock;
+    init.modifier_scroll_lock = m_modifier_scroll_lock;
+    init.modifier_super = m_modifier_super;
+    init.modifier_symbol = m_modifier_symbol;
+    init.modifier_symbol_lock = m_modifier_symbol_lock;
+    init.view = view();
+    init.detail = detail();
+    return create(realm(), type(), init, m_page_x, m_page_y, m_offset_x, m_offset_y);
+}
+
+WebIDL::ExceptionOr<GC::Ref<MouseEvent>> MouseEvent::create_from_platform_event(JS::Realm& realm, GC::Ptr<HTML::WindowProxy> window_proxy, FlyString const& event_name, CSSPixelPoint screen, CSSPixelPoint page, CSSPixelPoint client, CSSPixelPoint offset, Optional<CSSPixelPoint> movement, unsigned button, unsigned buttons, unsigned modifiers, int detail)
 {
     MouseEventInit event_init {};
+    event_init.detail = detail;
     event_init.ctrl_key = modifiers & Mod_Ctrl;
     event_init.shift_key = modifiers & Mod_Shift;
     event_init.alt_key = modifiers & Mod_Alt;

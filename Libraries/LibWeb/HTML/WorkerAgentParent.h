@@ -6,9 +6,10 @@
 
 #pragma once
 
+#include <LibURL/URL.h>
 #include <LibWeb/Bindings/AgentType.h>
-#include <LibWeb/Bindings/RequestPrototype.h>
-#include <LibWeb/Bindings/WorkerPrototype.h>
+#include <LibWeb/Bindings/Request.h>
+#include <LibWeb/Bindings/Worker.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::HTML {
@@ -25,7 +26,7 @@ class WorkerAgentParent : public JS::Cell {
     GC_DECLARE_ALLOCATOR(WorkerAgentParent);
 
 protected:
-    WorkerAgentParent(URL::URL url, WorkerOptions const& options, GC::Ptr<MessagePort> outside_port, GC::Ref<EnvironmentSettingsObject> outside_settings, Bindings::AgentType);
+    WorkerAgentParent(URL::URL url, WorkerOptions const& options, GC::Ptr<MessagePort> outside_port, GC::Ref<EnvironmentSettingsObject> outside_settings, GC::Ref<DOM::EventTarget> worker_event_target, Bindings::AgentType);
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Cell::Visitor&) override;
 
@@ -39,6 +40,7 @@ private:
     GC::Ptr<MessagePort> m_message_port;
     GC::Ptr<MessagePort> m_outside_port;
     GC::Ref<EnvironmentSettingsObject> m_outside_settings;
+    GC::Ref<DOM::EventTarget> m_worker_event_target;
 
     RefPtr<Web::HTML::WebWorkerClient> m_worker_ipc;
 };

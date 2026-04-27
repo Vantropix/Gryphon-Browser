@@ -20,6 +20,9 @@ Application::Application(Optional<ByteString> ladybird_binary_path)
 {
     if (auto ladybird_source_dir = Core::Environment::get("LADYBIRD_SOURCE_DIR"sv); ladybird_source_dir.has_value())
         test_root_path = LexicalPath::join(*ladybird_source_dir, "Tests"sv, "LibWeb"sv).string();
+
+    if (Core::Environment::has("CLAUDECODE"sv) || Core::Environment::has("CODEX_SANDBOX"sv))
+        quiet = true;
 }
 
 Application::~Application()
@@ -31,11 +34,15 @@ Application::~Application()
 void Application::create_platform_arguments(Core::ArgsParser& args_parser)
 {
     args_parser.add_option(test_root_path, "Path containing the tests to run", "test-path", 0, "path");
+    args_parser.add_option(results_directory, "Directory to store test results", "results-dir", 'R', "path");
     args_parser.add_option(test_concurrency, "Maximum number of tests to run at once", "test-concurrency", 'j', "jobs");
     args_parser.add_option(test_globs, "Only run tests matching the given glob", "filter", 'f', "glob");
     args_parser.add_option(python_executable_path, "Path to python3", "python-executable", 'P', "path");
-    args_parser.add_option(dump_failed_ref_tests, "Dump screenshots of failing ref tests", "dump-failed-ref-tests", 'D');
     args_parser.add_option(dump_gc_graph, "Dump GC graph", "dump-gc-graph", 'G');
+    args_parser.add_option(fail_fast, "Abort on first failure/timeout/crash (offers debugger attach on timeout)", "fail-fast");
+
+    args_parser.add_option(repeat_count, "Repeat all matched tests N times", "repeat", 0, "n");
+
     args_parser.add_option(test_dry_run, "List the tests that would be run, without running them", "dry-run");
     args_parser.add_option(rebaseline, "Rebaseline any executed layout or text tests", "rebaseline");
     args_parser.add_option(shuffle, "Shuffle the order of tests before running them", "shuffle", 's');
@@ -64,7 +71,7 @@ void Application::create_platform_options(WebView::BrowserOptions& browser_optio
 
     request_server_options.http_disk_cache_mode = WebView::HTTPDiskCacheMode::Testing;
 
-    web_content_options.is_layout_test_mode = WebView::IsLayoutTestMode::Yes;
+    web_content_options.is_test_mode = WebView::IsTestMode::Yes;
 
     // Allow window.open() to succeed for tests.
     browser_options.allow_popups = WebView::AllowPopups::Yes;

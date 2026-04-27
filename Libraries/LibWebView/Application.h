@@ -7,14 +7,15 @@
 #pragma once
 
 #include <AK/ByteString.h>
+#include <AK/Function.h>
 #include <AK/LexicalPath.h>
 #include <AK/Optional.h>
-#include <AK/Swift.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/Forward.h>
 #include <LibDatabase/Forward.h>
 #include <LibDevTools/DevToolsDelegate.h>
 #include <LibDevTools/Forward.h>
+#include <LibIPC/Forward.h>
 #include <LibImageDecoderClient/Client.h>
 #include <LibMain/Main.h>
 #include <LibRequests/Forward.h>
@@ -24,6 +25,8 @@
 #include <LibWeb/CSS/PreferredMotion.h>
 #include <LibWeb/Clipboard/SystemClipboard.h>
 #include <LibWeb/HTML/ActivateTab.h>
+#include <LibWebView/BookmarkStore.h>
+#include <LibWebView/FileDownloader.h>
 #include <LibWebView/Forward.h>
 #include <LibWebView/Options.h>
 #include <LibWebView/Process.h>
@@ -31,9 +34,14 @@
 #include <LibWebView/Settings.h>
 #include <LibWebView/StorageJar.h>
 
+#if defined(AK_OS_MACOS)
+#    include <LibIPC/TransportBootstrapMach.h>
+#endif
+
 namespace WebView {
 
 struct ApplicationSettingsObserver;
+struct ApplicationBookmarkStoreObserver;
 
 class WEBVIEW_API Application : public DevTools::DevToolsDelegate {
     AK_MAKE_NONCOPYABLE(Application);
@@ -54,16 +62,32 @@ public:
     static Requests::RequestClient& request_server_client() { return *the().m_request_server_client; }
     static ImageDecoderClient::Client& image_decoder_client() { return *the().m_image_decoder_client; }
 
+    static BookmarkStore& bookmark_store() { return the().m_bookmark_store; }
+    static HistoryStore& history_store() { return *the().m_history_store; }
+    void update_bookmark_action_for_current_web_view();
+    void bookmarks_changed(Badge<ApplicationBookmarkStoreObserver>);
+    void show_bookmarks_bar_changed(Badge<ApplicationSettingsObserver>);
+    void clear_history();
+
+    virtual void show_bookmark_context_menu(Gfx::IntPoint, Optional<BookmarkItem const&>, [[maybe_unused]] Optional<String const&> target_folder_id) { }
+
     static CookieJar& cookie_jar() { return *the().m_cookie_jar; }
     static StorageJar& storage_jar() { return *the().m_storage_jar; }
 
     static ProcessManager& process_manager() { return *the().m_process_manager; }
+#if defined(AK_OS_MACOS)
+    static IPC::TransportBootstrapMachServer& transport_bootstrap_server() { return the().m_transport_bootstrap_server; }
+    void set_browser_process_transport_handler(Function<void(NonnullOwnPtr<IPC::Transport>)> handler);
+#endif
 
     ErrorOr<NonnullRefPtr<WebContentClient>> launch_web_content_process(ViewImplementation&);
 
     virtual Optional<ViewImplementation&> active_web_view() const { return {}; }
     virtual Optional<ViewImplementation&> open_blank_new_tab(Web::HTML::ActivateTab) const { return {}; }
     void open_url_in_new_tab(URL::URL const&, Web::HTML::ActivateTab) const;
+    void open_bookmark_in_new_tab(String const& bookmark_id, Web::HTML::ActivateTab) const;
+
+    Main::Arguments const& command_line_arguments() const { return m_arguments; }
 
     void add_child_process(Process&&);
 
@@ -72,6 +96,8 @@ public:
     void set_process_mach_port(pid_t, Core::MachPort&&);
 #endif
     Optional<Process&> find_process(pid_t);
+
+    virtual bool should_capture_web_content_output() const { return false; }
 
     ErrorOr<LexicalPath> path_for_downloaded_file(StringView file) const;
 
@@ -100,6 +126,7 @@ public:
 
         UnixDateTime since { UnixDateTime::earliest() };
         Delete delete_cached_files { Delete::No };
+        Delete delete_history { Delete::No };
         Delete delete_site_data { Delete::No };
     };
     void clear_browsing_data(ClearBrowsingDataOptions const&);
@@ -119,10 +146,17 @@ public:
     Menu& contrast_menu() { return *m_contrast_menu; }
     Menu& motion_menu() { return *m_motion_menu; }
 
+    Menu& bookmarks_menu() { return *m_bookmarks_menu; }
+    Menu& bookmarks_bar_context_menu() { return *m_bookmarks_bar_context_menu; }
+    Menu& bookmark_context_menu() { return *m_bookmark_context_menu; }
+    Menu& bookmark_folder_context_menu() { return *m_bookmark_folder_context_menu; }
+
     Menu& inspect_menu() { return *m_inspect_menu; }
     Action& view_source_action() { return *m_view_source_action; }
 
     Menu& debug_menu() { return *m_debug_menu; }
+
+    FileDownloader& file_downloader() { return m_file_downloader; }
 
     void apply_view_options(Badge<ViewImplementation>, ViewImplementation&);
 
@@ -142,7 +176,24 @@ protected:
     virtual void create_platform_options(BrowserOptions&, RequestServerOptions&, WebContentOptions&) { }
     virtual NonnullOwnPtr<Core::EventLoop> create_platform_event_loop();
 
-    virtual Optional<ByteString> ask_user_for_download_folder() const { return {}; }
+    virtual Optional<ByteString> ask_user_for_download_path([[maybe_unused]] StringView file) const { return {}; }
+
+    virtual void rebuild_bookmarks_menu() const { }
+    virtual void update_bookmarks_bar_display([[maybe_unused]] bool show_bookmarks_bar) const { }
+
+    struct BookmarkID {
+        String id;
+        Optional<String> target_folder_id;
+    };
+    virtual Optional<BookmarkID> bookmark_item_id_for_context_menu() const { return {}; }
+
+    using BookmarkPromise = Core::Promise<BookmarkItem::Bookmark>;
+    virtual NonnullRefPtr<BookmarkPromise> display_add_bookmark_dialog() const;
+    virtual NonnullRefPtr<BookmarkPromise> display_edit_bookmark_dialog([[maybe_unused]] BookmarkItem::Bookmark const& current_bookmark) const;
+
+    using BookmarkFolderPromise = Core::Promise<BookmarkItem::Folder>;
+    virtual NonnullRefPtr<BookmarkFolderPromise> display_add_bookmark_folder_dialog() const;
+    virtual NonnullRefPtr<BookmarkFolderPromise> display_edit_bookmark_folder_dialog([[maybe_unused]] BookmarkItem::Folder const& current_folder) const;
 
     virtual void on_devtools_enabled() const;
     virtual void on_devtools_disabled() const;
@@ -157,6 +208,15 @@ private:
     ErrorOr<void> launch_devtools_server();
 
     void initialize_actions();
+
+    void update_bookmarks_bar_action();
+
+    struct MenuData {
+        Menu& menu;
+        ReadonlySpan<BookmarkItem> items;
+        Optional<String const&> target_folder_id;
+    };
+    void create_bookmark_menu_items(Optional<MenuData> = {});
 
     virtual Vector<DevTools::TabDescription> tab_list() const override;
     virtual Vector<DevTools::CSSProperty> css_property_list() const override;
@@ -186,14 +246,23 @@ private:
     virtual void listen_for_style_sheet_sources(DevTools::TabDescription const&, OnStyleSheetSourceReceived) const override;
     virtual void stop_listening_for_style_sheet_sources(DevTools::TabDescription const&) const override;
     virtual void evaluate_javascript(DevTools::TabDescription const&, String const&, OnScriptEvaluationComplete) const override;
-    virtual void listen_for_console_messages(DevTools::TabDescription const&, OnConsoleMessageAvailable, OnReceivedConsoleMessages) const override;
+    virtual void listen_for_console_messages(DevTools::TabDescription const&, OnConsoleMessage) const override;
     virtual void stop_listening_for_console_messages(DevTools::TabDescription const&) const override;
-    virtual void request_console_messages(DevTools::TabDescription const&, i32) const override;
+    virtual void listen_for_network_events(DevTools::TabDescription const&, OnNetworkRequestStarted, OnNetworkResponseHeadersReceived, OnNetworkResponseBodyReceived, OnNetworkRequestFinished) const override;
+    virtual void stop_listening_for_network_events(DevTools::TabDescription const&) const override;
+    virtual void listen_for_navigation_events(DevTools::TabDescription const&, OnNavigationStarted, OnNavigationFinished) const override;
+    virtual void stop_listening_for_navigation_events(DevTools::TabDescription const&) const override;
+    virtual void did_connect_devtools_client(DevTools::TabDescription const&) const override;
+    virtual void did_disconnect_devtools_client(DevTools::TabDescription const&) const override;
 
     static Application* s_the;
 
     Settings m_settings;
     OwnPtr<ApplicationSettingsObserver> m_settings_observer;
+
+    BookmarkStore m_bookmark_store;
+    OwnPtr<ApplicationBookmarkStoreObserver> m_bookmark_store_observer;
+    OwnPtr<HistoryStore> m_history_store;
 
     Main::Arguments m_arguments;
     BrowserOptions m_browser_options;
@@ -207,6 +276,7 @@ private:
     bool m_has_queued_task_to_launch_spare_web_content_process { false };
 
     RefPtr<Database::Database> m_database;
+    RefPtr<Database::Database> m_history_database;
     OwnPtr<CookieJar> m_cookie_jar;
     OwnPtr<StorageJar> m_storage_jar;
 
@@ -235,6 +305,15 @@ private:
     RefPtr<Menu> m_motion_menu;
     Web::CSS::PreferredMotion m_motion { Web::CSS::PreferredMotion::Auto };
 
+    RefPtr<Menu> m_bookmarks_menu;
+    RefPtr<Action> m_toggle_bookmark_action;
+    RefPtr<Action> m_toggle_bookmark_bar_action;
+    size_t m_bookmarks_menu_static_size { 0 };
+
+    RefPtr<Menu> m_bookmarks_bar_context_menu;
+    RefPtr<Menu> m_bookmark_context_menu;
+    RefPtr<Menu> m_bookmark_folder_context_menu;
+
     RefPtr<Menu> m_inspect_menu;
     RefPtr<Action> m_view_source_action;
     RefPtr<Action> m_toggle_devtools_action;
@@ -249,12 +328,18 @@ private:
 
     Optional<Web::Clipboard::SystemClipboardRepresentation> m_clipboard;
 
+    FileDownloader m_file_downloader;
+
 #if defined(AK_OS_MACOS)
-    OwnPtr<MachPortServer> m_mach_port_server;
+    OwnPtr<IPC::MachBootstrapListener> m_mach_port_server;
+    IPC::TransportBootstrapMachServer m_transport_bootstrap_server;
+    Function<void(NonnullOwnPtr<IPC::Transport>)> m_on_browser_process_transport;
 #endif
 
     OwnPtr<DevTools::DevToolsServer> m_devtools;
-} SWIFT_IMMORTAL_REFERENCE;
+
+    mutable HashMap<u64, u64> m_navigation_listener_ids;
+};
 
 }
 

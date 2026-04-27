@@ -6,6 +6,7 @@
  */
 
 #include <LibGC/DeferGC.h>
+#include <LibJS/Runtime/Realm.h>
 #include <LibJS/Runtime/Shape.h>
 #include <LibJS/Runtime/VM.h>
 
@@ -14,33 +15,13 @@ namespace JS {
 GC_DEFINE_ALLOCATOR(Shape);
 GC_DEFINE_ALLOCATOR(PrototypeChainValidity);
 
-static HashTable<GC::Ptr<Shape>> s_all_prototype_shapes;
+Shape::~Shape() = default;
 
-Shape::~Shape()
-{
-    if (m_is_prototype_shape)
-        s_all_prototype_shapes.remove(this);
-}
-
-GC::Ref<Shape> Shape::create_cacheable_dictionary_transition()
+GC::Ref<Shape> Shape::create_dictionary_transition()
 {
     auto new_shape = heap().allocate<Shape>(m_realm);
     new_shape->m_dictionary = true;
-    new_shape->m_cacheable = true;
-    new_shape->m_prototype = m_prototype;
-    invalidate_prototype_if_needed_for_new_prototype(new_shape);
-    ensure_property_table();
-    new_shape->ensure_property_table();
-    (*new_shape->m_property_table) = *m_property_table;
-    new_shape->m_property_count = new_shape->m_property_table->size();
-    return new_shape;
-}
-
-GC::Ref<Shape> Shape::create_uncacheable_dictionary_transition()
-{
-    auto new_shape = heap().allocate<Shape>(m_realm);
-    new_shape->m_dictionary = true;
-    new_shape->m_cacheable = false;
+    new_shape->m_has_parameter_map = m_has_parameter_map;
     new_shape->m_prototype = m_prototype;
     invalidate_prototype_if_needed_for_new_prototype(new_shape);
     ensure_property_table();
@@ -155,6 +136,7 @@ Shape::Shape(Realm& realm)
 Shape::Shape(Shape& previous_shape, PropertyKey const& property_key, PropertyAttributes attributes, TransitionType transition_type)
     : m_attributes(attributes)
     , m_transition_type(transition_type)
+    , m_has_parameter_map(previous_shape.m_has_parameter_map)
     , m_realm(previous_shape.m_realm)
     , m_previous(&previous_shape)
     , m_property_key(property_key)
@@ -165,6 +147,7 @@ Shape::Shape(Shape& previous_shape, PropertyKey const& property_key, PropertyAtt
 
 Shape::Shape(Shape& previous_shape, PropertyKey const& property_key, TransitionType transition_type)
     : m_transition_type(transition_type)
+    , m_has_parameter_map(previous_shape.m_has_parameter_map)
     , m_realm(previous_shape.m_realm)
     , m_previous(&previous_shape)
     , m_property_key(property_key)
@@ -176,6 +159,7 @@ Shape::Shape(Shape& previous_shape, PropertyKey const& property_key, TransitionT
 
 Shape::Shape(Shape& previous_shape, Object* new_prototype)
     : m_transition_type(TransitionType::Prototype)
+    , m_has_parameter_map(previous_shape.m_has_parameter_map)
     , m_realm(previous_shape.m_realm)
     , m_previous(&previous_shape)
     , m_prototype(new_prototype)
@@ -192,10 +176,10 @@ void Shape::visit_edges(Cell::Visitor& visitor)
     if (m_property_key.has_value())
         m_property_key->visit_edges(visitor);
 
-    // NOTE: We don't need to mark the keys in the property table, since they are guaranteed
-    //       to also be marked by the chain of shapes leading up to this one.
-
     visitor.ignore(m_prototype_transitions);
+
+    // Child prototype-shape weak refs need no marking; pruning is lazy.
+    visitor.ignore(m_child_prototype_shapes);
 
     // FIXME: The forward transition keys should be weak, but we have to mark them for now in case they go stale.
     if (m_forward_transitions) {
@@ -210,6 +194,26 @@ void Shape::visit_edges(Cell::Visitor& visitor)
     }
 
     visitor.visit(m_prototype_chain_validity);
+
+    // Only dictionary shapes actually need us to mark the keys in m_property_table.
+    //
+    // For non-dictionary shapes, m_property_table is a lazily-built cache of the
+    // transition chain: every key it contains was originally inserted into some
+    // ancestor's m_property_key, and that ancestor is kept alive by m_previous
+    // (which we already visit above). So those keys are guaranteed to be marked
+    // transitively via the chain, and re-marking them here is pure overhead.
+    //
+    // The exception used to be the handful of intrinsic shapes populated via
+    // add_property_without_transition() in Intrinsics.cpp (iterator-result,
+    // function, arguments, regexp-exec-array, ...). Those shapes are not
+    // dictionaries and have no m_previous to reach their property keys through.
+    // However, every key they hold is a vm.names.* string or a well-known
+    // symbol, both of which are strongly rooted by the VM for its entire
+    // lifetime, so skipping them here is safe.
+    if (m_dictionary && m_property_table) {
+        for (auto& it : *m_property_table)
+            it.key.visit_edges(visitor);
+    }
 }
 
 Optional<PropertyMetadata> Shape::lookup(PropertyKey const& property_key) const
@@ -310,7 +314,7 @@ void Shape::set_property_attributes_without_transition(PropertyKey const& proper
 void Shape::remove_property_without_transition(PropertyKey const& property_key, u32 offset)
 {
     invalidate_prototype_if_needed_for_change_without_transition();
-    VERIFY(is_uncacheable_dictionary());
+    VERIFY(is_dictionary());
     VERIFY(m_property_table);
     if (m_property_table->remove(property_key))
         --m_property_count;
@@ -327,14 +331,16 @@ GC::Ref<Shape> Shape::clone_for_prototype()
     VERIFY(!m_is_prototype_shape);
     VERIFY(!m_prototype_chain_validity);
     auto new_shape = heap().allocate<Shape>(m_realm);
-    s_all_prototype_shapes.set(new_shape);
     new_shape->m_is_prototype_shape = true;
+    new_shape->m_has_parameter_map = m_has_parameter_map;
     new_shape->m_prototype = m_prototype;
     ensure_property_table();
     new_shape->ensure_property_table();
     (*new_shape->m_property_table) = *m_property_table;
     new_shape->m_property_count = new_shape->m_property_table->size();
     new_shape->m_prototype_chain_validity = heap().allocate<PrototypeChainValidity>();
+    if (new_shape->m_prototype)
+        new_shape->m_prototype->shape().add_child_prototype_shape(*new_shape);
     return new_shape;
 }
 
@@ -348,9 +354,19 @@ void Shape::set_prototype_without_transition(Object* new_prototype)
 void Shape::set_prototype_shape()
 {
     VERIFY(!m_is_prototype_shape);
-    s_all_prototype_shapes.set(this);
     m_is_prototype_shape = true;
     m_prototype_chain_validity = heap().allocate<PrototypeChainValidity>();
+    if (m_prototype)
+        m_prototype->shape().add_child_prototype_shape(*this);
+}
+
+void Shape::add_child_prototype_shape(GC::Ref<Shape> child)
+{
+    VERIFY(m_is_prototype_shape);
+    VERIFY(child->m_is_prototype_shape);
+    if (!m_child_prototype_shapes)
+        m_child_prototype_shapes = make<Vector<GC::Weak<Shape>>>();
+    m_child_prototype_shapes->append(GC::Weak<Shape> { *child });
 }
 
 void Shape::invalidate_prototype_if_needed_for_new_prototype(GC::Ref<Shape> new_prototype_shape)
@@ -361,6 +377,10 @@ void Shape::invalidate_prototype_if_needed_for_new_prototype(GC::Ref<Shape> new_
     m_prototype_chain_validity->set_valid(false);
 
     invalidate_all_prototype_chains_leading_to_this();
+
+    // The owning object is keeping the same [[Prototype]], so its existing
+    // children descend from new_prototype_shape going forward.
+    new_prototype_shape->m_child_prototype_shapes = move(m_child_prototype_shapes);
 }
 
 void Shape::invalidate_prototype_if_needed_for_change_without_transition()
@@ -375,20 +395,28 @@ void Shape::invalidate_prototype_if_needed_for_change_without_transition()
 
 void Shape::invalidate_all_prototype_chains_leading_to_this()
 {
-    HashTable<Shape*> shapes_to_invalidate;
-    for (auto& candidate : s_all_prototype_shapes) {
-        if (!candidate->m_prototype)
-            continue;
-        for (auto* current_prototype_shape = &candidate->m_prototype->shape(); current_prototype_shape; current_prototype_shape = current_prototype_shape->prototype() ? &current_prototype_shape->prototype()->shape() : nullptr) {
-            if (current_prototype_shape == this) {
-                VERIFY(candidate->m_is_prototype_shape);
-                shapes_to_invalidate.set(candidate);
-                break;
-            }
-        }
-    }
-    if (shapes_to_invalidate.is_empty())
+    if (!m_child_prototype_shapes || m_child_prototype_shapes->is_empty())
         return;
+
+    HashTable<Shape*> shapes_to_invalidate;
+    Vector<Shape*> worklist;
+    auto enqueue_children_of = [&](Shape& shape) {
+        if (!shape.m_child_prototype_shapes)
+            return;
+        // Prune dead weak refs and enqueue the live ones in one pass.
+        shape.m_child_prototype_shapes->remove_all_matching([&](GC::Weak<Shape> const& weak) {
+            auto child = weak.ptr();
+            if (!child)
+                return true;
+            if (shapes_to_invalidate.set(child.ptr()) == HashSetResult::InsertedNewEntry)
+                worklist.append(child.ptr());
+            return false;
+        });
+    };
+    enqueue_children_of(*this);
+    while (!worklist.is_empty())
+        enqueue_children_of(*worklist.take_last());
+
     for (auto* shape : shapes_to_invalidate) {
         shape->m_prototype_chain_validity->set_valid(false);
         shape->m_prototype_chain_validity = heap().allocate<PrototypeChainValidity>();

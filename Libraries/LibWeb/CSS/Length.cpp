@@ -137,18 +137,6 @@ Length::ResolutionContext Length::ResolutionContext::for_element(DOM::AbstractEl
     };
 }
 
-Length::ResolutionContext Length::ResolutionContext::for_window(HTML::Window const& window)
-{
-    auto const& initial_font = window.associated_document().font_computer().initial_font();
-    Gfx::FontPixelMetrics const& initial_font_metrics = initial_font.pixel_metrics();
-    Length::FontMetrics font_metrics { CSSPixels { initial_font.pixel_size() }, initial_font_metrics, InitialValues::line_height() };
-    return Length::ResolutionContext {
-        .viewport_rect = window.page().web_exposed_screen_area(),
-        .font_metrics = font_metrics,
-        .root_font_metrics = font_metrics,
-    };
-}
-
 Length::ResolutionContext Length::ResolutionContext::for_document(DOM::Document const& document)
 {
     auto const& initial_font = document.font_computer().initial_font();
@@ -175,8 +163,9 @@ Length::ResolutionContext Length::ResolutionContext::for_layout_node(Layout::Nod
     } else {
         auto const* root_element = node.document().document_element();
         VERIFY(root_element);
-        VERIFY(root_element->layout_node());
-        root_layout_node = root_element->layout_node();
+        // NB: Called during CSS length resolution, which may happen during style recalculation.
+        VERIFY(root_element->unsafe_layout_node());
+        root_layout_node = root_element->unsafe_layout_node();
     }
 
     return Length::ResolutionContext {
@@ -198,7 +187,8 @@ CSSPixels Length::to_px_slow_case(Layout::Node const& layout_node) const
 
     if (is_font_relative()) {
         auto* root_element = layout_node.document().document_element();
-        if (!root_element || !root_element->layout_node())
+        // NB: Called during CSS length resolution, which may happen during style recalculation.
+        if (!root_element || !root_element->unsafe_layout_node())
             return 0;
 
         FontMetrics font_metrics {
@@ -207,8 +197,8 @@ CSSPixels Length::to_px_slow_case(Layout::Node const& layout_node) const
             layout_node.computed_values().line_height()
         };
         FontMetrics root_font_metrics {
-            root_element->layout_node()->computed_values().font_size(),
-            root_element->layout_node()->first_available_font().pixel_metrics(),
+            root_element->unsafe_layout_node()->computed_values().font_size(),
+            root_element->unsafe_layout_node()->first_available_font().pixel_metrics(),
             layout_node.computed_values().line_height()
         };
 
@@ -220,7 +210,7 @@ CSSPixels Length::to_px_slow_case(Layout::Node const& layout_node) const
     return viewport_relative_length_to_px(viewport_rect);
 }
 
-String Length::to_string(SerializationMode serialization_mode) const
+void Length::serialize(StringBuilder& builder, SerializationMode serialization_mode) const
 {
     // https://drafts.csswg.org/cssom/#serialize-a-css-value
     // -> <length>
@@ -230,31 +220,58 @@ String Length::to_string(SerializationMode serialization_mode) const
     // FIXME: Manually skip this for px so we avoid rounding errors in absolute_length_to_px.
     //        Maybe provide alternative functions that don't produce CSSPixels?
     if (serialization_mode == SerializationMode::ResolvedValue && is_absolute() && m_unit != LengthUnit::Px) {
-        StringBuilder builder;
         serialize_a_number(builder, absolute_length_to_px().to_double());
         builder.append("px"sv);
-        return builder.to_string_without_validation();
+        return;
     }
-    StringBuilder builder;
     serialize_a_number(builder, m_value);
     builder.append(unit_name());
+}
+
+String Length::to_string(SerializationMode serialization_mode) const
+{
+    StringBuilder builder;
+    serialize(builder, serialization_mode);
     return builder.to_string_without_validation();
 }
 
-Optional<Length> Length::absolutize(CSSPixelRect const& viewport_rect, FontMetrics const& font_metrics, FontMetrics const& root_font_metrics) const
+Optional<Length> Length::absolutize(ResolutionContext const& context) const
 {
     if (is_px())
         return {};
-    if (is_absolute() || is_relative()) {
-        auto px = to_px(viewport_rect, font_metrics, root_font_metrics);
-        return CSS::Length::make_px(px);
-    }
-    return {};
+
+    return CSS::Length::make_px(to_px_without_rounding(context));
 }
 
-Length Length::absolutized(CSSPixelRect const& viewport_rect, FontMetrics const& font_metrics, FontMetrics const& root_font_metrics) const
+Length Length::from_style_value(NonnullRefPtr<StyleValue const> const& style_value, Optional<Length> percentage_basis)
 {
-    return absolutize(viewport_rect, font_metrics, root_font_metrics).value_or(*this);
+    if (style_value->is_length())
+        return style_value->as_length().length();
+
+    if (style_value->is_calculated()) {
+        CalculationResolutionContext::PercentageBasis resolved_percentage_basis;
+
+        if (percentage_basis.has_value()) {
+            resolved_percentage_basis = percentage_basis.value();
+        }
+
+        return style_value->as_calculated().resolve_length({ .percentage_basis = resolved_percentage_basis }).value();
+    }
+
+    if (style_value->is_percentage()) {
+        VERIFY(percentage_basis.has_value());
+
+        return percentage_basis.value().percentage_of(style_value->as_percentage().percentage());
+    }
+
+    VERIFY_NOT_REACHED();
+}
+
+LengthOrAuto LengthOrAuto::from_style_value(NonnullRefPtr<StyleValue const> const& style_value, Optional<Length> percentage_basis)
+{
+    if (style_value->has_auto())
+        return make_auto();
+    return LengthOrAuto { Length::from_style_value(style_value, percentage_basis) };
 }
 
 Length Length::resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const& calculated, Layout::Node const& layout_node, Length const& reference_value)

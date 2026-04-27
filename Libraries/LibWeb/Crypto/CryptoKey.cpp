@@ -8,7 +8,7 @@
 #include <AK/Memory.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/ValueInlines.h>
-#include <LibWeb/Bindings/CryptoKeyPrototype.h>
+#include <LibWeb/Bindings/CryptoKey.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Crypto/CryptoKey.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
@@ -44,8 +44,9 @@ CryptoKey::CryptoKey(JS::Realm& realm)
 {
 }
 
-CryptoKey::~CryptoKey()
+void CryptoKey::finalize()
 {
+    Base::finalize();
     m_key_data.visit(
         [](ByteBuffer& data) { secure_zero(data.data(), data.size()); },
         [](auto& data) { secure_zero(reinterpret_cast<u8*>(&data), sizeof(data)); });

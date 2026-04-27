@@ -30,12 +30,15 @@ public:
     Bindings::CanvasDirection direction() const { return my_drawing_state().direction; }
     void set_direction(Bindings::CanvasDirection direction) { my_drawing_state().direction = direction; }
 
+    String letter_spacing() const;
+    void set_letter_spacing(StringView);
+
 protected:
     CanvasTextDrawingStyles() = default;
 
 private:
-    CanvasState::DrawingState& my_drawing_state() { return reinterpret_cast<IncludingClass&>(*this).drawing_state(); }
-    CanvasState::DrawingState const& my_drawing_state() const { return reinterpret_cast<IncludingClass const&>(*this).drawing_state(); }
+    CanvasState::DrawingState& my_drawing_state() { return static_cast<IncludingClass&>(*this).drawing_state(); }
+    CanvasState::DrawingState const& my_drawing_state() const { return static_cast<IncludingClass const&>(*this).drawing_state(); }
 };
 
 }

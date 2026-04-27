@@ -7,10 +7,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLSelectElementPrototype.h>
+#include <LibWeb/Bindings/HTMLSelectElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/Event.h>
@@ -39,6 +41,11 @@ GC_DEFINE_ALLOCATOR(HTMLSelectElement);
 HTMLSelectElement::HTMLSelectElement(DOM::Document& document, DOM::QualifiedName qualified_name)
     : HTMLElement(document, move(qualified_name))
 {
+    m_legacy_platform_object_flags = LegacyPlatformObjectFlags {
+        .supports_indexed_properties = true,
+        .has_indexed_property_setter = true,
+        .indexed_property_setter_has_identifier = true,
+    };
 }
 
 HTMLSelectElement::~HTMLSelectElement() = default;
@@ -80,6 +87,9 @@ void HTMLSelectElement::adjust_computed_style(CSS::ComputedProperties& style)
     //         This is required for the internal shadow tree to work correctly in layout.
     if (style.display().is_inline_outside() && style.display().is_flow_inside())
         style.set_property(CSS::PropertyID::Display, CSS::DisplayStyleValue::create(CSS::Display::from_short(CSS::Display::Short::InlineBlock)));
+
+    // AD-HOC: Enforce normal line-height for select elements. This matches the behavior of other engines.
+    style.set_property(CSS::PropertyID::LineHeight, CSS::KeywordStyleValue::create(CSS::Keyword::Normal));
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#concept-select-size
@@ -120,12 +130,12 @@ void HTMLSelectElement::set_size(WebIDL::UnsignedLong size)
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-select-options
-GC::Ptr<HTMLOptionsCollection> const& HTMLSelectElement::options()
+GC::Ptr<HTMLOptionsCollection> const& HTMLSelectElement::options() const
 {
     // The options IDL attribute must return an HTMLOptionsCollection rooted at the select node,
     // whose filter matches the elements in the list of options.
     if (!m_options) {
-        m_options = HTMLOptionsCollection::create(*this, [this](DOM::Element const& element) {
+        m_options = HTMLOptionsCollection::create(const_cast<HTMLSelectElement&>(*this), [this](DOM::Element const& element) {
             auto const* maybe_option = as_if<HTML::HTMLOptionElement>(element);
             return maybe_option && maybe_option->nearest_select_element() == this;
         });
@@ -153,6 +163,14 @@ HTMLOptionElement* HTMLSelectElement::item(WebIDL::UnsignedLong index)
     return as<HTMLOptionElement>(const_cast<HTMLOptionsCollection&>(*options()).item(index));
 }
 
+// https://html.spec.whatwg.org/multipage/form-elements.html#the-select-element:htmlselectelement
+Optional<JS::Value> HTMLSelectElement::item_value(size_t index) const
+{
+    // The options collection is also mirrored on the HTMLSelectElement object. The supported property indices at any
+    // instant are the indices supported by the object returned by the options attribute at that instant.
+    return (const_cast<HTMLOptionsCollection&>(*options()).item_value(index));
+}
+
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-select-nameditem
 HTMLOptionElement* HTMLSelectElement::named_item(FlyString const& name)
 {
@@ -161,12 +179,22 @@ HTMLOptionElement* HTMLSelectElement::named_item(FlyString const& name)
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-select-add
-WebIDL::ExceptionOr<void> HTMLSelectElement::add(HTMLOptionOrOptGroupElement element, Optional<HTMLElementOrElementIndex> before)
+WebIDL::ExceptionOr<void> HTMLSelectElement::add(HTMLOptionOrOptGroupElement element, NullableHTMLElementOrElementIndex before)
 {
     // Similarly, the add(element, before) method must act like its namesake method on that same options collection.
     TRY(const_cast<HTMLOptionsCollection&>(*options()).add(move(element), move(before)));
 
     update_selectedness(); // Not in spec
+
+    return {};
+}
+
+// https://html.spec.whatwg.org/multipage/form-elements.html#the-select-element:set-the-value-of-a-new-indexed-property
+WebIDL::ExceptionOr<void> HTMLSelectElement::set_value_of_indexed_property(u32 n, JS::Value new_value)
+{
+    // When the user agent is to set the value of a new indexed property or set the value of an existing indexed property
+    // for a select element, it must instead run the corresponding algorithm on the select element's options collection.
+    TRY(const_cast<HTMLOptionsCollection&>(*options()).set_value_of_indexed_property(n, new_value));
 
     return {};
 }
@@ -308,7 +336,7 @@ WebIDL::Long HTMLSelectElement::selected_index() const
 WebIDL::ExceptionOr<void> HTMLSelectElement::set_selected_index(WebIDL::Long index)
 {
     // The selectedIndex setter steps are:
-    ScopeGuard guard { [&]() { update_inner_text_element(); } };
+    ScopeGuard guard { [&]() { clone_selected_option_into_select_button(); } };
 
     // 1. Let firstMatchingOption be null.
     GC::Ptr<HTMLOptionElement> first_matching_option;
@@ -375,11 +403,11 @@ bool HTMLSelectElement::can_skip_children_changed_selectedness_update(ChildrenCh
     return false;
 }
 
-void HTMLSelectElement::children_changed(ChildrenChangedMetadata const* metadata)
+void HTMLSelectElement::children_changed(ChildrenChangedMetadata const& metadata)
 {
     Base::children_changed(metadata);
 
-    if (metadata && can_skip_children_changed_selectedness_update(*metadata))
+    if (can_skip_children_changed_selectedness_update(metadata))
         return;
 
     update_cached_list_of_options();
@@ -429,7 +457,7 @@ Utf16String HTMLSelectElement::value() const
 WebIDL::ExceptionOr<void> HTMLSelectElement::set_value(Utf16String const& value)
 {
     // The value setter steps are:
-    ScopeGuard guard { [&]() { update_inner_text_element(); } };
+    ScopeGuard guard { [&]() { clone_selected_option_into_select_button(); } };
     update_cached_list_of_options();
 
     // 1. Let firstMatchingOption be null.
@@ -471,7 +499,8 @@ void HTMLSelectElement::send_select_update_notifications()
         // 2. Run update a select's selectedcontent given element.
         MUST(update_selectedcontent());
 
-        // FIXME: 3. Run clone selected option into select button given element.
+        // 3. Run clone selected option into select button given element.
+        clone_selected_option_into_select_button();
 
         // 4. Fire an event named input at element, with the bubbles and composed attributes initialized to true.
         auto input_event = DOM::Event::create(realm(), HTML::EventNames::input);
@@ -631,7 +660,7 @@ void HTMLSelectElement::did_select_item(Optional<u32> const& id)
         }
     }
 
-    update_inner_text_element();
+    clone_selected_option_into_select_button();
     send_select_update_notifications();
 }
 
@@ -669,6 +698,7 @@ void HTMLSelectElement::create_shadow_tree_if_needed()
         return;
 
     auto shadow_root = realm().create<DOM::ShadowRoot>(document(), *this, Bindings::ShadowRootMode::Closed);
+    shadow_root->set_user_agent_internal(true);
     set_shadow_root(shadow_root);
 
     auto border = DOM::create_element(document(), HTML::TagNames::div, Namespace::HTML).release_value_but_fixme_should_propagate_errors();
@@ -704,28 +734,32 @@ void HTMLSelectElement::create_shadow_tree_if_needed()
 
     MUST(border->append_child(*m_chevron_icon_element));
 
-    update_inner_text_element();
+    clone_selected_option_into_select_button();
 }
 
-void HTMLSelectElement::update_inner_text_element(Badge<HTMLOptionElement>)
+// https://html.spec.whatwg.org/multipage/form-elements.html#clone-selected-option-into-select-button
+void HTMLSelectElement::clone_selected_option_into_select_button()
 {
-    update_cached_list_of_options();
-    update_inner_text_element();
-}
+    // To clone selected option into select button, given a select element select:
 
-// FIXME: This needs to be called any time the selected option's children are modified.
-void HTMLSelectElement::update_inner_text_element()
-{
     if (!m_inner_text_element)
         return;
 
-    // Update inner text element to the label of the selected option
-    for (auto const& option_element : m_cached_list_of_options) {
-        if (option_element->selected()) {
-            m_inner_text_element->string_replace_all(Infra::strip_and_collapse_whitespace(Utf16String::from_utf8(option_element->label())));
-            return;
-        }
-    }
+    update_cached_list_of_options();
+
+    // 1. Let option be the first element of select's option list whose selectedness is set to true,
+    //    if such an element exists; otherwise null.
+    auto option = find_value(m_cached_list_of_options, [](auto option) { return option->selected(); });
+
+    // 2. Let text be the empty string.
+    Utf16String text;
+
+    // 3. If option is not null, then set text to option's label.
+    if (option.has_value())
+        text = Utf16String::from_utf8((*option)->label());
+
+    // 4. Set select's select fallback button text to text.
+    m_inner_text_element->string_replace_all(move(text));
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#selectedness-setting-algorithm
@@ -781,10 +815,13 @@ void HTMLSelectElement::update_selectedness()
     }
 
     // 4. If updateSelectedcontent is true, then run update a select's selectedcontent given element.
-    if (should_update_selectedcontent) {
+    if (should_update_selectedcontent)
         MUST(update_selectedcontent());
-        update_inner_text_element();
-    }
+
+    // AD-HOC: The selectedness setting algorithm does not itself refresh the select's fallback button text, but the
+    //         set of selected options may have changed. Run the spec's "clone selected option into select button"
+    //         algorithm so the button stays in sync.
+    clone_selected_option_into_select_button();
 }
 
 bool HTMLSelectElement::is_focusable() const

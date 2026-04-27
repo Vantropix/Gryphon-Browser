@@ -6,7 +6,7 @@
  */
 
 #include <LibWeb/ARIA/Roles.h>
-#include <LibWeb/Bindings/HTMLAnchorElementPrototype.h>
+#include <LibWeb/Bindings/HTMLAnchorElement.h>
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/HTML/AttributeNames.h>
@@ -50,21 +50,6 @@ void HTMLAnchorElement::attribute_changed(FlyString const& name, Optional<String
         if (m_rel_list)
             m_rel_list->associated_attribute_changed(value.value_or(String {}));
     }
-}
-
-Optional<String> HTMLAnchorElement::hyperlink_element_utils_href() const
-{
-    return attribute(HTML::AttributeNames::href);
-}
-
-void HTMLAnchorElement::set_hyperlink_element_utils_href(String href)
-{
-    set_attribute_value(HTML::AttributeNames::href, move(href));
-}
-
-Optional<String> HTMLAnchorElement::hyperlink_element_utils_referrerpolicy() const
-{
-    return attribute(HTML::AttributeNames::referrerpolicy);
 }
 
 bool HTMLAnchorElement::has_activation_behavior() const

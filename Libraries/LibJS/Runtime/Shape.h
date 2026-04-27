@@ -10,8 +10,10 @@
 #include <AK/HashMap.h>
 #include <AK/OwnPtr.h>
 #include <AK/StringView.h>
+#include <AK/Vector.h>
 #include <AK/Weakable.h>
 #include <LibGC/Weak.h>
+#include <LibGC/WeakInlines.h>
 #include <LibJS/Export.h>
 #include <LibJS/Forward.h>
 #include <LibJS/Heap/Cell.h>
@@ -33,6 +35,11 @@ struct TransitionKey {
     bool operator==(TransitionKey const& other) const
     {
         return property_key == other.property_key && attributes == other.attributes;
+    }
+
+    void visit_edges(Cell::Visitor& visitor)
+    {
+        property_key.visit_edges(visitor);
     }
 };
 
@@ -70,8 +77,7 @@ public:
     [[nodiscard]] GC::Ref<Shape> create_configure_transition(PropertyKey const&, PropertyAttributes attributes);
     [[nodiscard]] GC::Ref<Shape> create_prototype_transition(Object* new_prototype);
     [[nodiscard]] GC::Ref<Shape> create_delete_transition(PropertyKey const&);
-    [[nodiscard]] GC::Ref<Shape> create_cacheable_dictionary_transition();
-    [[nodiscard]] GC::Ref<Shape> create_uncacheable_dictionary_transition();
+    [[nodiscard]] GC::Ref<Shape> create_dictionary_transition();
     [[nodiscard]] GC::Ref<Shape> clone_for_prototype();
 
     void add_property_without_transition(PropertyKey const&, PropertyAttributes);
@@ -79,10 +85,9 @@ public:
     void remove_property_without_transition(PropertyKey const&, u32 offset);
     void set_property_attributes_without_transition(PropertyKey const&, PropertyAttributes);
 
-    [[nodiscard]] bool is_cacheable() const { return m_cacheable; }
     [[nodiscard]] bool is_dictionary() const { return m_dictionary; }
-    [[nodiscard]] bool is_cacheable_dictionary() const { return m_dictionary && m_cacheable; }
-    [[nodiscard]] bool is_uncacheable_dictionary() const { return m_dictionary && !m_cacheable; }
+    [[nodiscard]] bool has_parameter_map() const { return m_has_parameter_map; }
+    void set_has_parameter_map() { m_has_parameter_map = true; }
 
     [[nodiscard]] u32 dictionary_generation() const { return m_dictionary_generation; }
 
@@ -100,11 +105,6 @@ public:
     OrderedHashMap<PropertyKey, PropertyMetadata> const& property_table() const;
     u32 property_count() const { return m_property_count; }
 
-    struct Property {
-        PropertyKey key;
-        PropertyMetadata value;
-    };
-
     void set_prototype_without_transition(Object* new_prototype);
 
 private:
@@ -116,6 +116,8 @@ private:
     void invalidate_prototype_if_needed_for_new_prototype(GC::Ref<Shape> new_prototype_shape);
     void invalidate_prototype_if_needed_for_change_without_transition();
     void invalidate_all_prototype_chains_leading_to_this();
+
+    void add_child_prototype_shape(GC::Ref<Shape>);
 
     virtual void visit_edges(Visitor&) override;
 
@@ -129,8 +131,8 @@ private:
     TransitionType m_transition_type { TransitionType::Invalid };
 
     bool m_dictionary : 1 { false };
-    bool m_cacheable : 1 { true };
     bool m_is_prototype_shape : 1 { false };
+    bool m_has_parameter_map : 1 { false };
 
     GC::Ref<Realm> m_realm;
 
@@ -143,14 +145,17 @@ private:
     Optional<PropertyKey> m_property_key;
     GC::Ptr<Object> m_prototype;
 
+    // The following two are only populated for prototype shapes.
     GC::Ptr<PrototypeChainValidity> m_prototype_chain_validity;
+    // Prototype shapes whose immediate [[Prototype]] is the object that owns this shape.
+    OwnPtr<Vector<GC::Weak<Shape>>> m_child_prototype_shapes;
 
     u32 m_property_count { 0 };
     u32 m_dictionary_generation { 0 };
 };
 
 #if !defined(AK_OS_WINDOWS)
-static_assert(sizeof(Shape) == 96, "Keep the size of JS::Shape down!");
+static_assert(sizeof(Shape) == 104, "Keep the size of JS::Shape down!");
 #endif
 
 }

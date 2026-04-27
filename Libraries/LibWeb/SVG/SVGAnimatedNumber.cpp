@@ -6,7 +6,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGAnimatedNumberPrototype.h>
+#include <LibWeb/Bindings/SVGAnimatedNumber.h>
 #include <LibWeb/SVG/AttributeParser.h>
 #include <LibWeb/SVG/SVGAnimatedNumber.h>
 
@@ -14,16 +14,25 @@ namespace Web::SVG {
 
 GC_DEFINE_ALLOCATOR(SVGAnimatedNumber);
 
-GC::Ref<SVGAnimatedNumber> SVGAnimatedNumber::create(JS::Realm& realm, GC::Ref<SVGElement> element,
-    DOM::QualifiedName reflected_attribute, float initial_value, SupportsSecondValue supports_second_value,
+GC::Ref<SVGAnimatedNumber> SVGAnimatedNumber::create(
+    JS::Realm& realm,
+    GC::Ref<SVGElement> element,
+    DOM::QualifiedName reflected_attribute,
+    float initial_value,
+    SupportsSecondValue supports_second_value,
     ValueRepresented value_represented)
 {
     return realm.create<SVGAnimatedNumber>(realm, element, move(reflected_attribute), initial_value,
         supports_second_value, value_represented);
 }
 
-SVGAnimatedNumber::SVGAnimatedNumber(JS::Realm& realm, GC::Ref<SVGElement> element, DOM::QualifiedName reflected_attribute,
-    float initial_value, SupportsSecondValue supports_second_value, ValueRepresented value_represented)
+SVGAnimatedNumber::SVGAnimatedNumber(
+    JS::Realm& realm,
+    GC::Ref<SVGElement> element,
+    DOM::QualifiedName reflected_attribute,
+    float initial_value,
+    SupportsSecondValue supports_second_value,
+    ValueRepresented value_represented)
     : PlatformObject(realm)
     , m_element(element)
     , m_reflected_attribute(move(reflected_attribute))
@@ -42,7 +51,7 @@ float SVGAnimatedNumber::base_val() const
     return get_base_or_anim_value();
 }
 
-// // https://svgwg.org/svg2-draft/types.html#__svg__SVGAnimatedNumber__baseVal
+// https://svgwg.org/svg2-draft/types.html#__svg__SVGAnimatedNumber__baseVal
 void SVGAnimatedNumber::set_base_val(float new_value)
 {
     // 1. Let value be the value being assigned to baseVal.

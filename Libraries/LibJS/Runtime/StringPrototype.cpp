@@ -182,8 +182,8 @@ void StringPrototype::initialize(Realm& realm)
 
     // 22.1.3 Properties of the String Prototype Object, https://tc39.es/ecma262/#sec-properties-of-the-string-prototype-object
     define_native_function(realm, vm.names.at, at, 1, attr);
-    define_native_function(realm, vm.names.charAt, char_at, 1, attr);
-    define_native_function(realm, vm.names.charCodeAt, char_code_at, 1, attr);
+    define_native_function(realm, vm.names.charAt, char_at, 1, attr, Bytecode::Builtin::StringPrototypeCharAt);
+    define_native_function(realm, vm.names.charCodeAt, char_code_at, 1, attr, Bytecode::Builtin::StringPrototypeCharCodeAt);
     define_native_function(realm, vm.names.codePointAt, code_point_at, 1, attr);
     define_native_function(realm, vm.names.concat, concat, 1, attr);
     define_native_function(realm, vm.names.endsWith, ends_with, 1, attr);
@@ -244,11 +244,11 @@ static ThrowCompletionOr<GC::Ref<PrimitiveString>> this_string_value(VM& vm, Val
         return value.as_string();
 
     // 2. If value is an Object and value has a [[StringData]] internal slot, then
-    if (value.is_object() && is<StringObject>(value.as_object())) {
+    if (auto string = value.as_if<StringObject>()) {
         // a. Let s be value.[[StringData]].
         // b. Assert: s is a String.
         // c. Return s.
-        return static_cast<StringObject&>(value.as_object()).primitive_string();
+        return string->primitive_string();
     }
 
     // 3. Throw a TypeError exception.
@@ -285,7 +285,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::at)
         return js_undefined();
 
     // 7. Return ? Get(O, ! ToString(𝔽(k))).
-    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(index.value(), 1));
+    return PrimitiveString::create(vm, *string, index.value(), 1);
 }
 
 // 22.1.3.2 String.prototype.charAt ( pos ), https://tc39.es/ecma262/#sec-string.prototype.charat
@@ -304,7 +304,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::char_at)
         return PrimitiveString::create(vm, String {});
 
     // 6. Return the substring of S from position to position + 1.
-    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(position, 1));
+    return PrimitiveString::create(vm, *string, position, 1);
 }
 
 // 22.1.3.3 String.prototype.charCodeAt ( pos ), https://tc39.es/ecma262/#sec-string.prototype.charcodeat
@@ -653,7 +653,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::match)
     auto regexp = vm.argument(0);
     if (regexp.is_object()) {
         // a. Let matcher be ? GetMethod(regexp, @@match).
-        static Bytecode::PropertyLookupCache cache;
+        static Bytecode::StaticPropertyLookupCache cache;
         auto matcher = TRY(regexp.get_method(vm, vm.well_known_symbol_match(), cache));
 
         // b. If matcher is not undefined, then
@@ -701,7 +701,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::match_all)
         }
 
         // c. Let matcher be ? GetMethod(regexp, @@matchAll).
-        static Bytecode::PropertyLookupCache cache;
+        static Bytecode::StaticPropertyLookupCache cache;
         auto matcher = TRY(regexp.get_method(vm, vm.well_known_symbol_match_all(), cache));
 
         // d. If matcher is not undefined, then
@@ -872,7 +872,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::replace)
     // 2. If searchValue is an Object, then
     if (search_value.is_object()) {
         // a. Let replacer be ? GetMethod(searchValue, @@replace).
-        static Bytecode::PropertyLookupCache cache;
+        static Bytecode::StaticPropertyLookupCache cache;
         auto replacer = TRY(search_value.get_method(vm, vm.well_known_symbol_replace(), cache));
 
         // b. If replacer is not undefined, then
@@ -974,7 +974,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::replace_all)
         }
 
         // c. Let replacer be ? GetMethod(searchValue, @@replace).
-        static Bytecode::PropertyLookupCache cache;
+        static Bytecode::StaticPropertyLookupCache cache;
         auto replacer = TRY(search_value.get_method(vm, vm.well_known_symbol_replace(), cache));
 
         // d. If replacer is not undefined, then
@@ -1081,7 +1081,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::search)
     // 2. If regexp is an Object, then
     if (regexp.is_object()) {
         // a. Let searcher be ? GetMethod(regexp, @@search).
-        static Bytecode::PropertyLookupCache cache;
+        static Bytecode::StaticPropertyLookupCache cache;
         auto searcher = TRY(regexp.get_method(vm, vm.well_known_symbol_search(), cache));
 
         // b. If searcher is not undefined, then
@@ -1147,7 +1147,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::slice)
         return PrimitiveString::create(vm, String {});
 
     // 13. Return the substring of S from from to to.
-    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(int_start, int_end - int_start));
+    return PrimitiveString::create(vm, *string, int_start, int_end - int_start);
 }
 
 // 22.1.3.23 String.prototype.split ( separator, limit ), https://tc39.es/ecma262/#sec-string.prototype.split
@@ -1163,7 +1163,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::split)
     // 2. If separator is an Object, then
     if (separator_argument.is_object()) {
         // a. Let splitter be ? GetMethod(separator, @@split).
-        static Bytecode::PropertyLookupCache cache;
+        static Bytecode::StaticPropertyLookupCache cache;
         auto splitter = TRY(separator_argument.get_method(vm, vm.well_known_symbol_split(), cache));
         // b. If splitter is not undefined, then
         if (splitter) {
@@ -1232,10 +1232,8 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::split)
             ++position;
             continue;
         }
-        auto segment = string->utf16_string_view().substring_view(start, position - start);
-
         // b. Append T to substrings.
-        MUST(array->create_data_property_or_throw(array_length, PrimitiveString::create(vm, segment)));
+        MUST(array->create_data_property_or_throw(array_length, PrimitiveString::create(vm, *string, start, position - start)));
         ++array_length;
 
         // c. If the number of elements in substrings is lim, return CreateArrayFromList(substrings).
@@ -1250,10 +1248,8 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::split)
     }
 
     // 15. Let T be the substring of S from i.
-    auto rest = string->utf16_string_view().substring_view(start);
-
     // 16. Append T to substrings.
-    MUST(array->create_data_property_or_throw(array_length, PrimitiveString::create(vm, rest)));
+    MUST(array->create_data_property_or_throw(array_length, PrimitiveString::create(vm, *string, start, string_length - start)));
 
     // 17. Return CreateArrayFromList(substrings).
     return array;
@@ -1345,7 +1341,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::substring)
     size_t to = max(final_start, final_end);
 
     // 10. Return the substring of S from from to to.
-    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(from, to - from));
+    return PrimitiveString::create(vm, *string, from, to - from);
 }
 
 enum class TargetCase {
@@ -1588,7 +1584,7 @@ JS_DEFINE_NATIVE_FUNCTION(StringPrototype::substr)
         return PrimitiveString::create(vm, String {});
 
     // 11. Return the substring of S from intStart to intEnd.
-    return PrimitiveString::create(vm, string->utf16_string_view().substring_view(int_start, int_end - int_start));
+    return PrimitiveString::create(vm, *string, int_start, int_end - int_start);
 }
 
 // B.2.2.2.1 CreateHTML ( string, tag, attribute, value ), https://tc39.es/ecma262/#sec-createhtml

@@ -43,6 +43,9 @@ public:
 
     virtual void visit_edges(Cell::Visitor&) override;
 
+    void set_iframe_fullscreen_flag(bool iframe_fullscreen_flag) { m_iframe_fullscreen_flag = iframe_fullscreen_flag; }
+    bool iframe_fullscreen_flag() const { return m_iframe_fullscreen_flag; }
+
 private:
     HTMLIFrameElement(DOM::Document&, DOM::QualifiedName);
 
@@ -53,7 +56,7 @@ private:
 
     // ^DOM::Element
     virtual void post_connection() override;
-    virtual void removed_from(Node* old_parent, Node& old_root) override;
+    virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
     virtual void attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
     virtual i32 default_tab_index_value() const override;
     virtual bool is_presentational_hint(FlyString const&) const override;
@@ -67,6 +70,9 @@ private:
 
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#current-navigation-was-lazy-loaded
     bool m_current_navigation_was_lazy_loaded { false };
+
+    // https://fullscreen.spec.whatwg.org/#iframe-fullscreen-flag
+    bool m_iframe_fullscreen_flag { false };
 
     // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#iframe-pending-resource-timing-start-time
     Optional<HighResolutionTime::DOMHighResTimeStamp> m_pending_resource_start_time = {};

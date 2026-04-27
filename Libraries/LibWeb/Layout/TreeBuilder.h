@@ -6,10 +6,7 @@
 
 #pragma once
 
-#include <AK/RefPtr.h>
 #include <LibGC/Ptr.h>
-#include <LibWeb/CSS/Display.h>
-#include <LibWeb/CSS/Selector.h>
 #include <LibWeb/Forward.h>
 
 namespace Web::Layout {
@@ -25,6 +22,7 @@ private:
         bool has_svg_root = false;
         bool layout_top_layer = false;
         bool layout_svg_mask_or_clip_path = false;
+        bool layout_svg_pattern = false;
     };
 
     i32 calculate_list_item_index(DOM::Node&);
@@ -58,7 +56,7 @@ private:
         Prepend,
     };
     void insert_node_into_inline_or_block_ancestor(Layout::Node&, CSS::Display, AppendOrPrepend);
-    void create_pseudo_element_if_needed(DOM::Element&, CSS::PseudoElement, AppendOrPrepend);
+    GC::Ptr<NodeWithStyle> create_pseudo_element_if_needed(DOM::Element&, CSS::PseudoElement, Optional<AppendOrPrepend>);
     void restructure_block_node_in_inline_parent(NodeWithStyleAndBoxModelMetrics&);
 
     GC::Ptr<Layout::Node> m_layout_root;

@@ -12,6 +12,7 @@
 #include <AK/Debug.h>
 #include <AK/DistinctNumeric.h>
 #include <AK/Math.h>
+#include <AK/SaturatingMath.h>
 #include <AK/Traits.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/Rect.h>
@@ -142,9 +143,9 @@ public:
         return from_raw(1);
     }
 
-    float to_float() const;
-    double to_double() const;
-    int to_int() const;
+    constexpr float to_float() const { return static_cast<float>(m_value) / fixed_point_denominator; }
+    constexpr double to_double() const { return static_cast<double>(m_value) / fixed_point_denominator; }
+    constexpr int to_int() const { return m_value / fixed_point_denominator; }
 
     constexpr int raw_value() const { return m_value; }
     constexpr void set_raw_value(int value) { m_value = value; }
@@ -159,12 +160,12 @@ public:
 
     constexpr CSSPixels& operator++()
     {
-        m_value = Checked<int>::saturating_add(m_value, fixed_point_denominator);
+        m_value = saturating_add(m_value, fixed_point_denominator);
         return *this;
     }
     constexpr CSSPixels& operator--()
     {
-        m_value = Checked<int>::saturating_sub(m_value, fixed_point_denominator);
+        m_value = saturating_sub(m_value, fixed_point_denominator);
         return *this;
     }
 
@@ -182,12 +183,12 @@ public:
 
     constexpr CSSPixels operator+(CSSPixels const& other) const
     {
-        return from_raw(Checked<int>::saturating_add(raw_value(), other.raw_value()));
+        return from_raw(saturating_add(raw_value(), other.raw_value()));
     }
 
     constexpr CSSPixels operator-(CSSPixels const& other) const
     {
-        return from_raw(Checked<int>::saturating_sub(raw_value(), other.raw_value()));
+        return from_raw(saturating_sub(raw_value(), other.raw_value()));
     }
 
     constexpr CSSPixels operator*(CSSPixels const& other) const
@@ -203,11 +204,11 @@ public:
             // If any bit after was 1 as well
             if (value & (radix_mask >> 1u)) {
                 // We need to round away from 0
-                int_value = Checked<int>::saturating_add(int_value, 1);
+                int_value = saturating_add(int_value, 1);
             } else {
                 // Otherwise we round to the next even value
                 // Which means we add the least significant bit of the raw integer value
-                int_value = Checked<int>::saturating_add(int_value, int_value & 1);
+                int_value = saturating_add(int_value, int_value & 1);
             }
         }
 
@@ -380,8 +381,8 @@ public:
     constexpr CSSPixels numerator() const { return m_numerator; }
     constexpr CSSPixels denominator() const { return m_denominator; }
 
-    float to_float() const { return CSSPixels(*this).to_float(); }
-    double to_double() const { return CSSPixels(*this).to_double(); }
+    float to_float() const { return m_numerator.to_float() / m_denominator.to_float(); }
+    double to_double() const { return m_numerator.to_double() / m_denominator.to_double(); }
     int to_int() const { return CSSPixels(*this).to_int(); }
     bool might_be_saturated() const { return CSSPixels(*this).might_be_saturated(); }
 
@@ -465,6 +466,14 @@ constexpr Web::CSSPixels square_distance_between(Web::CSSPixelPoint const& a, We
     auto delta_x = abs(a.x() - b.x());
     auto delta_y = abs(a.y() - b.y());
     return delta_x * delta_x + delta_y * delta_y;
+}
+
+constexpr Web::CSSPixelPoint constrained(Web::CSSPixelPoint const& point, Web::CSSPixelRect const& rect)
+{
+    return {
+        clamp(point.x(), rect.left(), rect.right() - 1),
+        clamp(point.y(), rect.top(), rect.bottom() - 1),
+    };
 }
 
 template<>

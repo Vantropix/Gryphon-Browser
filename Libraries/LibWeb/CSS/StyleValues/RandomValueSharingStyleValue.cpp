@@ -52,35 +52,28 @@ ValueComparingNonnullRefPtr<StyleValue const> RandomValueSharingStyleValue::abso
 
 double RandomValueSharingStyleValue::random_base_value() const
 {
-    VERIFY(m_fixed_value);
-    VERIFY(m_fixed_value->is_number() || (m_fixed_value->is_calculated() && m_fixed_value->as_calculated().resolves_to_number()));
-
-    if (m_fixed_value->is_number())
-        return m_fixed_value->as_number().number();
-
-    if (m_fixed_value->is_calculated())
-        return m_fixed_value->as_calculated().resolve_number({}).value();
-
-    VERIFY_NOT_REACHED();
+    return number_from_style_value(*m_fixed_value, {});
 }
 
-String RandomValueSharingStyleValue::to_string(SerializationMode serialization_mode) const
+void RandomValueSharingStyleValue::serialize(StringBuilder& builder, SerializationMode serialization_mode) const
 {
-    if (m_fixed_value)
-        return MUST(String::formatted("fixed {}", m_fixed_value->to_string(serialization_mode)));
+    if (m_fixed_value) {
+        builder.append("fixed "sv);
+        m_fixed_value->serialize(builder, serialization_mode);
+        return;
+    }
 
-    StringBuilder builder;
-
-    if (!m_is_auto)
+    bool first = true;
+    if (!m_is_auto) {
         builder.appendff("{}", m_name.value());
+        first = false;
+    }
 
     if (m_element_shared) {
-        if (!builder.is_empty())
+        if (!first)
             builder.append(' ');
         builder.append("element-shared"sv);
     }
-
-    return builder.to_string_without_validation();
 }
 
 }

@@ -17,43 +17,82 @@ namespace Web::CSS {
 
 struct Inset {
     Gfx::Path to_path(CSSPixelRect reference_box, Layout::Node const&) const;
-    String to_string(SerializationMode) const;
+    void serialize(StringBuilder&, SerializationMode) const;
 
     bool operator==(Inset const&) const = default;
+
+    bool is_computationally_independent() const
+    {
+        return top->is_computationally_independent()
+            && right->is_computationally_independent()
+            && bottom->is_computationally_independent()
+            && left->is_computationally_independent()
+            && border_radius->is_computationally_independent();
+    }
 
     ValueComparingNonnullRefPtr<StyleValue const> top;
     ValueComparingNonnullRefPtr<StyleValue const> right;
     ValueComparingNonnullRefPtr<StyleValue const> bottom;
     ValueComparingNonnullRefPtr<StyleValue const> left;
+
+    ValueComparingNonnullRefPtr<StyleValue const> border_radius;
 };
 
 struct Xywh {
-    String to_string(SerializationMode) const;
+    void serialize(StringBuilder&, SerializationMode) const;
 
     bool operator==(Xywh const&) const = default;
+
+    bool is_computationally_independent() const
+    {
+        return x->is_computationally_independent()
+            && y->is_computationally_independent()
+            && width->is_computationally_independent()
+            && height->is_computationally_independent()
+            && border_radius->is_computationally_independent();
+    }
 
     ValueComparingNonnullRefPtr<StyleValue const> x;
     ValueComparingNonnullRefPtr<StyleValue const> y;
     ValueComparingNonnullRefPtr<StyleValue const> width;
     ValueComparingNonnullRefPtr<StyleValue const> height;
+
+    ValueComparingNonnullRefPtr<StyleValue const> border_radius;
 };
 
 struct Rect {
-    String to_string(SerializationMode) const;
+    void serialize(StringBuilder&, SerializationMode) const;
 
     bool operator==(Rect const&) const = default;
+
+    bool is_computationally_independent() const
+    {
+        return top->is_computationally_independent()
+            && right->is_computationally_independent()
+            && bottom->is_computationally_independent()
+            && left->is_computationally_independent()
+            && border_radius->is_computationally_independent();
+    }
 
     ValueComparingNonnullRefPtr<StyleValue const> top;
     ValueComparingNonnullRefPtr<StyleValue const> right;
     ValueComparingNonnullRefPtr<StyleValue const> bottom;
     ValueComparingNonnullRefPtr<StyleValue const> left;
+
+    ValueComparingNonnullRefPtr<StyleValue const> border_radius;
 };
 
 struct Circle {
     Gfx::Path to_path(CSSPixelRect reference_box, Layout::Node const&) const;
-    String to_string(SerializationMode) const;
+    void serialize(StringBuilder&, SerializationMode) const;
 
     bool operator==(Circle const&) const = default;
+
+    bool is_computationally_independent() const
+    {
+        return radius->is_computationally_independent()
+            && (!position || position->is_computationally_independent());
+    }
 
     ValueComparingNonnullRefPtr<StyleValue const> radius;
     ValueComparingRefPtr<StyleValue const> position;
@@ -61,9 +100,15 @@ struct Circle {
 
 struct Ellipse {
     Gfx::Path to_path(CSSPixelRect reference_box, Layout::Node const&) const;
-    String to_string(SerializationMode) const;
+    void serialize(StringBuilder&, SerializationMode) const;
 
     bool operator==(Ellipse const&) const = default;
+
+    bool is_computationally_independent() const
+    {
+        return radius->is_computationally_independent()
+            && (!position || position->is_computationally_independent());
+    }
 
     ValueComparingNonnullRefPtr<StyleValue const> radius;
     ValueComparingRefPtr<StyleValue const> position;
@@ -77,9 +122,14 @@ struct Polygon {
     };
 
     Gfx::Path to_path(CSSPixelRect reference_box, Layout::Node const&) const;
-    String to_string(SerializationMode) const;
+    void serialize(StringBuilder&, SerializationMode) const;
 
     bool operator==(Polygon const&) const = default;
+
+    bool is_computationally_independent() const
+    {
+        return all_of(points, [](Point const& point) { return point.x->is_computationally_independent() && point.y->is_computationally_independent(); });
+    }
 
     Gfx::WindingRule fill_rule;
     Vector<Point> points;
@@ -88,9 +138,11 @@ struct Polygon {
 // https://drafts.csswg.org/css-shapes/#funcdef-basic-shape-path
 struct Path {
     Gfx::Path to_path(CSSPixelRect reference_box, Layout::Node const&) const;
-    String to_string(SerializationMode) const;
+    void serialize(StringBuilder&, SerializationMode) const;
 
     bool operator==(Path const&) const = default;
+
+    bool is_computationally_independent() const { return true; }
 
     Gfx::WindingRule fill_rule;
     SVG::Path path_instructions;
@@ -109,10 +161,15 @@ public:
 
     BasicShape const& basic_shape() const { return m_basic_shape; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(BasicShapeStyleValue const& other) const { return m_basic_shape == other.m_basic_shape; }
+
+    virtual bool is_computationally_independent() const override
+    {
+        return m_basic_shape.visit([](auto const& shape) { return shape.is_computationally_independent(); });
+    }
 
     Gfx::Path to_path(CSSPixelRect reference_box, Layout::Node const&) const;
 

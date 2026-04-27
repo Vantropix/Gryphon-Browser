@@ -8,26 +8,24 @@
 
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Forward.h>
-#include <LibWeb/WebGL/WebGLRenderingContextBase.h>
 
-namespace Web::WebGL::Extensions {
+namespace Web::WebGL {
 
 class WebGLCompressedTextureS3tcSrgb : public Bindings::PlatformObject {
     WEB_PLATFORM_OBJECT(WebGLCompressedTextureS3tcSrgb, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(WebGLCompressedTextureS3tcSrgb);
 
 public:
-    static JS::ThrowCompletionOr<GC::Ptr<WebGLCompressedTextureS3tcSrgb>> create(JS::Realm&, WebGLRenderingContextBase*);
+    static JS::ThrowCompletionOr<GC::Ref<JS::Object>> create(JS::Realm&, GC::Ref<WebGLRenderingContextBase>);
 
 protected:
     void initialize(JS::Realm&) override;
     void visit_edges(Visitor&) override;
 
 private:
-    WebGLCompressedTextureS3tcSrgb(JS::Realm&, WebGLRenderingContextBase*);
+    WebGLCompressedTextureS3tcSrgb(JS::Realm&, GC::Ref<WebGLRenderingContextBase>);
 
-    // FIXME: It should be GC::Ptr instead of raw pointer, but we need to make WebGLRenderingContextBase inherit from PlatformObject first.
-    WebGLRenderingContextBase* m_context;
+    GC::Ref<WebGLRenderingContextBase> m_context;
 };
 
 }

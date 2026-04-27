@@ -8,10 +8,11 @@
 
 #include <LibCrypto/PK/EC.h>
 #include <LibCrypto/PK/MLDSA.h>
+#include <LibCrypto/PK/MLKEM.h>
 #include <LibCrypto/PK/RSA.h>
 #include <LibGC/Ptr.h>
 #include <LibJS/Forward.h>
-#include <LibWeb/Bindings/CryptoKeyPrototype.h>
+#include <LibWeb/Bindings/CryptoKey.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Bindings/Serializable.h>
@@ -26,12 +27,12 @@ class CryptoKey final
     GC_DECLARE_ALLOCATOR(CryptoKey);
 
 public:
-    using InternalKeyData = Variant<ByteBuffer, Bindings::JsonWebKey, ::Crypto::PK::RSAPublicKey, ::Crypto::PK::RSAPrivateKey, ::Crypto::PK::ECPublicKey, ::Crypto::PK::ECPrivateKey, ::Crypto::PK::MLDSAPublicKey, ::Crypto::PK::MLDSAPrivateKey>;
+    using InternalKeyData = Variant<ByteBuffer, JsonWebKey, ::Crypto::PK::RSAPublicKey, ::Crypto::PK::RSAPrivateKey, ::Crypto::PK::ECPublicKey, ::Crypto::PK::ECPrivateKey, ::Crypto::PK::MLDSAPublicKey, ::Crypto::PK::MLDSAPrivateKey, ::Crypto::PK::MLKEMPublicKey, ::Crypto::PK::MLKEMPrivateKey>;
+
+    static constexpr bool OVERRIDES_FINALIZE = true;
 
     [[nodiscard]] static GC::Ref<CryptoKey> create(JS::Realm&, InternalKeyData);
     [[nodiscard]] static GC::Ref<CryptoKey> create(JS::Realm&);
-
-    virtual ~CryptoKey() override;
 
     bool extractable() const { return m_extractable; }
     Bindings::KeyType type() const { return m_type; }
@@ -42,13 +43,12 @@ public:
 
     void set_extractable(bool extractable) { m_extractable = extractable; }
     void set_type(Bindings::KeyType type) { m_type = type; }
-    void set_algorithm(GC::Ref<Object> algorithm) { m_algorithm = move(algorithm); }
+    void set_algorithm(GC::Ref<Object> algorithm) { m_algorithm = algorithm; }
     void set_usages(Vector<Bindings::KeyUsage>);
 
     InternalKeyData const& handle() const { return m_key_data; }
     String algorithm_name() const;
 
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::CryptoKey; }
     virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
     virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
 
@@ -58,6 +58,7 @@ private:
 
     virtual void initialize(JS::Realm&) override;
     virtual void visit_edges(Visitor&) override;
+    virtual void finalize() override;
 
     Bindings::KeyType m_type;
     bool m_extractable { false };

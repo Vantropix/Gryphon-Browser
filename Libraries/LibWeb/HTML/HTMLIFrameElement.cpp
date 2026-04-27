@@ -5,7 +5,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/HTMLIFrameElementPrototype.h>
+#include <LibWeb/Bindings/HTMLIFrameElement.h>
+#include <LibWeb/CSS/CascadedProperties.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
@@ -108,31 +109,16 @@ void HTMLIFrameElement::post_connection()
     if (!document.browsing_context() || !document.is_fully_active())
         return;
 
-    // The iframe HTML element post-connection steps, given insertedNode, are:
-    // 1. Create a new child navigable for insertedNode.
-    MUST(create_new_child_navigable(GC::create_function(realm().heap(), [this] {
-        // 2. If insertedNode has a sandbox attribute, then parse the sandboxing directive given the attribute's
-        //    value and insertedNode's iframe sandboxing flag set.
-        if (has_attribute(AttributeNames::sandbox)) {
-            auto sandbox_attribute = attribute(AttributeNames::sandbox);
-            VERIFY(sandbox_attribute.has_value());
-            m_iframe_sandboxing_flag_set = parse_a_sandboxing_directive(sandbox_attribute.value());
-        }
+    // 1. If insertedNode has a sandbox attribute, then parse the sandboxing directive given the attribute's
+    //    value and insertedNode's iframe sandboxing flag set.
+    if (auto sandbox = attribute(AttributeNames::sandbox); sandbox.has_value())
+        m_iframe_sandboxing_flag_set = parse_a_sandboxing_directive(sandbox.value());
 
-        // 3. Process the iframe attributes for insertedNode, with initialInsertion set to true.
-        process_the_iframe_attributes(InitialInsertion::Yes);
+    // 2. Create a new child navigable for insertedNode.
+    create_new_child_navigable();
 
-        if (auto navigable = content_navigable()) {
-            auto traversable = navigable->traversable_navigable();
-            traversable->append_session_history_traversal_steps(GC::create_function(heap(), [this] {
-                // NB: Use Core::Promise to signal SessionHistoryTraversalQueue that it can continue to execute next entry.
-                auto signal_to_continue_session_history_processing = Core::Promise<Empty>::construct();
-                set_content_navigable_has_session_history_entry_and_ready_for_navigation();
-                signal_to_continue_session_history_processing->resolve({});
-                return signal_to_continue_session_history_processing;
-            }));
-        }
-    })));
+    // 3. Process the iframe attributes for insertedNode, with initialInsertion set to true.
+    process_the_iframe_attributes(InitialInsertion::Yes);
 }
 
 // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#process-the-iframe-attributes
@@ -220,9 +206,9 @@ void HTMLIFrameElement::process_the_iframe_attributes(InitialInsertion initial_i
 }
 
 // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#the-iframe-element:the-iframe-element-7
-void HTMLIFrameElement::removed_from(DOM::Node* old_parent, DOM::Node& old_root)
+void HTMLIFrameElement::removed_from(IsSubtreeRoot is_subtree_root, DOM::Node* old_ancestor, DOM::Node& old_root)
 {
-    HTMLElement::removed_from(old_parent, old_root);
+    HTMLElement::removed_from(is_subtree_root, old_ancestor, old_root);
 
     // When an iframe element is removed from a document, the user agent must destroy the nested navigable of the element.
     destroy_the_child_navigable();

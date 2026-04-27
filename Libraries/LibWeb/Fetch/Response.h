@@ -10,7 +10,7 @@
 #include <LibGC/Ptr.h>
 #include <LibJS/Forward.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/Bindings/RequestPrototype.h>
+#include <LibWeb/Bindings/Request.h>
 #include <LibWeb/Fetch/Body.h>
 #include <LibWeb/Fetch/BodyInit.h>
 #include <LibWeb/Fetch/Headers.h>
@@ -35,7 +35,7 @@ class Response final
 
 public:
     [[nodiscard]] static GC::Ref<Response> create(JS::Realm&, GC::Ref<Infrastructure::Response>, Headers::Guard);
-    static WebIDL::ExceptionOr<GC::Ref<Response>> construct_impl(JS::Realm&, Optional<BodyInit> const& body = {}, ResponseInit const& init = {});
+    static WebIDL::ExceptionOr<GC::Ref<Response>> construct_impl(JS::Realm&, NullableBodyInit const& body = { Empty {} }, ResponseInit const& init = {});
 
     virtual ~Response() override;
 

@@ -17,13 +17,17 @@
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
 #include <LibWeb/HTML/Scripting/ModuleMap.h>
 #include <LibWeb/HTML/Scripting/SerializedEnvironmentSettingsObject.h>
+#include <LibWeb/HighResolutionTime/TimeOrigin.h>
 #include <LibWeb/ServiceWorker/Registration.h>
 
 namespace Web::HTML {
 
+class UniversalGlobalScopeMixin;
+
 // https://html.spec.whatwg.org/multipage/webappapis.html#environment
 struct WEB_API Environment : public JS::Cell {
     GC_CELL(Environment, JS::Cell);
+    GC_DECLARE_ALLOCATOR(Environment);
 
 public:
     virtual ~Environment() override;
@@ -78,6 +82,8 @@ struct WEB_API EnvironmentSettingsObject : public Environment {
     GC_CELL(EnvironmentSettingsObject, Environment);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual void finalize() override;
     virtual void initialize(JS::Realm&) override;
 
@@ -90,9 +96,6 @@ public:
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#responsible-document
     virtual GC::Ptr<DOM::Document> responsible_document() = 0;
-
-    // https://html.spec.whatwg.org/multipage/webappapis.html#api-url-character-encoding
-    virtual String api_url_character_encoding() const = 0;
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#api-base-url
     virtual URL::URL api_base_url() const = 0;
@@ -118,6 +121,9 @@ public:
 
     JS::Realm& realm();
     JS::Object& global_object();
+    JS::Object const& global_object() const { return const_cast<EnvironmentSettingsObject*>(this)->global_object(); }
+    UniversalGlobalScopeMixin& universal_global_scope();
+    UniversalGlobalScopeMixin const& universal_global_scope() const { return const_cast<EnvironmentSettingsObject*>(this)->universal_global_scope(); }
     EventLoop& responsible_event_loop();
 
     // https://fetch.spec.whatwg.org/#concept-fetch-group
@@ -138,6 +144,24 @@ public:
 
     virtual void discard_environment() override;
 
+    // FIXME: This method below is from HighResolutionTime spec in section 3. Section for Specification Authors.
+    // The following other methods are currently not supported:
+    // `current relative timestamp`     https://www.w3.org/TR/hr-time-3/#dfn-current-relative-timestamp
+    // `current monotonic time`         https://www.w3.org/TR/hr-time-3/#dfn-current-monotonic-time
+    // `current coarsened wall time`    https://www.w3.org/TR/hr-time-3/#dfn-current-wall-time
+
+    // https://w3c.github.io/hr-time/#dfn-eso-current-wall-time
+    HighResolutionTime::DOMHighResTimeStamp current_wall_time() const
+    {
+        // An environment settings object settingsObject's current wall time is the result of the following steps:
+
+        // 1. Let unsafeWallTime be the wall clock's unsafe current time.
+        auto unsafe_walltime = HighResolutionTime::wall_clock_unsafe_current_time();
+
+        // 2. Return the result of calling coarsen time with unsafeWallTime and settingsObject's cross-origin isolated capability.
+        return HighResolutionTime::coarsen_time(unsafe_walltime, cross_origin_isolated_capability());
+    }
+
 protected:
     explicit EnvironmentSettingsObject(NonnullOwnPtr<JS::ExecutionContext>);
 
@@ -146,6 +170,7 @@ protected:
 private:
     NonnullOwnPtr<JS::ExecutionContext> m_realm_execution_context;
     GC::Ptr<ModuleMap> m_module_map;
+    UniversalGlobalScopeMixin* m_universal_global_scope { nullptr };
 
     GC::Ptr<EventLoop> m_responsible_event_loop;
 
@@ -172,41 +197,33 @@ private:
     bool m_discarded { false };
 };
 
-JS::ExecutionContext const& execution_context_of_realm(JS::Realm const&);
-inline JS::ExecutionContext& execution_context_of_realm(JS::Realm& realm) { return const_cast<JS::ExecutionContext&>(execution_context_of_realm(const_cast<JS::Realm const&>(realm))); }
+RunScriptDecision can_run_script(EnvironmentSettingsObject const&);
+bool is_scripting_enabled(EnvironmentSettingsObject const&);
+bool is_scripting_disabled(EnvironmentSettingsObject const&);
+void prepare_to_run_script(EnvironmentSettingsObject&);
+void clean_up_after_running_script(EnvironmentSettingsObject const&);
+WEB_API void prepare_to_run_callback(EnvironmentSettingsObject&);
+WEB_API void clean_up_after_running_callback(EnvironmentSettingsObject const&);
+WEB_API bool module_type_allowed(EnvironmentSettingsObject const&, StringView module_type);
 
-RunScriptDecision can_run_script(JS::Realm const&);
-bool is_scripting_enabled(JS::Realm const&);
-bool is_scripting_disabled(JS::Realm const&);
-void prepare_to_run_script(JS::Realm&);
-void clean_up_after_running_script(JS::Realm const&);
-WEB_API void prepare_to_run_callback(JS::Realm&);
-WEB_API void clean_up_after_running_callback(JS::Realm const&);
-WEB_API ModuleMap& module_map_of_realm(JS::Realm&);
-WEB_API bool module_type_allowed(JS::Realm const&, StringView module_type);
+WEB_API void add_module_to_resolved_module_set(EnvironmentSettingsObject&, String const& serialized_base_url, String const& normalized_specifier, Optional<URL::URL> const& as_url);
 
-WEB_API void add_module_to_resolved_module_set(JS::Realm&, String const& serialized_base_url, String const& normalized_specifier, Optional<URL::URL> const& as_url);
-
-EnvironmentSettingsObject& incumbent_settings_object();
+WEB_API EnvironmentSettingsObject& incumbent_settings_object();
 WEB_API JS::Realm& incumbent_realm();
+
 JS::Object& incumbent_global_object();
 
-JS::Realm& current_principal_realm();
 EnvironmentSettingsObject& principal_realm_settings_object(JS::Realm&);
-EnvironmentSettingsObject& current_principal_settings_object();
+EnvironmentSettingsObject& current_settings_object();
 
-WEB_API JS::Realm& principal_realm(GC::Ref<JS::Realm>);
-WEB_API JS::Object& current_principal_global_object();
+WEB_API JS::Object& current_global_object();
 
 WEB_API JS::Realm& relevant_realm(JS::Object const&);
-JS::Realm& relevant_principal_realm(JS::Object const&);
 
 WEB_API EnvironmentSettingsObject& relevant_settings_object(JS::Object const&);
 EnvironmentSettingsObject& relevant_settings_object(DOM::Node const&);
-WEB_API EnvironmentSettingsObject& relevant_principal_settings_object(JS::Object const&);
 
 WEB_API JS::Object& relevant_global_object(JS::Object const&);
-WEB_API JS::Object& relevant_principal_global_object(JS::Object const&);
 
 JS::Realm& entry_realm();
 EnvironmentSettingsObject& entry_settings_object();

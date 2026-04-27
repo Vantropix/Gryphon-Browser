@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2022, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2023, Luke Wilde <lukew@serenityos.org>
- * Copyright (c) 2024-2025, Shannon Booth <shannon@serenityos.org>
+ * Copyright (c) 2024-2026, Shannon Booth <shannon@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -9,22 +9,17 @@
 #include <AK/String.h>
 #include <LibGC/RootVector.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/StoragePrototype.h>
+#include <LibWeb/Bindings/Storage.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/Navigable.h>
 #include <LibWeb/HTML/Storage.h>
 #include <LibWeb/HTML/StorageEvent.h>
 #include <LibWeb/HTML/Window.h>
+#include <LibWeb/WebIDL/QuotaExceededError.h>
 
 namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(Storage);
-
-static HashTable<GC::RawRef<Storage>>& all_storages()
-{
-    // FIXME: This needs to be stored at the user agent level.
-    static HashTable<GC::RawRef<Storage>> storages;
-    return storages;
-}
 
 GC::Ref<Storage> Storage::create(JS::Realm& realm, Type type, GC::Ref<StorageAPI::StorageBottle> storage_bottle)
 {
@@ -37,17 +32,15 @@ Storage::Storage(JS::Realm& realm, Type type, GC::Ref<StorageAPI::StorageBottle>
     , m_storage_bottle(move(storage_bottle))
 {
     m_legacy_platform_object_flags = LegacyPlatformObjectFlags {
-        .supports_indexed_properties = true,
+        .supports_indexed_properties = false,
         .supports_named_properties = true,
-        .has_indexed_property_setter = true,
+        .has_indexed_property_setter = false,
         .has_named_property_setter = true,
         .has_named_property_deleter = true,
-        .indexed_property_setter_has_identifier = true,
+        .indexed_property_setter_has_identifier = false,
         .named_property_setter_has_identifier = true,
         .named_property_deleter_has_identifier = true,
     };
-
-    all_storages().set(*this);
 }
 
 Storage::~Storage() = default;
@@ -56,11 +49,6 @@ void Storage::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(Storage);
     Base::initialize(realm);
-}
-
-void Storage::finalize()
-{
-    all_storages().remove(*this);
 }
 
 void Storage::visit_edges(GC::Cell::Visitor& visitor)
@@ -80,11 +68,12 @@ size_t Storage::length() const
 Optional<String> Storage::key(size_t index)
 {
     // 1. If index is greater than or equal to this's map's size, then return null.
-    if (index >= m_storage_bottle->size())
-        return {};
-
     // 2. Let keys be the result of running get the keys on this's map.
+    // NB: We combine these steps so we don't have to do two IPC calls and cause a race condition if the storage bottle
+    //     changes size between them.
     auto keys = m_storage_bottle->keys();
+    if (index >= keys.size())
+        return {};
 
     // 3. Return keys[index].
     return keys[index];
@@ -102,17 +91,33 @@ Optional<String> Storage::get_item(String const& key) const
 WebIDL::ExceptionOr<void> Storage::set_item(String const& key, String const& value)
 {
     // 1. Let oldValue be null.
-    Optional<String> old_value;
-
     // 2. Let reorder be true.
-    // 3. If this's map[key] exists:
+    bool reorder = true;
 
+    // 3. If this's map[key] exists:
+    //     1. Set oldValue to this's map[key].
+    //     2. If oldValue is value, then return.
+    //     3. Set reorder to false.
     // 4. If value cannot be stored, then throw a "QuotaExceededError" DOMException.
     // 5. Set this's map[key] to value.
-    auto error = m_storage_bottle->set(key, value);
-    if (error == WebView::StorageOperationError::QuotaExceededError) {
+
+    auto result = m_storage_bottle->set(key, value);
+
+    if (result.has<WebView::StorageOperationError>())
         return WebIDL::QuotaExceededError::create(realm(), Utf16String::formatted("Unable to store more than {} bytes in storage", *m_storage_bottle->quota()));
+
+    auto old_value = result.get<Optional<String>>();
+
+    if (old_value.has_value()) {
+        if (old_value.value() == value)
+            return {};
+
+        reorder = false;
     }
+
+    // 6. If reorder is true, then reorder this.
+    if (reorder)
+        this->reorder();
 
     // 7. Broadcast this with key, oldValue, and value.
     broadcast(key, old_value, value);
@@ -142,10 +147,14 @@ void Storage::remove_item(String const& key)
 // https://html.spec.whatwg.org/multipage/webstorage.html#dom-storage-clear
 void Storage::clear()
 {
-    // 1. Clear this's map.
+    // 1. If this's map is empty, then return.
+    if (m_storage_bottle->size() == 0)
+        return;
+
+    // 2. Clear this's map.
     m_storage_bottle->clear();
 
-    // 2. Broadcast this with null, null, and null.
+    // 3. Broadcast this with null, null, and null.
     broadcast({}, {}, {});
 }
 
@@ -154,6 +163,21 @@ void Storage::reorder()
 {
     // To reorder a Storage object storage, reorder storage's map's entries in an implementation-defined manner.
     // NOTE: This basically means that we're not required to maintain any particular iteration order.
+}
+
+static GC::Ptr<Storage> obtain_storage_for_window(Window& window, Storage::Type type)
+{
+    if (type == Storage::Type::Local) {
+        auto storage = window.local_storage();
+        if (storage.is_exception())
+            return {};
+        return storage.release_value();
+    }
+
+    auto storage = window.session_storage();
+    if (storage.is_exception())
+        return {};
+    return storage.release_value();
 }
 
 // https://html.spec.whatwg.org/multipage/webstorage.html#concept-storage-broadcast
@@ -170,34 +194,48 @@ void Storage::broadcast(Optional<String> const& key, Optional<String> const& old
 
     // 3. Let remoteStorages be all Storage objects excluding storage whose:
     GC::RootVector<GC::Ref<Storage>> remote_storages(heap());
-    for (auto storage : all_storages()) {
-        if (storage == this)
-            continue;
 
+    // AD-HOC: The specification defines this by iterating over created Storage objects. However, Storage objects are
+    //         created lazily when accessed through window.localStorage or window.sessionStorage. This means that events
+    //         will not be fired to Windows who have not had these properties accessed - which is not expected.
+    //         See: https://github.com/whatwg/html/issues/10135. To solve this, we instead iterate over all active
+    //         windows, and initialize any storage objects as part of this loop.
+    Window::for_each_active([&](auto& window) {
         // * type is storage's type
-        if (storage->type() != type())
-            continue;
+        auto storage = obtain_storage_for_window(window, type());
+        if (!storage)
+            return IterationDecision::Continue;
+
+        // "excluding storage"
+        if (storage == this)
+            return IterationDecision::Continue;
 
         // * relevant settings object's origin is same origin with storage's relevant settings object's origin
-        if (!relevant_settings_object(*this).origin().is_same_origin(relevant_settings_object(storage).origin()))
-            continue;
+        if (!relevant_settings_object(*this).origin().is_same_origin(relevant_settings_object(*storage).origin()))
+            return IterationDecision::Continue;
 
         // * and, if type is "session", whose relevant settings object's associated Document's node navigable's traversable navigable
         //   is thisDocument's node navigable's traversable navigable.
         if (type() == Type::Session) {
-            auto& storage_document = *relevant_settings_object(storage).responsible_document();
+            auto& storage_document = *relevant_settings_object(*storage).responsible_document();
 
-            // NOTE: It is possible the remote storage may have not been fully teared down immediately at the point it's document is made inactive.
+            // NB: It is possible the remote storage may have not been fully teared down immediately at the point it's
+            //     document is made inactive.
             if (!storage_document.navigable())
-                continue;
-            VERIFY(this_document.navigable());
+                return IterationDecision::Continue;
+
+            // NB: It is possible for this storage's document to have lost its navigable if script holds a reference to
+            //     the Storage object after its browsing context has navigated to a new document.
+            if (!this_document.navigable())
+                return IterationDecision::Continue;
 
             if (storage_document.navigable()->traversable_navigable() != this_document.navigable()->traversable_navigable())
-                continue;
+                return IterationDecision::Continue;
         }
 
-        remote_storages.append(storage);
-    }
+        remote_storages.append(*storage);
+        return IterationDecision::Continue;
+    });
 
     // 4. For each remoteStorage of remoteStorages: queue a global task on the DOM manipulation task source given remoteStorage's relevant
     //    global object to fire an event named storage at remoteStorage's relevant global object, using StorageEvent, with key initialized
@@ -227,16 +265,6 @@ Vector<FlyString> Storage::supported_property_names() const
     return names;
 }
 
-Optional<JS::Value> Storage::item_value(size_t index) const
-{
-    // Handle index as a string since that's our key type
-    auto key = String::number(index);
-    auto value = get_item(key);
-    if (!value.has_value())
-        return {};
-    return JS::PrimitiveString::create(vm(), value.release_value());
-}
-
 JS::Value Storage::named_item_value(FlyString const& name) const
 {
     auto value = get_item(String(name));
@@ -251,13 +279,6 @@ WebIDL::ExceptionOr<Bindings::PlatformObject::DidDeletionFail> Storage::delete_v
 {
     remove_item(name);
     return DidDeletionFail::NotRelevant;
-}
-
-WebIDL::ExceptionOr<void> Storage::set_value_of_indexed_property(u32 index, JS::Value unconverted_value)
-{
-    // Handle index as a string since that's our key type
-    auto key = String::number(index);
-    return set_value_of_named_property(key, unconverted_value);
 }
 
 WebIDL::ExceptionOr<void> Storage::set_value_of_named_property(String const& key, JS::Value unconverted_value)

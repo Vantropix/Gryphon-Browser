@@ -28,14 +28,16 @@ public:
     bool hanging() const { return m_hanging; }
     bool each_line() const { return m_each_line; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
     bool properties_equal(TextIndentStyleValue const&) const;
+
+    virtual bool is_computationally_independent() const override { return m_length_percentage->is_computationally_independent(); }
 
 private:
     TextIndentStyleValue(NonnullRefPtr<StyleValue const> length_percentage, Hanging hanging, EachLine each_line);
 
-    NonnullRefPtr<StyleValue const> m_length_percentage;
+    ValueComparingNonnullRefPtr<StyleValue const> m_length_percentage;
     bool m_hanging;
     bool m_each_line;
 };

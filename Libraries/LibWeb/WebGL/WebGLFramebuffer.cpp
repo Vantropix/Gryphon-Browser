@@ -7,19 +7,19 @@
 
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/WebGLFramebufferPrototype.h>
+#include <LibWeb/Bindings/WebGLFramebuffer.h>
 #include <LibWeb/WebGL/WebGLFramebuffer.h>
 
 namespace Web::WebGL {
 
 GC_DEFINE_ALLOCATOR(WebGLFramebuffer);
 
-GC::Ref<WebGLFramebuffer> WebGLFramebuffer::create(JS::Realm& realm, WebGLRenderingContextBase& context, GLuint handle)
+GC::Ref<WebGLFramebuffer> WebGLFramebuffer::create(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase> context, GLuint handle)
 {
     return realm.create<WebGLFramebuffer>(realm, context, handle);
 }
 
-WebGLFramebuffer::WebGLFramebuffer(JS::Realm& realm, WebGLRenderingContextBase& context, GLuint handle)
+WebGLFramebuffer::WebGLFramebuffer(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase> context, GLuint handle)
     : WebGLObject(realm, context, handle)
 {
 }

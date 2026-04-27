@@ -92,8 +92,7 @@ function(invoke_cpp_generator name generator primary_source header implementatio
 endfunction()
 
 function(invoke_py_generator name script primary_source header implementation)
-    cmake_parse_arguments(invoke_py_generator "" "EXTRA_HEADER" "arguments" ${ARGN})
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    cmake_parse_arguments(invoke_py_generator "" "EXTRA_HEADER" "arguments;dependencies" ${ARGN})
 
     set(py_generator_arguments ${invoke_py_generator_arguments})
     if (invoke_py_generator_EXTRA_HEADER)
@@ -103,12 +102,13 @@ function(invoke_py_generator name script primary_source header implementation)
 
     invoke_generator_impl(
         ${name}
-        "${LADYBIRD_PROJECT_ROOT}/Meta/${script}"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/${script}"
         ${primary_source}
         ${header}
         ${implementation}
         command ${Python3_EXECUTABLE}
         arguments ${py_generator_arguments}
+        dependencies ${invoke_py_generator_dependencies}
         extra_header "${invoke_py_generator_EXTRA_HEADER}"
     )
 endfunction()
@@ -125,6 +125,29 @@ function(invoke_idl_generator cpp_name idl_name generator primary_source header 
         COMMAND "${CMAKE_COMMAND}" -E remove "${header}.tmp" "${implementation}.tmp" "${idl}.tmp"
         VERBATIM
         DEPENDS ${generator} ${invoke_idl_generator_dependencies} "${primary_source}"
+    )
+
+    add_custom_target("generate_${cpp_name}" DEPENDS "${header}" "${implementation}" "${idl}")
+    add_custom_target("generate_${idl_name}" DEPENDS "generate_${cpp_name}")
+    add_dependencies(ladybird_codegen_accumulator "generate_${cpp_name}")
+    add_dependencies(ladybird_codegen_accumulator "generate_${idl_name}")
+    list(APPEND CURRENT_LIB_GENERATED "${name}")
+    set(CURRENT_LIB_GENERATED ${CURRENT_LIB_GENERATED} PARENT_SCOPE)
+endfunction()
+
+function(invoke_py_idl_generator cpp_name idl_name script primary_source header implementation idl)
+    cmake_parse_arguments(invoke_py_idl_generator "" "" "arguments;dependencies" ${ARGN})
+
+    set(script_path "${LADYBIRD_SOURCE_DIR}/Meta/Generators/${script}")
+    add_custom_command(
+        OUTPUT "${header}" "${implementation}" "${idl}"
+        COMMAND ${Python3_EXECUTABLE} "${script_path}" -h "${header}.tmp" -c "${implementation}.tmp" -i "${idl}.tmp" ${invoke_py_idl_generator_arguments}
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${header}.tmp" "${header}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${implementation}.tmp" "${implementation}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${idl}.tmp" "${idl}"
+        COMMAND "${CMAKE_COMMAND}" -E remove "${header}.tmp" "${implementation}.tmp" "${idl}.tmp"
+        VERBATIM
+        DEPENDS "${script_path}" ${invoke_py_idl_generator_dependencies} "${primary_source}"
     )
 
     add_custom_target("generate_${cpp_name}" DEPENDS "${header}" "${implementation}" "${idl}")
@@ -203,8 +226,3 @@ function(add_lagom_library_install_rules target_name)
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
 endfunction()
-
-if (NOT COMMAND swizzle_target_properties_for_swift)
-    function(swizzle_target_properties_for_swift target)
-    endfunction()
-endif()

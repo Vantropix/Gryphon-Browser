@@ -59,11 +59,11 @@ public:
 
     void set_has_css_defined_animations();
     bool has_css_defined_animations() const;
-    HashMap<FlyString, GC::Ref<Animation>>* css_defined_animations(Optional<CSS::PseudoElement>);
-    void add_css_animation(FlyString name, Optional<CSS::PseudoElement>, GC::Ref<Animation>);
+    HashMap<FlyString, GC::Ref<CSS::CSSAnimation>>* css_defined_animations(Optional<CSS::PseudoElement>);
+    void add_css_animation(FlyString name, Optional<CSS::PseudoElement>, GC::Ref<CSS::CSSAnimation>);
     void remove_css_animation(FlyString name, Optional<CSS::PseudoElement>);
 
-    void add_transitioned_properties(Optional<CSS::PseudoElement>, Vector<Vector<CSS::PropertyID>> properties, CSS::StyleValueVector delays, CSS::StyleValueVector durations, CSS::StyleValueVector timing_functions, CSS::StyleValueVector transition_behaviors);
+    void add_transitioned_properties(Optional<CSS::PseudoElement>, Vector<CSS::TransitionProperties> const& transitions);
     Vector<CSS::PropertyID> property_ids_with_matching_transition_property_entry(Optional<CSS::PseudoElement>) const;
     Optional<TransitionAttributes const&> property_transition_attributes(Optional<CSS::PseudoElement>, CSS::PropertyID) const;
     void set_transition(Optional<CSS::PseudoElement>, CSS::PropertyID, GC::Ref<CSS::CSSTransition>);
@@ -83,10 +83,12 @@ private:
         bool is_sorted_by_composite_order { true };
         bool has_css_defined_animations { false };
 
-        mutable Array<OwnPtr<HashMap<FlyString, GC::Ref<Animation>>>, to_underlying(CSS::PseudoElement::KnownPseudoElementCount) + 1> css_defined_animations;
+        mutable Array<OwnPtr<HashMap<FlyString, GC::Ref<CSS::CSSAnimation>>>, to_underlying(CSS::PseudoElement::KnownPseudoElementCount) + 1> css_defined_animations;
         mutable Array<OwnPtr<Transition>, to_underlying(CSS::PseudoElement::KnownPseudoElementCount) + 1> transitions;
 
         ~Impl();
+
+        void visit_edges(JS::Cell::Visitor&);
     };
     Impl& ensure_impl() const;
     Transition* ensure_transition(Optional<CSS::PseudoElement>) const;

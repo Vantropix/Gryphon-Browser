@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/String.h>
+#include <AK/StringBuilder.h>
 #include <LibWeb/CSS/SerializationMode.h>
 #include <LibWeb/CSS/Units.h>
 #include <LibWeb/Forward.h>
@@ -19,6 +20,7 @@ public:
     static Angle make_degrees(double);
     Angle percentage_of(Percentage const&) const;
 
+    void serialize(StringBuilder&, SerializationMode = SerializationMode::Normal) const;
     String to_string(SerializationMode = SerializationMode::Normal) const;
 
     double to_degrees() const;
@@ -46,7 +48,6 @@ public:
     }
 
     static Angle from_style_value(NonnullRefPtr<StyleValue const> const&, Optional<Angle> percentage_basis);
-    static Angle resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, Layout::Node const&, Angle const& reference_value);
 
 private:
     AngleUnit m_unit;

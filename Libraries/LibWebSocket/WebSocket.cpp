@@ -6,9 +6,9 @@
  */
 
 #include <AK/Base64.h>
+#include <AK/Endian.h>
 #include <AK/Random.h>
 #include <LibCrypto/Hash/HashManager.h>
-#include <LibCrypto/SecureRandom.h>
 #include <LibWebSocket/Impl/WebSocketImplSerenity.h>
 #include <LibWebSocket/WebSocket.h>
 
@@ -36,6 +36,17 @@ void WebSocket::start()
         m_impl = adopt_ref(*new WebSocketImplSerenity);
 
     m_impl->on_connection_error = [this] {
+        if (m_state == InternalState::Closing) {
+            // If the connection drops while we are waiting for the server's close frame, check if we actually received
+            // one in the last read. If we did, we can consider this a clean close.
+            bool was_clean = m_last_close_code != to_underlying(CloseStatusCode::NoStatusReceived);
+            set_state(was_clean ? InternalState::Closed : InternalState::Errored);
+            if (!was_clean)
+                notify_error(Error::ServerClosedSocket);
+            notify_close(m_last_close_code, m_last_close_message, was_clean);
+            discard_connection();
+            return;
+        }
         dbgln("WebSocket: Connection error (underlying socket)");
         fatal_error(WebSocket::Error::CouldNotEstablishConnection);
     };
@@ -120,7 +131,11 @@ void WebSocket::close(u16 code, ByteString const& message)
         // Start the WebSocket closing handshake and set this’s ready state to CLOSING (2)."
         auto message_bytes = message.bytes();
         auto close_payload = ByteBuffer::create_uninitialized(message_bytes.size() + 2).release_value_but_fixme_should_propagate_errors(); // FIXME: Handle possible OOM situation.
-        close_payload.overwrite(0, (u8*)&code, 2);
+        // Section 5.5.1:
+        // > If there is a body, the first two bytes of the body MUST be a 2-byte unsigned integer (in network byte order)
+        // > representing a status code with value /code/ defined in Section 7.4.
+        NetworkOrdered<u16> network_ordered_code { code };
+        close_payload.overwrite(0, &network_ordered_code, sizeof(network_ordered_code));
         close_payload.overwrite(2, message_bytes.data(), message_bytes.size());
         send_frame(WebSocket::OpCode::ConnectionClose, close_payload, true);
         set_state(InternalState::Closing);
@@ -205,7 +220,7 @@ void WebSocket::send_client_handshake()
 
     // 7. 16-byte nonce encoded as Base64
     u8 nonce_data[16];
-    Crypto::fill_with_secure_random(nonce_data);
+    fill_with_random(nonce_data);
     // FIXME: change to TRY() and make method fallible
     m_websocket_key = MUST(encode_base64({ nonce_data, 16 })).to_byte_string();
     builder.appendff("Sec-WebSocket-Key: {}\r\n", m_websocket_key);
@@ -621,7 +636,7 @@ void WebSocket::send_frame(WebSocket::OpCode op_code, ReadonlyBytes payload, boo
         // > Clients MUST choose a new masking key for each frame, using an algorithm
         // > that cannot be predicted by end applications that provide data
         u8 masking_key[4];
-        Crypto::fill_with_secure_random(masking_key);
+        fill_with_random(masking_key);
         buf.overwrite(offset, masking_key, 4);
         offset += 4;
         // don't try to send empty payload

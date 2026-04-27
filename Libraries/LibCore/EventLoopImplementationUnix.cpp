@@ -5,6 +5,7 @@
  */
 
 #include <AK/BinaryHeap.h>
+#include <AK/HashMap.h>
 #include <AK/Singleton.h>
 #include <AK/TemporaryChange.h>
 #include <AK/Time.h>
@@ -13,7 +14,7 @@
 #include <LibCore/EventLoopImplementationUnix.h>
 #include <LibCore/EventReceiver.h>
 #include <LibCore/Notifier.h>
-#include <LibCore/Socket.h>
+#include <LibCore/Platform/ScopedAutoreleasePool.h>
 #include <LibCore/System.h>
 #include <LibCore/ThreadEventQueue.h>
 #include <LibThreading/Mutex.h>
@@ -263,6 +264,9 @@ struct ThreadData {
 
     ~ThreadData()
     {
+        close(wake_pipe_fds[0]);
+        close(wake_pipe_fds[1]);
+
         Threading::RWLockLocker<Threading::LockMode::Write> locker(s_thread_data_lock);
         s_thread_data.remove(s_thread_id);
     }
@@ -286,8 +290,9 @@ struct ThreadData {
 }
 
 EventLoopImplementationUnix::EventLoopImplementationUnix()
-    : m_wake_pipe_fds(ThreadData::the().wake_pipe_fds)
+    : m_wake_pipe_write_fd(ThreadData::the().wake_pipe_fds[1])
 {
+    VERIFY(m_wake_pipe_write_fd >= 0);
 }
 
 EventLoopImplementationUnix::~EventLoopImplementationUnix() = default;
@@ -304,6 +309,7 @@ int EventLoopImplementationUnix::exec()
 
 size_t EventLoopImplementationUnix::pump(PumpMode mode)
 {
+    ScopedAutoreleasePool autorelease_pool;
     static_cast<EventLoopManagerUnix&>(EventLoopManager::the()).wait_for_events(mode);
     return ThreadEventQueue::current().process();
 }
@@ -317,7 +323,12 @@ void EventLoopImplementationUnix::quit(int code)
 void EventLoopImplementationUnix::wake()
 {
     int wake_event = 0;
-    MUST(Core::System::write(m_wake_pipe_fds[1], { &wake_event, sizeof(wake_event) }));
+    auto result = Core::System::write(m_wake_pipe_write_fd, { &wake_event, sizeof(wake_event) });
+    // EBADF here just indicates that the ThreadData is destroyed, so we must be exiting the thread.
+    // Ignore it.
+    if (result.is_error() && result.error().code() == EBADF)
+        return;
+    MUST(move(result));
 }
 
 void EventLoopManagerUnix::wait_for_events(EventLoopImplementation::PumpMode mode)
@@ -408,7 +419,7 @@ try_select_again:
             if (has_flag(revents, POLLOUT))
                 type |= NotificationType::Write;
             if (has_flag(revents, POLLHUP))
-                type |= NotificationType::Read | NotificationType::HangUp;
+                type |= NotificationType::Read | NotificationType::Write | NotificationType::HangUp;
             if (has_flag(revents, POLLERR))
                 type |= NotificationType::Error;
 
@@ -556,7 +567,14 @@ bool SignalHandlers::remove(int handler_id)
 void EventLoopManagerUnix::handle_signal(int signal_number)
 {
     VERIFY(signal_number != 0);
-    auto& thread_data = ThreadData::the();
+
+    // Use the thread-local directly instead of ThreadData::the() to avoid
+    // taking a write lock on s_thread_data_lock. Signal handlers must not
+    // acquire locks, as we may already be holding one on this thread.
+    if (!s_this_thread_data)
+        return;
+    auto& thread_data = *s_this_thread_data;
+
     // We MUST check if the current pid still matches, because there
     // is a window between fork() and exec() where a signal delivered
     // to our fork could be inadvertently routed to the parent process!

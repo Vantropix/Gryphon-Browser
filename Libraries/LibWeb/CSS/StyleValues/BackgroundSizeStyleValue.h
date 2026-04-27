@@ -27,10 +27,12 @@ public:
     ValueComparingNonnullRefPtr<StyleValue const> size_x() const { return m_properties.size_x; }
     ValueComparingNonnullRefPtr<StyleValue const> size_y() const { return m_properties.size_y; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(BackgroundSizeStyleValue const& other) const { return m_properties == other.m_properties; }
+
+    virtual bool is_computationally_independent() const override { return m_properties.size_x->is_computationally_independent() && m_properties.size_y->is_computationally_independent(); }
 
 private:
     BackgroundSizeStyleValue(ValueComparingNonnullRefPtr<StyleValue const> size_x, ValueComparingNonnullRefPtr<StyleValue const> size_y);

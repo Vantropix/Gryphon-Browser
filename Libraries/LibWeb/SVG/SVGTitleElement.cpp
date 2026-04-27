@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGTitleElementPrototype.h>
+#include <LibWeb/Bindings/SVGTitleElement.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Page/Page.h>
 #include <LibWeb/SVG/SVGTitleElement.h>
@@ -30,7 +30,7 @@ GC::Ptr<Layout::Node> SVGTitleElement::create_layout_node(GC::Ref<CSS::ComputedP
     return nullptr;
 }
 
-void SVGTitleElement::children_changed(ChildrenChangedMetadata const* metadata)
+void SVGTitleElement::children_changed(ChildrenChangedMetadata const& metadata)
 {
     Base::children_changed(metadata);
 

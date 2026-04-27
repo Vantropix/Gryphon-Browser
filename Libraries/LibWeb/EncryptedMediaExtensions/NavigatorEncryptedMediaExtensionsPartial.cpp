@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/EncryptedMediaExtensions/Algorithms.h>
 #include <LibWeb/EncryptedMediaExtensions/MediaKeySystemAccess.h>
 #include <LibWeb/EncryptedMediaExtensions/NavigatorEncryptedMediaExtensionsPartial.h>
@@ -15,7 +16,7 @@
 namespace Web::EncryptedMediaExtensions {
 
 // https://w3c.github.io/encrypted-media/#dom-navigator-requestmediakeysystemaccess
-WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> NavigatorEncryptedMediaExtensionsPartial::request_media_key_system_access(Utf16String key_system, Vector<Bindings::MediaKeySystemConfiguration> supported_configurations)
+WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> NavigatorEncryptedMediaExtensionsPartial::request_media_key_system_access(Utf16String key_system, Vector<MediaKeySystemConfiguration> supported_configurations)
 {
     auto& navigator = as<HTML::Navigator>(*this);
     auto& realm = navigator.realm();

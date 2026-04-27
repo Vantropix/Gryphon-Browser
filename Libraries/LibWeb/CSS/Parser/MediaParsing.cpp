@@ -8,13 +8,16 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibWeb/CSS/CSSFunctionDeclarations.h>
 #include <LibWeb/CSS/CSSMediaRule.h>
 #include <LibWeb/CSS/CSSNestedDeclarations.h>
-#include <LibWeb/CSS/CalculatedOr.h>
 #include <LibWeb/CSS/MediaList.h>
 #include <LibWeb/CSS/MediaQuery.h>
 #include <LibWeb/CSS/Parser/ErrorReporter.h>
 #include <LibWeb/CSS/Parser/Parser.h>
+#include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
+#include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
+#include <LibWeb/CSS/StyleValues/UnresolvedStyleValue.h>
 
 namespace Web::CSS::Parser {
 
@@ -146,16 +149,32 @@ NonnullRefPtr<MediaQuery> Parser::parse_media_query(TokenStream<ComponentValue>&
 // `<media-condition>`, https://www.w3.org/TR/mediaqueries-4/#typedef-media-condition
 OwnPtr<BooleanExpression> Parser::parse_media_condition(TokenStream<ComponentValue>& tokens)
 {
-    return parse_boolean_expression(tokens, MatchResult::Unknown, [this](TokenStream<ComponentValue>& tokens) -> OwnPtr<BooleanExpression> {
-        return parse_media_feature(tokens);
+    return parse_boolean_expression(tokens, MatchResult::Unknown, [this](TokenStream<ComponentValue>& outer_tokens) -> OwnPtr<BooleanExpression> {
+        auto transaction = outer_tokens.begin_transaction();
+
+        outer_tokens.discard_whitespace();
+
+        if (!(outer_tokens.next_token().is_block() && outer_tokens.next_token().block().is_paren()))
+            return nullptr;
+
+        auto const& block = outer_tokens.consume_a_token().block();
+
+        TokenStream inner_tokens { block.value };
+
+        if (auto maybe_media_feature = parse_media_feature(inner_tokens)) {
+            transaction.commit();
+            return maybe_media_feature;
+        }
+
+        return nullptr;
     });
 }
 
-// `<media-feature>`, https://www.w3.org/TR/mediaqueries-4/#typedef-media-feature
-OwnPtr<MediaFeature> Parser::parse_media_feature(TokenStream<ComponentValue>& tokens)
+// `<media-feature>`, https://drafts.csswg.org/mediaqueries-5/#typedef-media-feature
+OwnPtr<MediaFeature> Parser::parse_media_feature(TokenStream<ComponentValue>& inner_tokens)
 {
-    // `[ <mf-plain> | <mf-boolean> | <mf-range> ]`
-    tokens.discard_whitespace();
+    // `<media-feature> = [ <mf-plain> | <mf-boolean> | <mf-range> ]`
+    auto transaction = inner_tokens.begin_transaction();
 
     // `<mf-name> = <ident>`
     struct MediaFeatureName {
@@ -377,14 +396,29 @@ OwnPtr<MediaFeature> Parser::parse_media_feature(TokenStream<ComponentValue>& to
         return {};
     };
 
-    if (auto maybe_mf_boolean = parse_mf_boolean(tokens))
+    if (auto maybe_mf_boolean = parse_mf_boolean(inner_tokens)) {
+        inner_tokens.discard_whitespace();
+        if (inner_tokens.has_next_token())
+            return nullptr;
+        transaction.commit();
         return maybe_mf_boolean.release_nonnull();
+    }
 
-    if (auto maybe_mf_plain = parse_mf_plain(tokens))
+    if (auto maybe_mf_plain = parse_mf_plain(inner_tokens)) {
+        inner_tokens.discard_whitespace();
+        if (inner_tokens.has_next_token())
+            return nullptr;
+        transaction.commit();
         return maybe_mf_plain.release_nonnull();
+    }
 
-    if (auto maybe_mf_range = parse_mf_range(tokens))
+    if (auto maybe_mf_range = parse_mf_range(inner_tokens)) {
+        inner_tokens.discard_whitespace();
+        if (inner_tokens.has_next_token())
+            return nullptr;
+        transaction.commit();
         return maybe_mf_range.release_nonnull();
+    }
 
     return {};
 }
@@ -465,10 +499,10 @@ Optional<MediaFeatureValue> Parser::parse_media_feature_value(MediaFeatureID med
             if (tokens.next_token().is(Token::Type::Ident)) {
                 auto transaction = tokens.begin_transaction();
                 tokens.discard_whitespace();
-                auto keyword = keyword_from_string(tokens.consume_a_token().token().ident());
-                if (keyword.has_value() && media_feature_accepts_keyword(media_feature, keyword.value())) {
+                auto keyword = parse_keyword_value(tokens);
+                if (keyword && media_feature_accepts_keyword(media_feature, keyword->to_keyword())) {
                     transaction.commit();
-                    return MediaFeatureValue(keyword.value());
+                    return MediaFeatureValue(MediaFeatureValue::Type::Ident, keyword.release_nonnull());
                 }
             }
 
@@ -476,10 +510,10 @@ Optional<MediaFeatureValue> Parser::parse_media_feature_value(MediaFeatureID med
             if (media_feature_accepts_type(media_feature, MediaFeatureValueType::Boolean)) {
                 auto transaction = tokens.begin_transaction();
                 tokens.discard_whitespace();
-                if (auto integer = parse_integer(tokens); integer.has_value()) {
-                    if (integer.value().is_calculated() || integer->value() == 0 || integer->value() == 1) {
+                if (auto integer = parse_integer_value(tokens, infinite_integer_range)) {
+                    if (integer->is_calculated() || first_is_one_of(integer->as_integer().integer(), 0, 1)) {
                         transaction.commit();
-                        return MediaFeatureValue(integer.release_value());
+                        return MediaFeatureValue(MediaFeatureValue::Type::Integer, integer.release_nonnull());
                     }
                 }
             }
@@ -487,9 +521,9 @@ Optional<MediaFeatureValue> Parser::parse_media_feature_value(MediaFeatureID med
             // Integer
             if (media_feature_accepts_type(media_feature, MediaFeatureValueType::Integer)) {
                 auto transaction = tokens.begin_transaction();
-                if (auto integer = parse_integer(tokens); integer.has_value()) {
+                if (auto integer = parse_integer_value(tokens, infinite_integer_range)) {
                     transaction.commit();
-                    return MediaFeatureValue(integer.release_value());
+                    return MediaFeatureValue(MediaFeatureValue::Type::Integer, integer.release_nonnull());
                 }
             }
 
@@ -497,9 +531,29 @@ Optional<MediaFeatureValue> Parser::parse_media_feature_value(MediaFeatureID med
             if (media_feature_accepts_type(media_feature, MediaFeatureValueType::Length)) {
                 auto transaction = tokens.begin_transaction();
                 tokens.discard_whitespace();
-                if (auto length = parse_length(tokens); length.has_value()) {
+                if (auto length = parse_length_value(tokens, infinite_range)) {
                     transaction.commit();
-                    return MediaFeatureValue(length.release_value());
+                    return MediaFeatureValue(MediaFeatureValue::Type::Length, length.release_nonnull());
+                }
+
+                // https://drafts.csswg.org/mediaqueries-5/#typedef-mf-value
+                // <mf-value> = <number> | <dimension> | <ident> | <ratio>
+                //
+                // https://drafts.csswg.org/css-values-4/#lengths
+                // "For zero lengths the unit identifier is optional"
+                //
+                // https://drafts.csswg.org/css-values-4/#zero-value
+                // "Values of '0' can be written without units, even if the
+                // value type doesn't allow 'unitless zeroes'."
+                if (tokens.has_next_token()) {
+                    auto const& token = tokens.next_token();
+                    if (auto calc = parse_calculated_value(token, { .accepted_ranges_by_type = { { ValueType::Number, infinite_range } } }); calc && calc->as_calculated().resolves_to_number()) {
+                        if (auto resolved_number = calc->as_calculated().resolve_number({}); resolved_number.has_value() && *resolved_number == 0) {
+                            tokens.discard_a_token();
+                            transaction.commit();
+                            return MediaFeatureValue(MediaFeatureValue::Type::Length, LengthStyleValue::create(Length::make_px(0)));
+                        }
+                    }
                 }
             }
 
@@ -507,9 +561,9 @@ Optional<MediaFeatureValue> Parser::parse_media_feature_value(MediaFeatureID med
             if (media_feature_accepts_type(media_feature, MediaFeatureValueType::Ratio)) {
                 auto transaction = tokens.begin_transaction();
                 tokens.discard_whitespace();
-                if (auto ratio = parse_ratio(tokens); ratio.has_value()) {
+                if (auto ratio = parse_ratio_value(tokens)) {
                     transaction.commit();
-                    return MediaFeatureValue(ratio.release_value());
+                    return MediaFeatureValue(MediaFeatureValue::Type::Ratio, ratio.release_nonnull());
                 }
             }
 
@@ -517,9 +571,9 @@ Optional<MediaFeatureValue> Parser::parse_media_feature_value(MediaFeatureID med
             if (media_feature_accepts_type(media_feature, MediaFeatureValueType::Resolution)) {
                 auto transaction = tokens.begin_transaction();
                 tokens.discard_whitespace();
-                if (auto resolution = parse_resolution(tokens); resolution.has_value()) {
+                if (auto resolution = parse_resolution_value(tokens, infinite_range)) {
                     transaction.commit();
-                    return MediaFeatureValue(resolution.release_value());
+                    return MediaFeatureValue(MediaFeatureValue::Type::Resolution, resolution.release_nonnull());
                 }
             }
 
@@ -560,12 +614,15 @@ Optional<MediaFeatureValue> Parser::parse_media_feature_value(MediaFeatureID med
             .value_string = MUST(String::join(""sv, unknown_tokens)),
             .description = "Unrecognized type"_string,
         });
-        return MediaFeatureValue(move(unknown_tokens));
+        // NB: We only use this for serialization so the substitution function presence is irrelevant and we can just
+        //     set it to empty.
+        return MediaFeatureValue(MediaFeatureValue::Type::Unknown, move(UnresolvedStyleValue::create(move(unknown_tokens), {})));
     }
 
     return {};
 }
 
+template<typename NestedDeclarationsRule>
 GC::Ptr<CSSMediaRule> Parser::convert_to_media_rule(AtRule const& rule, Nested nested)
 {
     // https://drafts.csswg.org/css-conditional-3/#at-media
@@ -589,15 +646,18 @@ GC::Ptr<CSSMediaRule> Parser::convert_to_media_rule(AtRule const& rule, Nested n
     for (auto const& child : rule.child_rules_and_lists_of_declarations) {
         child.visit(
             [&](Rule const& rule) {
-                if (auto child_rule = convert_to_rule(rule, nested))
+                if (auto child_rule = convert_to_rule<NestedDeclarationsRule>(rule, nested))
                     child_rules.append(*child_rule);
             },
             [&](Vector<Declaration> const& declarations) {
-                child_rules.append(CSSNestedDeclarations::create(realm(), *convert_to_style_declaration(declarations)));
+                child_rules.append(NestedDeclarationsRule::create(realm(), *this, declarations));
             });
     }
     auto rule_list = CSSRuleList::create(realm(), child_rules);
     return CSSMediaRule::create(realm(), media_list, rule_list);
 }
+
+template GC::Ptr<CSSMediaRule> Parser::convert_to_media_rule<CSSNestedDeclarations>(AtRule const&, Parser::Nested);
+template GC::Ptr<CSSMediaRule> Parser::convert_to_media_rule<CSSFunctionDeclarations>(AtRule const&, Parser::Nested);
 
 }

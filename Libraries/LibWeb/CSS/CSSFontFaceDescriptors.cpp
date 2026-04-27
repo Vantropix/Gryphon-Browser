@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/CSSFontFaceDescriptorsPrototype.h>
+#include <LibWeb/Bindings/CSSFontFaceDescriptors.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSFontFaceDescriptors.h>
+#include <LibWeb/CSS/CSSFontFaceRule.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
 
 namespace Web::CSS {
@@ -29,6 +30,16 @@ void CSSFontFaceDescriptors::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(CSSFontFaceDescriptors);
     Base::initialize(realm);
+}
+
+WebIDL::ExceptionOr<void> CSSFontFaceDescriptors::set_property(FlyString const& property, StringView value, StringView priority)
+{
+    TRY(Base::set_property(property, value, priority));
+
+    if (auto* font_face_rule = as_if<CSSFontFaceRule>(parent_rule().ptr()))
+        font_face_rule->handle_descriptor_change(property);
+
+    return {};
 }
 
 WebIDL::ExceptionOr<void> CSSFontFaceDescriptors::set_ascent_override(StringView value)

@@ -6,12 +6,14 @@
 
 #include <AK/IDAllocator.h>
 #include <AK/NonnullOwnPtr.h>
+#include <AK/WeakPtr.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/Proxy.h>
 #include <LibCore/Socket.h>
 #include <LibCore/StandardPaths.h>
 #include <LibCore/System.h>
 #include <LibHTTP/Cache/DiskCache.h>
+#include <LibIPC/TransportHandle.h>
 #include <LibRequests/WebSocket.h>
 #include <LibWebSocket/ConnectionInfo.h>
 #include <LibWebSocket/Message.h>
@@ -23,20 +25,76 @@
 
 namespace RequestServer {
 
-static HashMap<int, RefPtr<ConnectionFromClient>> s_connections;
+static ConnectionFromClient* g_primary_connection = nullptr;
 static IDAllocator s_client_ids;
 
-Optional<HTTP::DiskCache> g_disk_cache;
+static constexpr i64 TICK_GAP_THRESHOLD_MS = 100;
+static Optional<MonotonicTime> s_last_tick_at;
+static StringView s_last_tick_label;
 
-ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transport)
-    : IPC::ConnectionFromClient<RequestClientEndpoint, RequestServerEndpoint>(*this, move(transport), s_client_ids.allocate())
-    , m_resolver(Resolver::default_resolver())
+// When libcurl asks us (via on_timeout_callback) to wake it up after N ms, we record when. If `curl-timer-fired`
+// then runs close to that time the gap is by design (libcurl's heartbeat) and we suppress the wire-stall log.
+static Optional<MonotonicTime> s_curl_timer_due_at;
+static constexpr i64 CURL_TIMER_ON_TIME_TOLERANCE_MS = 50;
+
+static void note_event_tick(StringView label)
 {
-    s_connections.set(client_id(), *this);
+    if constexpr (!REQUESTSERVER_WIRE_DEBUG)
+        return;
+    auto now = MonotonicTime::now();
+    if (s_last_tick_at.has_value()) {
+        auto gap = (now - *s_last_tick_at).to_milliseconds();
+        if (gap > TICK_GAP_THRESHOLD_MS) {
+            bool curl_timer_fired_on_schedule = false;
+            if (label == "curl-timer-fired"sv && s_curl_timer_due_at.has_value()) {
+                auto overshoot_ms = (now - *s_curl_timer_due_at).to_milliseconds();
+                if (overshoot_ms >= -CURL_TIMER_ON_TIME_TOLERANCE_MS && overshoot_ms <= CURL_TIMER_ON_TIME_TOLERANCE_MS)
+                    curl_timer_fired_on_schedule = true;
+            }
+            if (!curl_timer_fired_on_schedule) {
+                dbgln("RequestServer wire-stall: {} ms event-loop gap before '{}' (previous handler: '{}')",
+                    gap, label, s_last_tick_label);
+            }
+        }
+    }
+    s_last_tick_at = now;
+    s_last_tick_label = label;
+}
 
-    m_alt_svc_cache_path = ByteString::formatted("{}/Ladybird/alt-svc-cache.txt", Core::StandardPaths::cache_directory());
+static constexpr i64 CURL_CALL_THRESHOLD_MS = 50;
+template<typename F>
+static auto time_curl_call(StringView label, F&& f)
+{
+    if constexpr (!REQUESTSERVER_WIRE_DEBUG)
+        return f();
+    auto start = MonotonicTime::now();
+    auto result = f();
+    auto elapsed_ms = (MonotonicTime::now() - start).to_milliseconds();
+    if (elapsed_ms > CURL_CALL_THRESHOLD_MS)
+        dbgln("RequestServer wire-stall: curl call '{}' took {} ms (synchronous in event loop)", label, elapsed_ms);
+    return result;
+}
 
-    m_curl_multi = curl_multi_init();
+// Per-client burst-of-requests counter. Tracks how many `start_request` IPC
+// calls land in a tight window, so we can see if WebContent is dumping a
+// page worth of requests on us in one shot. State lives on ConnectionFromClient.
+static constexpr i64 BURST_WINDOW_MS = 100;
+static constexpr u64 BURST_REPORT_THRESHOLD = 5;
+
+ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transport, IsPrimaryConnection is_primary_connection, ConnectionMap& connections, Optional<HTTP::DiskCache&> disk_cache)
+    : IPC::ConnectionFromClient<RequestClientEndpoint, RequestServerEndpoint>(*this, move(transport), s_client_ids.allocate())
+    , m_connections(connections)
+    , m_disk_cache(disk_cache)
+    , m_curl_multi(curl_multi_init())
+    , m_resolver(Resolver::default_resolver())
+    , m_alt_svc_cache_path(ByteString::formatted("{}/Ladybird/alt-svc-cache.txt", Core::StandardPaths::cache_directory()))
+{
+    if (is_primary_connection == IsPrimaryConnection::Yes) {
+        VERIFY(g_primary_connection == nullptr);
+        g_primary_connection = this;
+    }
+
+    m_connections.set(client_id(), *this);
 
     auto set_option = [this](auto option, auto value) {
         auto result = curl_multi_setopt(m_curl_multi, option, value);
@@ -48,7 +106,11 @@ ConnectionFromClient::ConnectionFromClient(NonnullOwnPtr<IPC::Transport> transpo
     set_option(CURLMOPT_TIMERDATA, this);
 
     m_timer = Core::Timer::create_single_shot(0, [this] {
-        auto result = curl_multi_socket_action(m_curl_multi, CURL_SOCKET_TIMEOUT, 0, nullptr);
+        note_event_tick("curl-timer-fired"sv);
+        s_curl_timer_due_at = {};
+        auto result = time_curl_call("multi_socket_action(timeout)"sv, [this] {
+            return curl_multi_socket_action(m_curl_multi, CURL_SOCKET_TIMEOUT, 0, nullptr);
+        });
         VERIFY(result == CURLM_OK);
         check_active_requests();
     });
@@ -63,11 +125,18 @@ ConnectionFromClient::~ConnectionFromClient()
     m_curl_multi = nullptr;
 }
 
+Optional<ConnectionFromClient&> ConnectionFromClient::primary_connection()
+{
+    if (g_primary_connection)
+        return *g_primary_connection;
+    return {};
+}
+
 void ConnectionFromClient::request_complete(Badge<Request>, Request const& request)
 {
     Core::deferred_invoke([weak_self = make_weak_ptr<ConnectionFromClient>(), request_id = request.request_id(), type = request.type()] {
         if (auto self = weak_self.strong_ref()) {
-            if (type == Request::Type::BackgroundRevalidation)
+            if (type == RequestType::BackgroundRevalidation)
                 self->m_active_revalidation_requests.remove(request_id);
             else
                 self->m_active_requests.remove(request_id);
@@ -77,11 +146,14 @@ void ConnectionFromClient::request_complete(Badge<Request>, Request const& reque
 
 void ConnectionFromClient::die()
 {
+    if (g_primary_connection == this)
+        g_primary_connection = nullptr;
+
     auto client_id = this->client_id();
-    s_connections.remove(client_id);
+    m_connections.remove(client_id);
     s_client_ids.deallocate(client_id);
 
-    if (s_connections.is_empty())
+    if (m_connections.is_empty())
         Core::EventLoop::current().quit(0);
 }
 
@@ -99,7 +171,7 @@ Messages::RequestServer::ConnectNewClientResponse ConnectionFromClient::connect_
     auto client_socket = create_client_socket();
     if (client_socket.is_error()) {
         dbgln("Failed to create client socket: {}", client_socket.error());
-        return IPC::File {};
+        return IPC::TransportHandle {};
     }
 
     return client_socket.release_value();
@@ -107,40 +179,37 @@ Messages::RequestServer::ConnectNewClientResponse ConnectionFromClient::connect_
 
 Messages::RequestServer::ConnectNewClientsResponse ConnectionFromClient::connect_new_clients(size_t count)
 {
-    Vector<IPC::File> files;
-    files.ensure_capacity(count);
+    Vector<IPC::TransportHandle> handles;
+    handles.ensure_capacity(count);
 
     for (size_t i = 0; i < count; ++i) {
         auto client_socket = create_client_socket();
         if (client_socket.is_error()) {
             dbgln("Failed to create client socket: {}", client_socket.error());
-            return Vector<IPC::File> {};
+            return Vector<IPC::TransportHandle> {};
         }
 
-        files.unchecked_append(client_socket.release_value());
+        handles.unchecked_append(client_socket.release_value());
     }
 
-    return files;
+    return handles;
 }
 
-ErrorOr<IPC::File> ConnectionFromClient::create_client_socket()
+ErrorOr<IPC::TransportHandle> ConnectionFromClient::create_client_socket()
 {
-    // TODO: Mach IPC
+    auto paired = TRY(IPC::Transport::create_paired());
+    auto handle = move(paired.remote_handle);
 
-    int socket_fds[2] {};
-    TRY(Core::System::socketpair(AF_LOCAL, SOCK_STREAM, 0, socket_fds));
+    // Note: A ref is stored in the m_connections map
+    auto client = adopt_ref(*new ConnectionFromClient(move(paired.local), IsPrimaryConnection::No, m_connections, m_disk_cache));
 
-    auto client_socket = Core::LocalSocket::adopt_fd(socket_fds[0]);
-    if (client_socket.is_error()) {
-        close(socket_fds[0]);
-        close(socket_fds[1]);
-        return client_socket.release_error();
-    }
+    return handle;
+}
 
-    // Note: A ref is stored in the static s_connections map
-    auto client = adopt_ref(*new ConnectionFromClient(make<IPC::Transport>(client_socket.release_value())));
-
-    return IPC::File::adopt_fd(socket_fds[1]);
+void ConnectionFromClient::set_disk_cache_settings(HTTP::DiskCacheSettings disk_cache_settings)
+{
+    if (m_disk_cache.has_value())
+        m_disk_cache->set_maximum_disk_cache_size(disk_cache_settings.maximum_size);
 }
 
 Messages::RequestServer::IsSupportedProtocolResponse ConnectionFromClient::is_supported_protocol(ByteString protocol)
@@ -187,21 +256,37 @@ void ConnectionFromClient::set_use_system_dns()
     m_resolver->dns.reset_connection();
 }
 
-void ConnectionFromClient::start_request(u64 request_id, ByteString method, URL::URL url, Vector<HTTP::Header> request_headers, ByteBuffer request_body, Core::ProxyData proxy_data)
+void ConnectionFromClient::start_request(u64 request_id, ByteString method, URL::URL url, Vector<HTTP::Header> request_headers, ByteBuffer request_body, HTTP::CacheMode cache_mode, HTTP::Cookie::IncludeCredentials include_credentials, Core::ProxyData proxy_data)
 {
+    note_event_tick("ipc-start-request"sv);
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: start_request({}, {})", request_id, url);
 
-    auto request = Request::fetch(request_id, g_disk_cache, *this, m_curl_multi, m_resolver, move(url), move(method), HTTP::HeaderList::create(move(request_headers)), move(request_body), m_alt_svc_cache_path, proxy_data);
+    if constexpr (REQUESTSERVER_WIRE_DEBUG) {
+        auto now = MonotonicTime::now();
+        if (m_burst_window_started_at.has_value() && (now - *m_burst_window_started_at).to_milliseconds() < BURST_WINDOW_MS) {
+            ++m_requests_in_burst_window;
+        } else {
+            if (m_requests_in_burst_window > BURST_REPORT_THRESHOLD) {
+                dbgln("RequestServer wire-burst: client {} sent {} requests in <{} ms",
+                    client_id(), m_requests_in_burst_window, BURST_WINDOW_MS);
+            }
+            m_burst_window_started_at = now;
+            m_requests_in_burst_window = 1;
+        }
+    }
+
+    auto request = Request::fetch(request_id, m_disk_cache, cache_mode, *this, m_curl_multi, m_resolver, move(url), move(method), HTTP::HeaderList::create(move(request_headers)), move(request_body), include_credentials, m_alt_svc_cache_path, proxy_data);
     m_active_requests.set(request_id, move(request));
 }
 
-void ConnectionFromClient::start_revalidation_request(Badge<Request>, ByteString method, URL::URL url, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, Core::ProxyData proxy_data)
+void ConnectionFromClient::start_revalidation_request(Badge<Request>, ByteString method, URL::URL url, NonnullRefPtr<HTTP::HeaderList> request_headers, ByteBuffer request_body, HTTP::Cookie::IncludeCredentials include_credentials, Core::ProxyData proxy_data)
 {
+    note_event_tick("ipc-start-revalidation"sv);
     auto request_id = m_next_revalidation_request_id++;
 
     dbgln_if(REQUESTSERVER_DEBUG, "RequestServer: start_revalidation_request({}, {})", request_id, url);
 
-    auto request = Request::revalidate(request_id, g_disk_cache, *this, m_curl_multi, m_resolver, move(url), move(method), move(request_headers), move(request_body), m_alt_svc_cache_path, proxy_data);
+    auto request = Request::revalidate(request_id, m_disk_cache, *this, m_curl_multi, m_resolver, move(url), move(method), move(request_headers), move(request_body), include_credentials, m_alt_svc_cache_path, proxy_data);
     m_active_revalidation_requests.set(request_id, move(request));
 }
 
@@ -215,35 +300,33 @@ int ConnectionFromClient::on_socket_callback(CURL*, int sockfd, int what, void* 
         return 0;
     }
 
-    if (what & CURL_POLL_IN) {
-        client->m_read_notifiers.ensure(sockfd, [client, sockfd, multi = client->m_curl_multi] {
-            auto notifier = Core::Notifier::construct(sockfd, Core::NotificationType::Read);
-            notifier->on_activation = [client, sockfd, multi] {
-                auto result = curl_multi_socket_action(multi, sockfd, CURL_CSELECT_IN, nullptr);
+    auto update_notifier = [client, sockfd, what](auto& notifiers, Core::NotificationType type, int poll_flag, int select_flag) {
+        if (!(what & poll_flag)) {
+            if (auto notifier = notifiers.get(sockfd); notifier.has_value())
+                notifier.value()->set_enabled(false);
+            return;
+        }
+
+        auto& notifier = notifiers.ensure(sockfd, [client, sockfd, multi = client->m_curl_multi, type, select_flag] {
+            auto notifier = Core::Notifier::construct(sockfd, type);
+            notifier->on_activation = [client, sockfd, multi, select_flag] {
+                note_event_tick("curl-socket-ready"sv);
+                auto result = time_curl_call("multi_socket_action(socket)"sv, [&] {
+                    return curl_multi_socket_action(multi, sockfd, select_flag, nullptr);
+                });
                 VERIFY(result == CURLM_OK);
 
                 client->check_active_requests();
             };
 
-            notifier->set_enabled(true);
             return notifier;
         });
-    }
 
-    if (what & CURL_POLL_OUT) {
-        client->m_write_notifiers.ensure(sockfd, [client, sockfd, multi = client->m_curl_multi] {
-            auto notifier = Core::Notifier::construct(sockfd, Core::NotificationType::Write);
-            notifier->on_activation = [client, sockfd, multi] {
-                auto result = curl_multi_socket_action(multi, sockfd, CURL_CSELECT_OUT, nullptr);
-                VERIFY(result == CURLM_OK);
+        notifier->set_enabled(true);
+    };
 
-                client->check_active_requests();
-            };
-
-            notifier->set_enabled(true);
-            return notifier;
-        });
-    }
+    update_notifier(client->m_read_notifiers, Core::NotificationType::Read, CURL_POLL_IN, CURL_CSELECT_IN);
+    update_notifier(client->m_write_notifiers, Core::NotificationType::Write, CURL_POLL_OUT, CURL_CSELECT_OUT);
 
     return 0;
 }
@@ -254,17 +337,22 @@ int ConnectionFromClient::on_timeout_callback(void*, long timeout_ms, void* user
     if (!client->m_timer)
         return 0;
 
-    if (timeout_ms < 0)
+    if (timeout_ms < 0) {
         client->m_timer->stop();
-    else
+        s_curl_timer_due_at = {};
+    } else {
         client->m_timer->restart(timeout_ms);
+        s_curl_timer_due_at = MonotonicTime::now() + AK::Duration::from_milliseconds(timeout_ms);
+    }
 
     return 0;
 }
 
 void ConnectionFromClient::check_active_requests()
 {
+    note_event_tick("check-active-requests"sv);
     int msgs_in_queue = 0;
+    u64 completions_drained = 0;
     while (auto* msg = curl_multi_info_read(m_curl_multi, &msgs_in_queue)) {
         if (msg->msg != CURLMSG_DONE)
             continue;
@@ -286,9 +374,13 @@ void ConnectionFromClient::check_active_requests()
             continue;
         }
 
+        ++completions_drained;
         auto* request = static_cast<Request*>(application_private);
         request->notify_fetch_complete({}, msg->data.result);
     }
+
+    if (completions_drained > 1)
+        dbgln_if(REQUESTSERVER_WIRE_DEBUG, "RequestServer wire-batch: drained {} completions in one curl multi tick", completions_drained);
 }
 
 Messages::RequestServer::StopRequestResponse ConnectionFromClient::stop_request(u64 request_id)
@@ -316,25 +408,47 @@ void ConnectionFromClient::ensure_connection(u64 request_id, URL::URL url, ::Req
     m_active_requests.set(request_id, move(request));
 }
 
+void ConnectionFromClient::retrieved_http_cookie(int client_id, u64 request_id, RequestServer::RequestType request_type, String cookie)
+{
+    note_event_tick("ipc-retrieved-cookie"sv);
+    if (auto connection = m_connections.get(client_id); connection.has_value()) {
+        auto request = [&]() {
+            switch (request_type) {
+            case RequestType::Fetch:
+                return (*connection)->m_active_requests.get(request_id);
+            case RequestType::BackgroundRevalidation:
+                return (*connection)->m_active_revalidation_requests.get(request_id);
+            case RequestType::Connect:
+                break;
+            }
+            VERIFY_NOT_REACHED();
+        }();
+
+        if (request.has_value())
+            (*request)->notify_retrieved_http_cookie({}, cookie);
+    }
+}
+
 void ConnectionFromClient::estimate_cache_size_accessed_since(u64 cache_size_estimation_id, UnixDateTime since)
 {
     Requests::CacheSizes sizes;
 
-    if (g_disk_cache.has_value())
-        sizes = g_disk_cache->estimate_cache_size_accessed_since(since);
+    if (m_disk_cache.has_value())
+        sizes = m_disk_cache->estimate_cache_size_accessed_since(since);
 
     async_estimated_cache_size(cache_size_estimation_id, sizes);
 }
 
 void ConnectionFromClient::remove_cache_entries_accessed_since(UnixDateTime since)
 {
-    if (g_disk_cache.has_value())
-        g_disk_cache->remove_entries_accessed_since(since);
+    if (m_disk_cache.has_value())
+        m_disk_cache->remove_entries_accessed_since(since);
 }
 
 void ConnectionFromClient::websocket_connect(u64 websocket_id, URL::URL url, ByteString origin, Vector<ByteString> protocols, Vector<ByteString> extensions, Vector<HTTP::Header> additional_request_headers)
 {
     auto host = url.serialized_host().to_byte_string();
+    m_pending_websockets.set(websocket_id);
 
     m_resolver->dns.lookup(host, DNS::Messages::Class::IN, { DNS::Messages::ResourceType::A, DNS::Messages::ResourceType::AAAA })
         ->when_rejected([this, websocket_id](auto const& error) {
@@ -347,6 +461,10 @@ void ConnectionFromClient::websocket_connect(u64 websocket_id, URL::URL url, Byt
                 async_websocket_errored(websocket_id, static_cast<i32>(Requests::WebSocket::Error::CouldNotEstablishConnection));
                 return;
             }
+
+            // Don't connect the websocket if we already requested to close it before the DNS lookup completed.
+            if (!m_pending_websockets.remove(websocket_id))
+                return;
 
             WebSocket::ConnectionInfo connection_info(move(url));
             connection_info.set_origin(move(origin));
@@ -390,6 +508,7 @@ void ConnectionFromClient::websocket_send(u64 websocket_id, bool is_text, ByteBu
 
 void ConnectionFromClient::websocket_close(u64 websocket_id, u16 code, ByteString reason)
 {
+    m_pending_websockets.remove(websocket_id);
     if (auto* connection = m_websockets.get(websocket_id).value_or({}); connection && connection->ready_state() == WebSocket::ReadyState::Open)
         connection->close(code, reason);
 }

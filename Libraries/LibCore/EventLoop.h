@@ -13,9 +13,9 @@
 #include <AK/Function.h>
 #include <AK/Noncopyable.h>
 #include <AK/NonnullOwnPtr.h>
-#include <AK/Swift.h>
-#include <AK/Time.h>
-#include <LibCore/Event.h>
+#include <AK/NonnullRefPtr.h>
+#include <AK/RefPtr.h>
+#include <LibCore/Export.h>
 #include <LibCore/Forward.h>
 #include <LibThreading/RWLock.h>
 
@@ -43,7 +43,7 @@ class WeakEventLoopReference;
 // - Fork events, because the child process event loop needs to clear its events and handlers.
 // - Quit events, i.e. the event loop should exit.
 // Any event that the event loop needs to wait on or needs to repeatedly handle is stored in a handle, e.g. s_timers.
-class EventLoop {
+class CORE_API EventLoop {
     AK_MAKE_NONMOVABLE(EventLoop);
     AK_MAKE_NONCOPYABLE(EventLoop);
 
@@ -70,8 +70,6 @@ public:
     // Pump the event loop until some condition is met.
     void spin_until(Function<bool()>);
 
-    void add_job(NonnullRefPtr<Promise<NonnullRefPtr<EventReceiver>>> job_promise);
-
     void deferred_invoke(ESCAPING Function<void()>);
 
     void wake();
@@ -90,6 +88,10 @@ public:
     static int register_signal(int signo, ESCAPING Function<void(int)> handler);
     static void unregister_signal(int handler_id);
 
+    // Invokes the specified handler when the process exits
+    static void register_process(pid_t pid, ESCAPING Function<void(pid_t)> exit_handler);
+    static void unregister_process(pid_t pid);
+
     static bool is_running();
     static EventLoop& current();
     static NonnullRefPtr<WeakEventLoopReference> current_weak();
@@ -99,11 +101,11 @@ public:
 private:
     NonnullOwnPtr<EventLoopImplementation> m_impl;
     RefPtr<WeakEventLoopReference> m_weak;
-} SWIFT_UNSAFE_REFERENCE;
+};
 
 class StrongEventLoopReference;
 
-class WeakEventLoopReference : public AtomicRefCounted<WeakEventLoopReference> {
+class CORE_API WeakEventLoopReference : public AtomicRefCounted<WeakEventLoopReference> {
 public:
     StrongEventLoopReference take();
 
@@ -119,7 +121,7 @@ private:
     Threading::RWLock m_lock;
 };
 
-class StrongEventLoopReference {
+class CORE_API StrongEventLoopReference {
 public:
     ~StrongEventLoopReference();
 
@@ -136,6 +138,6 @@ private:
     WeakEventLoopReference* m_event_loop_weak;
 };
 
-void deferred_invoke(ESCAPING Function<void()>);
+CORE_API void deferred_invoke(ESCAPING Function<void()>);
 
 }

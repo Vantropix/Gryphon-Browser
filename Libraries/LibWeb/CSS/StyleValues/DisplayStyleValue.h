@@ -17,11 +17,13 @@ public:
     static ValueComparingNonnullRefPtr<DisplayStyleValue const> create(Display const&);
     virtual ~DisplayStyleValue() override = default;
 
-    virtual String to_string(SerializationMode) const override { return m_display.to_string(); }
+    virtual void serialize(StringBuilder& builder, SerializationMode) const override { builder.append(m_display.to_string()); }
 
     Display display() const { return m_display; }
 
     bool properties_equal(DisplayStyleValue const& other) const { return m_display == other.m_display; }
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     explicit DisplayStyleValue(Display const& display)

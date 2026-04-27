@@ -34,6 +34,8 @@ WEB_API WebIDL::ExceptionOr<GC::Ref<WebIDL::Promise>> instantiate_streaming(JS::
 
 namespace Detail {
 
+Wasm::HostFunction create_host_function(JS::VM& vm, JS::FunctionObject& function, Wasm::FunctionType const& type, ByteString const& name);
+
 struct CompiledWebAssemblyModule : public RefCounted<CompiledWebAssemblyModule> {
     explicit CompiledWebAssemblyModule(NonnullRefPtr<Wasm::Module> module)
         : module(move(module))
@@ -92,10 +94,15 @@ public:
 
     Wasm::FunctionAddress exported_address() const { return m_exported_address; }
 
+    virtual JS::ThrowCompletionOr<JS::Value> call() override;
+
 protected:
     ExportedWasmFunction(Utf16FlyString name, AK::Function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)>, Wasm::FunctionAddress, Object& prototype);
 
 private:
+    virtual void visit_edges(Cell::Visitor&) override;
+
+    AK::Function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)> m_behavior;
     Wasm::FunctionAddress m_exported_address;
 };
 
@@ -109,6 +116,7 @@ Wasm::Value default_webassembly_value(JS::VM&, Wasm::ValueType type);
 JS::Value to_js_value(JS::VM&, Wasm::Value& wasm_value, Wasm::ValueType type);
 JS::ThrowCompletionOr<void> host_ensure_can_compile_wasm_bytes(JS::VM&);
 JS::ThrowCompletionOr<JS::HandledByHost> host_resize_array_buffer(JS::VM&, JS::ArrayBuffer&, size_t);
+JS::ThrowCompletionOr<JS::HandledByHost> host_grow_shared_array_buffer(JS::VM&, JS::ArrayBuffer&, size_t);
 
 extern HashMap<GC::Ptr<JS::Object>, WebAssemblyCache> s_caches;
 

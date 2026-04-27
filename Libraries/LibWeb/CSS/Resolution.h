@@ -7,8 +7,10 @@
 #pragma once
 
 #include <AK/String.h>
+#include <AK/StringBuilder.h>
 #include <LibWeb/CSS/SerializationMode.h>
 #include <LibWeb/CSS/Units.h>
+#include <LibWeb/Forward.h>
 
 namespace Web::CSS {
 
@@ -17,6 +19,9 @@ public:
     Resolution(double value, ResolutionUnit unit);
     static Resolution make_dots_per_pixel(double);
 
+    static Resolution from_style_value(NonnullRefPtr<StyleValue const> const&);
+
+    void serialize(StringBuilder&, SerializationMode = SerializationMode::Normal) const;
     String to_string(SerializationMode = SerializationMode::Normal) const;
     double to_dots_per_pixel() const;
 

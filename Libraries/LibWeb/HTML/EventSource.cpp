@@ -9,7 +9,7 @@
 #include <LibGC/Heap.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibJS/Runtime/VM.h>
-#include <LibWeb/Bindings/EventSourcePrototype.h>
+#include <LibWeb/Bindings/EventSource.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
@@ -72,7 +72,7 @@ WebIDL::ExceptionOr<GC::Ref<EventSource>> EventSource::construct_impl(JS::Realm&
     request->header_list()->set({ "Accept"sv, "text/event-stream"sv });
 
     // 11. Set request's cache mode to "no-store".
-    request->set_cache_mode(Fetch::Infrastructure::Request::CacheMode::NoStore);
+    request->set_cache_mode(HTTP::CacheMode::NoStore);
 
     // 12. Set request's initiator type to "other".
     request->set_initiator_type(Fetch::Infrastructure::Request::InitiatorType::Other);
@@ -178,6 +178,8 @@ void EventSource::initialize(JS::Realm& realm)
 // https://html.spec.whatwg.org/multipage/server-sent-events.html#garbage-collection
 void EventSource::finalize()
 {
+    Base::finalize();
+
     // If an EventSource object is garbage collected while its connection is still open, the user agent must abort any
     // instance of the fetch algorithm opened by this EventSource.
     if (m_ready_state != ReadyState::Closed) {
@@ -435,14 +437,14 @@ void EventSource::dispatch_the_event()
         data_buffer = data_buffer.substring_view(0, data_buffer.length() - 1);
 
     // 4. Let event be the result of creating an event using MessageEvent, in the relevant realm of the EventSource object.
-    // 5. Initialize event's type attribute to "message", its data attribute to data, its origin attribute to the serialization
-    //    of the origin of the event stream's final URL (i.e., the URL after redirects), and its lastEventId attribute to the
-    //    last event ID string of the event source.
+    // 5. Initialize event's type attribute to "message", its data attribute to data, its origin to the origin of the event
+    //    stream's final URL (i.e., the URL after redirects), and its lastEventId attribute to the last event ID string of
+    //    the event source.
     // 6. If the event type buffer has a value other than the empty string, change the type of the newly created event to equal
     //    the value of the event type buffer.
     MessageEventInit init {};
     init.data = JS::PrimitiveString::create(vm(), data_buffer);
-    init.origin = m_url.origin().serialize();
+    init.origin = m_url.origin();
     init.last_event_id = last_event_id;
 
     auto type = m_event_type.is_empty() ? HTML::EventNames::message : m_event_type;

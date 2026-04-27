@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/PerformanceEventTimingPrototype.h>
+#include <LibWeb/Bindings/PerformanceEventTiming.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/EventTiming/PerformanceEventTiming.h>
 #include <LibWeb/PerformanceTimeline/EntryTypes.h>
@@ -15,8 +15,14 @@ namespace Web::EventTiming {
 GC_DEFINE_ALLOCATOR(PerformanceEventTiming);
 
 // https://www.w3.org/TR/event-timing/#sec-init-event-timing
-PerformanceEventTiming::PerformanceEventTiming(JS::Realm& realm, String const& name, HighResolutionTime::DOMHighResTimeStamp start_time, HighResolutionTime::DOMHighResTimeStamp duration,
-    DOM::Event const& event, HighResolutionTime::DOMHighResTimeStamp processing_start, unsigned long long interaction_id)
+PerformanceEventTiming::PerformanceEventTiming(
+    JS::Realm& realm,
+    String const& name,
+    HighResolutionTime::DOMHighResTimeStamp start_time,
+    HighResolutionTime::DOMHighResTimeStamp duration,
+    DOM::Event const& event,
+    HighResolutionTime::DOMHighResTimeStamp processing_start,
+    unsigned long long interaction_id)
     : PerformanceTimeline::PerformanceEntry(realm, name, start_time, duration)
     , m_entry_type(PerformanceTimeline::EntryTypes::event)
     , m_start_time(event.time_stamp())

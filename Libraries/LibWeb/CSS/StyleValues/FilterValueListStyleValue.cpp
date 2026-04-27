@@ -8,71 +8,59 @@
  */
 
 #include "FilterValueListStyleValue.h"
+#include <LibWeb/CSS/CalculationResolutionContext.h>
 #include <LibWeb/CSS/Serialize.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
 #include <LibWeb/Layout/Node.h>
 
 namespace Web::CSS {
 
-float FilterOperation::Blur::resolved_radius(Layout::Node const& node) const
+float FilterOperation::Blur::resolved_radius() const
 {
-    return radius.resolved({ .length_resolution_context = Length::ResolutionContext::for_layout_node(node) })->to_px(node).to_float();
+    return Length::from_style_value(radius, {}).absolute_length_to_px_without_rounding();
 }
 
-float FilterOperation::HueRotate::angle_degrees(Layout::Node const& node) const
+float FilterOperation::HueRotate::angle_degrees() const
 {
-    return angle.visit([&](AngleOrCalculated const& a) { return a.resolved({ .length_resolution_context = Length::ResolutionContext::for_layout_node(node) })->to_degrees(); }, [&](Zero) { return 0.0; });
+    return Angle::from_style_value(angle, {}).to_degrees();
 }
 
 float FilterOperation::Color::resolved_amount() const
 {
-    if (amount.is_number())
-        return amount.number().value();
-
-    if (amount.is_percentage())
-        return amount.percentage().as_fraction();
-
-    if (amount.is_calculated()) {
-        CalculationResolutionContext context {};
-        if (amount.calculated()->resolves_to_number())
-            return amount.calculated()->resolve_number(context).value();
-
-        if (amount.calculated()->resolves_to_percentage())
-            return amount.calculated()->resolve_percentage(context)->as_fraction();
-    }
-
-    VERIFY_NOT_REACHED();
+    return number_from_style_value(amount, 1);
 }
 
-String FilterValueListStyleValue::to_string(SerializationMode mode) const
+void FilterValueListStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    StringBuilder builder {};
     bool first = true;
     for (auto& filter_function : filter_value_list()) {
         if (!first)
             builder.append(' ');
         filter_function.visit(
             [&](FilterOperation::Blur const& blur) {
-                builder.appendff("blur({}", blur.radius.to_string(mode));
+                builder.append("blur("sv);
+                blur.radius->serialize(builder, mode);
+                builder.append(')');
             },
             [&](FilterOperation::DropShadow const& drop_shadow) {
                 builder.append("drop-shadow("sv);
-                if (drop_shadow.color.has_value()) {
-                    drop_shadow.color->serialize_a_srgb_value(builder);
+                if (drop_shadow.color) {
+                    drop_shadow.color->serialize(builder, mode);
                     builder.append(' ');
                 }
-                builder.appendff("{} {}", drop_shadow.offset_x, drop_shadow.offset_y);
-                if (drop_shadow.radius.has_value())
-                    builder.appendff(" {}", drop_shadow.radius->to_string(mode));
+                drop_shadow.offset_x->serialize(builder, mode);
+                builder.append(' ');
+                drop_shadow.offset_y->serialize(builder, mode);
+                if (drop_shadow.radius) {
+                    builder.append(' ');
+                    drop_shadow.radius->serialize(builder, mode);
+                }
+                builder.append(')');
             },
             [&](FilterOperation::HueRotate const& hue_rotate) {
                 builder.append("hue-rotate("sv);
-                hue_rotate.angle.visit(
-                    [&](AngleOrCalculated const& angle) {
-                        builder.append(angle.to_string(mode));
-                    },
-                    [&](FilterOperation::HueRotate::Zero const&) {
-                        builder.append("0deg"sv);
-                    });
+                hue_rotate.angle->serialize(builder, mode);
+                builder.append(')');
             },
             [&](FilterOperation::Color const& color) {
                 builder.appendff("{}(",
@@ -97,15 +85,14 @@ String FilterValueListStyleValue::to_string(SerializationMode mode) const
                         }
                     }());
 
-                builder.append(color.amount.to_string(mode));
+                color.amount->serialize(builder, mode);
+                builder.append(')');
             },
             [&](CSS::URL const& url) {
                 builder.append(url.to_string());
             });
-        builder.append(')');
         first = false;
     }
-    return MUST(builder.to_string());
 }
 
 bool FilterValueListStyleValue::contains_url() const
@@ -115,6 +102,50 @@ bool FilterValueListStyleValue::contains_url() const
             return true;
     }
     return false;
+}
+
+ValueComparingNonnullRefPtr<StyleValue const> FilterValueListStyleValue::absolutized(ComputationContext const& computation_context) const
+{
+    Vector<FilterValue> absolutized_filter_values;
+    absolutized_filter_values.ensure_capacity(m_filter_value_list.size());
+
+    for (auto const& filter_value : m_filter_value_list) {
+        filter_value.visit(
+            [&](FilterOperation::Blur const& blur) {
+                absolutized_filter_values.append(FilterOperation::Blur {
+                    .radius = blur.radius->absolutized(computation_context),
+                });
+            },
+            [&](FilterOperation::DropShadow const& drop_shadow) {
+                absolutized_filter_values.append(FilterOperation::DropShadow {
+                    .offset_x = drop_shadow.offset_x->absolutized(computation_context),
+                    .offset_y = drop_shadow.offset_y->absolutized(computation_context),
+                    .radius = drop_shadow.radius ? ValueComparingRefPtr<StyleValue const> { drop_shadow.radius->absolutized(computation_context) } : nullptr,
+                    .color = drop_shadow.color ? ValueComparingRefPtr<StyleValue const> { drop_shadow.color->absolutized(computation_context) } : nullptr,
+                });
+            },
+            [&](FilterOperation::HueRotate const& hue_rotate) {
+                absolutized_filter_values.append(FilterOperation::HueRotate {
+                    .angle = hue_rotate.angle->absolutized(computation_context),
+                });
+            },
+            [&](FilterOperation::Color const& color) {
+                auto absolutized_amount = number_from_style_value(color.amount->absolutized(computation_context), 1);
+
+                if (first_is_one_of(color.operation, Gfx::ColorFilterType::Grayscale, Gfx::ColorFilterType::Invert, Gfx::ColorFilterType::Opacity, Gfx::ColorFilterType::Sepia))
+                    absolutized_amount = clamp(absolutized_amount, 0.0f, 1.0f);
+
+                absolutized_filter_values.append(FilterOperation::Color {
+                    .operation = color.operation,
+                    .amount = NumberStyleValue::create(absolutized_amount),
+                });
+            },
+            [&](CSS::URL const& url) {
+                absolutized_filter_values.append(url);
+            });
+    }
+
+    return FilterValueListStyleValue::create(move(absolutized_filter_values));
 }
 
 }

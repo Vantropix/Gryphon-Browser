@@ -33,8 +33,9 @@ ErrorOr<GC::Ref<SVGDecodedImageData>> SVGDecodedImageData::create(JS::Realm& rea
 {
     auto page_client = SVGPageClient::create(Bindings::main_thread_vm(), host_page);
     auto page = Page::create(Bindings::main_thread_vm(), *page_client);
+    page->set_is_scripting_enabled(false);
     page_client->m_svg_page = page.ptr();
-    page->set_top_level_traversable(MUST(Web::HTML::TraversableNavigable::create_a_new_top_level_traversable(*page, nullptr, {})));
+    page->set_top_level_traversable(Web::HTML::TraversableNavigable::create_a_new_top_level_traversable(*page, nullptr, {}));
     GC::Ref<HTML::Navigable> navigable = page->top_level_traversable();
     auto response = Fetch::Infrastructure::Response::create(navigable->vm());
     response->url_list().append(url);
@@ -58,19 +59,26 @@ ErrorOr<GC::Ref<SVGDecodedImageData>> SVGDecodedImageData::create(JS::Realm& rea
     auto document = MUST(DOM::Document::create_and_initialize(DOM::Document::Type::XML, "image/svg+xml"_string, navigation_params));
     navigable->set_ongoing_navigation({});
     navigable->active_document()->destroy();
-    navigable->active_session_history_entry()->document_state()->set_document(document);
+    navigable->set_active_document(document);
     auto& window = as<HTML::Window>(HTML::relevant_global_object(document));
     document->browsing_context()->window_proxy()->set_window(window);
 
-    XML::Parser parser(data, { .resolve_external_resource = resolve_xml_resource });
-    XMLDocumentBuilder builder { document };
+    XML::Parser parser(data, { .resolve_named_html_entity = resolve_named_html_entity });
+    XMLDocumentBuilder builder { document, XMLScriptingSupport::Disabled };
     auto result = parser.parse_with_listener(builder);
-    (void)result;
+    if (result.is_error())
+        dbgln("SVGDecodedImageData: Failed to parse SVG: {}", result.error());
+
+    // Mark the document as completely loaded so that <use> elements
+    // (which defer cloning until the document is complete) resolve
+    // forward references to elements parsed after them.
+    document->completely_finish_loading();
 
     auto* svg_root = document->first_child_of_type<SVG::SVGSVGElement>();
-    if (!svg_root)
+    if (!svg_root) {
+        dbgln("SVGDecodedImageData: Invalid SVG input (no SVGSVGElement found)");
         return Error::from_string_literal("SVGDecodedImageData: Invalid SVG input");
-
+    }
     return realm.create<SVGDecodedImageData>(page, page_client, document, *svg_root);
 }
 
@@ -93,42 +101,30 @@ void SVGDecodedImageData::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_root_element);
 }
 
-RefPtr<Gfx::Bitmap> SVGDecodedImageData::render(Gfx::IntSize size) const
+RefPtr<Painting::DisplayList> SVGDecodedImageData::record_display_list(Gfx::IntSize size) const
 {
-    auto bitmap = Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, size).release_value_but_fixme_should_propagate_errors();
-    VERIFY(m_document->navigable());
     m_document->navigable()->set_viewport_size(size.to_type<CSSPixels>());
     m_document->update_layout(DOM::UpdateLayoutReason::SVGDecodedImageDataRender);
-
-    auto display_list = m_document->record_display_list({});
-    if (!display_list)
-        return {};
-
-    switch (m_page_client->display_list_player_type()) {
-    case DisplayListPlayerType::SkiaGPUIfAvailable:
-    case DisplayListPlayerType::SkiaCPU: {
-        auto painting_surface = Gfx::PaintingSurface::wrap_bitmap(*bitmap);
-        Painting::DisplayListPlayerSkia display_list_player;
-        display_list_player.execute(*display_list, {}, painting_surface);
-        break;
-    }
-    default:
-        VERIFY_NOT_REACHED();
-    }
-
-    return bitmap;
+    return m_document->record_display_list({});
 }
 
 RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::render_to_surface(Gfx::IntSize size) const
 {
     VERIFY(m_document->navigable());
 
-    auto surface = Gfx::PaintingSurface::create_with_size(m_document->navigable()->skia_backend_context(), size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied);
+    if (size.is_empty())
+        return nullptr;
 
-    m_document->navigable()->set_viewport_size(size.to_type<CSSPixels>());
-    m_document->update_layout(DOM::UpdateLayoutReason::SVGDecodedImageDataRender);
+    if (auto it = m_cached_rendered_surfaces.find(size); it != m_cached_rendered_surfaces.end())
+        return it->value;
 
-    auto display_list = m_document->record_display_list({});
+    // Prevent the cache from growing too big.
+    // FIXME: Evict least used entries.
+    if (m_cached_rendered_surfaces.size() > 10)
+        m_cached_rendered_surfaces.remove(m_cached_rendered_surfaces.begin());
+
+    auto surface = Gfx::PaintingSurface::create_with_size(size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied);
+    auto display_list = record_display_list(size);
     if (!display_list)
         return nullptr;
 
@@ -143,6 +139,7 @@ RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::render_to_surface(Gfx::IntSize
         VERIFY_NOT_REACHED();
     }
 
+    m_cached_rendered_surfaces.set(size, *surface);
     return surface;
 }
 
@@ -159,7 +156,7 @@ RefPtr<Gfx::ImmutableBitmap> SVGDecodedImageData::bitmap(size_t, Gfx::IntSize si
     if (m_cached_rendered_bitmaps.size() > 10)
         m_cached_rendered_bitmaps.remove(m_cached_rendered_bitmaps.begin());
 
-    auto immutable_bitmap = Gfx::ImmutableBitmap::create(*render(size));
+    auto immutable_bitmap = Gfx::ImmutableBitmap::create_snapshot_from_painting_surface(*render_to_surface(size));
     m_cached_rendered_bitmaps.set(size, immutable_bitmap);
     return immutable_bitmap;
 }
@@ -225,32 +222,19 @@ Optional<Gfx::IntRect> SVGDecodedImageData::frame_rect(size_t) const
 
 RefPtr<Gfx::PaintingSurface> SVGDecodedImageData::surface(size_t, Gfx::IntSize size) const
 {
-    if (size.is_empty())
-        return nullptr;
-
-    if (auto it = m_cached_rendered_surfaces.find(size); it != m_cached_rendered_surfaces.end())
-        return it->value;
-
-    // Prevent the cache from growing too big.
-    // FIXME: Evict least used entries.
-    if (m_cached_rendered_surfaces.size() > 10)
-        m_cached_rendered_surfaces.remove(m_cached_rendered_surfaces.begin());
-
-    auto surface = render_to_surface(size);
-    if (!surface)
-        return nullptr;
-    m_cached_rendered_surfaces.set(size, *surface);
-    return surface;
+    return render_to_surface(size);
 }
 
-void SVGDecodedImageData::paint(DisplayListRecordingContext& context, size_t, Gfx::IntRect dst_rect, Gfx::IntRect, Gfx::ScalingMode scaling_mode) const
+void SVGDecodedImageData::paint(DisplayListRecordingContext& context, size_t, Gfx::IntRect dst_rect, Gfx::IntRect clip_rect, Gfx::ScalingMode) const
 {
-    auto surface = this->surface(0, dst_rect.size());
-    if (!surface)
+    auto display_list = record_display_list(dst_rect.size());
+    if (!display_list)
         return;
 
-    Gfx::IntRect src_rect(0, 0, dst_rect.width(), dst_rect.height());
-    context.display_list_recorder().draw_painting_surface(dst_rect, *surface, src_rect, scaling_mode);
+    context.display_list_recorder().save();
+    context.display_list_recorder().add_clip_rect(clip_rect);
+    context.display_list_recorder().paint_nested_display_list(display_list, dst_rect);
+    context.display_list_recorder().restore();
 }
 
 }

@@ -24,11 +24,13 @@ public:
 
     CSS::GridTrackSizeList grid_track_size_list() const { return m_grid_track_size_list; }
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(GridTrackSizeListStyleValue const& other) const { return m_grid_track_size_list == other.m_grid_track_size_list; }
+
+    virtual bool is_computationally_independent() const override { return m_grid_track_size_list.is_computationally_independent(); }
 
 private:
     explicit GridTrackSizeListStyleValue(CSS::GridTrackSizeList grid_track_size_list)

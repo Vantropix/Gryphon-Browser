@@ -22,8 +22,11 @@ struct FontPixelMetrics;
 class Painter;
 class PaintingSurface;
 class Palette;
+class YUVData;
 class PaletteImpl;
 class Path;
+class SharedImage;
+class SharedImageBuffer;
 class ShareableBitmap;
 class SkiaBackendContext;
 struct SystemTheme;
@@ -56,8 +59,12 @@ using FloatQuad = Quad<float>;
 
 enum class BitmapFormat;
 enum class ColorRole;
-enum class MaskKind;
 enum class TextAlignment;
+
+enum class MaskKind {
+    Alpha,
+    Luminance
+};
 
 }
 

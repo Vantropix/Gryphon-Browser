@@ -23,7 +23,9 @@ public:
     virtual double raw_value() const override { return m_resolution.raw_value(); }
     virtual FlyString unit_name() const override { return m_resolution.unit_name(); }
 
-    virtual String to_string(SerializationMode serialization_mode) const override { return m_resolution.to_string(serialization_mode); }
+    virtual void serialize(StringBuilder& builder, SerializationMode mode) const override { m_resolution.serialize(builder, mode); }
+
+    virtual bool is_computationally_independent() const override { return true; }
 
     bool equals(StyleValue const& other) const override
     {

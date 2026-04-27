@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
@@ -22,9 +21,11 @@ public:
     TextUnderlinePositionHorizontal horizontal() const { return m_horizontal; }
     TextUnderlinePositionVertical vertical() const { return m_vertical; }
 
-    virtual String to_string(SerializationMode serialization_mode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(TextUnderlinePositionStyleValue const& other) const { return m_horizontal == other.m_horizontal && m_vertical == other.m_vertical; }
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     explicit TextUnderlinePositionStyleValue(TextUnderlinePositionHorizontal horizontal, TextUnderlinePositionVertical vertical)

@@ -7,7 +7,7 @@
 
 #include <LibGfx/Bitmap.h>
 #include <LibJS/Runtime/TypedArray.h>
-#include <LibWeb/Bindings/ImageDataPrototype.h>
+#include <LibWeb/Bindings/ImageData.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/ImageData.h>
 #include <LibWeb/HTML/StructuredSerialize.h>
@@ -47,17 +47,10 @@ WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::construct_impl(JS::Realm& rea
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#dom-imagedata-with-data
-WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::create(JS::Realm& realm, GC::Root<WebIDL::BufferSource> const& data, u32 sw, Optional<u32> sh, Optional<ImageDataSettings> const& settings)
+WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::create(JS::Realm& realm, GC::Root<JS::Uint8ClampedArray> const& uint8_clamped_array_data, u32 sw, Optional<u32> sh, Optional<ImageDataSettings> const& settings)
 {
-    auto& vm = realm.vm();
-
-    if (!is<JS::Uint8ClampedArray>(*data->raw_object()))
-        return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "Uint8ClampedArray");
-
-    auto& uint8_clamped_array_data = static_cast<JS::Uint8ClampedArray&>(*data->raw_object());
-
     // 1. Let length be the number of bytes in data.
-    auto length = uint8_clamped_array_data.byte_length().length();
+    auto length = uint8_clamped_array_data->byte_length().length();
 
     // 2. If length is not a nonzero integral multiple of four, then throw an "InvalidStateError" DOMException.
     if (length == 0 || length % 4 != 0)
@@ -81,10 +74,10 @@ WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::create(JS::Realm& realm, GC::
 
     // 7. Initialize this given sw, sh, settings set to settings, and source set to data.
     // FIXME: This seems to be a spec issue, sh is an optional but height always have a value.
-    return initialize(realm, height, sw, settings, uint8_clamped_array_data);
+    return initialize(realm, height, sw, settings, *uint8_clamped_array_data);
 }
 
-WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::construct_impl(JS::Realm& realm, GC::Root<WebIDL::BufferSource> const& data, u32 sw, Optional<u32> sh, Optional<ImageDataSettings> const& settings)
+WebIDL::ExceptionOr<GC::Ref<ImageData>> ImageData::construct_impl(JS::Realm& realm, GC::Root<JS::Uint8ClampedArray> const& data, u32 sw, Optional<u32> sh, Optional<ImageDataSettings> const& settings)
 {
     return ImageData::create(realm, data, sw, move(sh), settings);
 }
@@ -151,6 +144,9 @@ void ImageData::initialize(JS::Realm& realm)
 {
     WEB_SET_PROTOTYPE_FOR_INTERFACE(ImageData);
     Base::initialize(realm);
+
+    if (m_data)
+        define_direct_property("data"_utf16_fly_string, m_data, JS::Attribute::Enumerable);
 }
 
 void ImageData::visit_edges(Cell::Visitor& visitor)
@@ -225,6 +221,8 @@ WebIDL::ExceptionOr<void> ImageData::deserialization_steps(HTML::TransferDataDec
 
     // AD-HOC: Create the bitmap backed by the Uint8ClampedArray.
     m_bitmap = TRY_OR_THROW_OOM(vm, create_bitmap_backed_by_uint8_clamped_array(width, height, *m_data));
+
+    define_direct_property("data"_utf16_fly_string, m_data, JS::Attribute::Enumerable);
 
     return {};
 }

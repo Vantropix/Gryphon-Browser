@@ -8,12 +8,14 @@
 #include <LibJS/Runtime/VM.h>
 #include <LibWeb/CSS/CSS.h>
 #include <LibWeb/CSS/CSSUnitValue.h>
+#include <LibWeb/CSS/CustomPropertyRegistration.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/Parser/Syntax.h>
 #include <LibWeb/CSS/Parser/SyntaxParsing.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/CSS/Serialize.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/Window.h>
 
 namespace Web::CSS {
@@ -65,6 +67,7 @@ WebIDL::ExceptionOr<void> register_property(JS::VM& vm, PropertyDefinition defin
     auto& realm = *vm.current_realm();
     auto& window = static_cast<Web::HTML::Window&>(realm.global_object());
     auto& document = window.associated_document();
+    auto& property_set = document.registered_property_set();
 
     // 2. If name is not a custom property name string, throw a SyntaxError and exit this algorithm.
     if (!is_a_custom_property_name_string(definition.name))
@@ -72,7 +75,7 @@ WebIDL::ExceptionOr<void> register_property(JS::VM& vm, PropertyDefinition defin
 
     // If property set already contains an entry with name as its property name (compared codepoint-wise),
     // throw an InvalidModificationError and exit this algorithm.
-    if (document.registered_custom_properties().contains(definition.name))
+    if (property_set.contains(definition.name))
         return WebIDL::InvalidModificationError::create(realm, "Property already registered"_utf16);
 
     auto parsing_params = CSS::Parser::ParsingParams { document };
@@ -80,7 +83,7 @@ WebIDL::ExceptionOr<void> register_property(JS::VM& vm, PropertyDefinition defin
     // 3. Attempt to consume a syntax definition from syntax. If it returns failure, throw a SyntaxError.
     //    Otherwise, let syntax definition be the returned syntax definition.
     auto syntax_component_values = parse_component_values_list(parsing_params, definition.syntax);
-    auto maybe_syntax = parse_as_syntax(syntax_component_values);
+    auto maybe_syntax = parse_as_syntax(syntax_component_values, Parser::LimitSingleComponentIdentToCustomIdent::Yes);
     if (!maybe_syntax) {
         return WebIDL::SyntaxError::create(realm, "Invalid syntax definition"_utf16);
     }
@@ -96,7 +99,10 @@ WebIDL::ExceptionOr<void> register_property(JS::VM& vm, PropertyDefinition defin
         } else {
             // Otherwise, if syntax definition is the universal syntax definition,
             // parse initialValue as a <declaration-value>
-            initial_value_maybe = parse_css_value(parsing_params, definition.initial_value.value(), PropertyID::Custom);
+
+            // AD-HOC: Parse this as the equivalent descriptor value in order to disallow arbitrary substitution functions.
+            initial_value_maybe = parse_css_descriptor(parsing_params, AtRuleID::Property, DescriptorNameAndID::from_id(DescriptorID::InitialValue), definition.initial_value.value());
+
             // If this fails, throw a SyntaxError and exit this algorithm.
             // Otherwise, let parsed initial value be the parsed result.
             if (!initial_value_maybe) {
@@ -108,6 +114,8 @@ WebIDL::ExceptionOr<void> register_property(JS::VM& vm, PropertyDefinition defin
         return WebIDL::SyntaxError::create(realm, "Initial value must be provided for non-universal syntax"_utf16);
     } else {
         // Otherwise, parse initialValue according to syntax definition.
+        // NB: We don't need to worry about explicitly rejecting arbitrary substitution functions here since all
+        //     supported syntaxes implicitly reject them
         auto initial_value_component_values = parse_component_values_list(parsing_params, definition.initial_value.value());
 
         initial_value_maybe = Parser::parse_with_a_syntax(
@@ -122,7 +130,9 @@ WebIDL::ExceptionOr<void> register_property(JS::VM& vm, PropertyDefinition defin
         // Otherwise, let parsed initial value be the parsed result.
         // NB: Already done
 
-        // FIXME: If parsed initial value is not computationally independent, throw a SyntaxError and exit this algorithm.
+        // If parsed initial value is not computationally independent, throw a SyntaxError and exit this algorithm.
+        if (!initial_value_maybe->is_computationally_independent())
+            return WebIDL::SyntaxError::create(realm, "Initial value must be computationally independent"_utf16);
     }
 
     // 5. Set inherit flag to the value of inherits.
@@ -130,11 +140,15 @@ WebIDL::ExceptionOr<void> register_property(JS::VM& vm, PropertyDefinition defin
 
     // 6. Let registered property be a struct with a property name of name, a syntax of syntax definition,
     //    an initial value of parsed initial value, and an inherit flag of inherit flag.
-    auto registered_property = CSSPropertyRule::create(realm, definition.name, definition.syntax, definition.inherits, initial_value_maybe);
+    CustomPropertyRegistration registered_property {
+        .property_name = definition.name,
+        .syntax = definition.syntax,
+        .inherit = definition.inherits,
+        .initial_value = initial_value_maybe,
+    };
     // Append registered property to property set.
-    document.registered_custom_properties().set(
-        registered_property->name(),
-        registered_property);
+    property_set.set(registered_property.property_name, registered_property);
+    document.did_change_custom_property_registrations();
 
     return {};
 }

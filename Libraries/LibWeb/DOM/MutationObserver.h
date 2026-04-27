@@ -68,15 +68,21 @@ private:
 // https://dom.spec.whatwg.org/#registered-observer
 class RegisteredObserver : public JS::Cell {
     GC_CELL(RegisteredObserver, JS::Cell);
+    GC_DECLARE_ALLOCATOR(RegisteredObserver);
 
 public:
     static GC::Ref<RegisteredObserver> create(MutationObserver&, MutationObserverInit const&);
     virtual ~RegisteredObserver() override;
 
+    virtual bool is_transient() const { return false; }
+
     GC::Ref<MutationObserver> observer() const { return m_observer; }
 
     MutationObserverInit const& options() const { return m_options; }
     void set_options(MutationObserverInit options) { m_options = move(options); }
+
+    template<typename T>
+    bool fast_is() const = delete;
 
 protected:
     RegisteredObserver(MutationObserver& observer, MutationObserverInit const& options);
@@ -99,6 +105,8 @@ public:
 
     GC::Ref<RegisteredObserver> source() const { return m_source; }
 
+    virtual bool is_transient() const override { return true; }
+
 private:
     TransientRegisteredObserver(MutationObserver& observer, MutationObserverInit const& options, RegisteredObserver& source);
 
@@ -106,5 +114,8 @@ private:
 
     GC::Ref<RegisteredObserver> m_source;
 };
+
+template<>
+inline bool RegisteredObserver::fast_is<TransientRegisteredObserver>() const { return is_transient(); }
 
 }

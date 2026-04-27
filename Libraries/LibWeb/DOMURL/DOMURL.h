@@ -19,7 +19,8 @@
 namespace Web::DOMURL {
 
 class DOMURL : public Bindings::PlatformObject {
-    WEB_PLATFORM_OBJECT(DOMURL, Bindings::PlatformObject);
+    // NOTE: This is 'URL' in the IDL, but we call it DOMURL to avoid name conflicts with LibURL.
+    WEB_PLATFORM_OBJECT(URL, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(DOMURL);
 
 public:
@@ -80,6 +81,8 @@ public:
 
     Optional<String> const& query() const { return m_url.query(); }
     void set_query(Badge<URLSearchParams>, Optional<String> query) { m_url.set_query(move(query)); }
+
+    virtual Optional<URL::Origin> extract_an_origin() const override;
 
 private:
     DOMURL(JS::Realm&, URL::URL, GC::Ref<URLSearchParams> query);

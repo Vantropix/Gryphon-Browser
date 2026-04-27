@@ -5,6 +5,7 @@
  */
 
 #include <AK/Enumerate.h>
+#include <AK/SaturatingMath.h>
 #include <LibWasm/AbstractMachine/AbstractMachine.h>
 #include <LibWasm/AbstractMachine/BytecodeInterpreter.h>
 #include <LibWasm/AbstractMachine/Configuration.h>
@@ -20,7 +21,7 @@ Optional<FunctionAddress> Store::allocate(ModuleInstance& instance, Module const
     if (type_index.value() >= instance.types().size())
         return {};
 
-    auto& type = instance.types()[type_index.value()];
+    auto& type = instance.types()[type_index.value()].function();
     m_functions.empend(WasmFunction { type, instance, module, code });
     return address;
 }
@@ -188,6 +189,7 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
         return InstantiationError { ByteString::formatted("Validation failed: {}", result.error()) };
 
     auto main_module_instance_pointer = make<ModuleInstance>();
+    main_module_instance_pointer->cached_minimum_call_record_allocation_size = module.minimum_call_record_allocation_size();
     auto& main_module_instance = *main_module_instance_pointer;
 
     main_module_instance.types() = module.type_section().types();
@@ -195,6 +197,8 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
     Vector<Value> global_values;
     Vector<Vector<Reference>> elements;
     ModuleInstance auxiliary_instance;
+
+    auxiliary_instance.cached_minimum_call_record_allocation_size = module.minimum_call_record_allocation_size();
 
     for (auto [i, import_] : enumerate(module.import_section().imports())) {
         auto extern_ = externs.at(i);
@@ -245,7 +249,7 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
 
                 auto& this_type = module.type_section().types()[type.type().value()];
 
-                if (other_tag_instance->type().parameters() != this_type.parameters())
+                if (other_tag_instance->type().parameters() != this_type.function().parameters())
                     return "Tag import and extern do not match"sv;
                 return {};
             },
@@ -253,7 +257,7 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
                 if (!extern_.has<FunctionAddress>())
                     return "Expected function import"sv;
                 auto other_type = m_store.get(extern_.get<FunctionAddress>())->visit([&](WasmFunction const& wasm_func) { return wasm_func.type(); }, [&](HostFunction const& host_func) { return host_func.type(); });
-                auto& type = module.type_section().types()[type_index.value()];
+                auto& type = module.type_section().types()[type_index.value()].function();
                 if (type.results() != other_type.results())
                     return ByteString::formatted("Function import and extern do not match, results: {} vs {}", type.results(), other_type.results());
                 if (type.parameters() != other_type.parameters())
@@ -291,12 +295,11 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
         Configuration config { m_store };
         if (m_should_limit_instruction_count)
             config.enable_instruction_count_limit();
-        config.set_frame(Frame {
+        config.set_frame(IsTailcall::No,
             auxiliary_instance,
-            Vector<Value> {},
+            Vector<Value, ArgumentsStaticSize> {},
             entry.expression(),
-            1,
-        });
+            1);
         auto result = config.execute(interpreter);
         if (result.is_trap())
             return InstantiationError { "Global instantiation trapped", move(result.trap()) };
@@ -313,12 +316,11 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
             Configuration config { m_store };
             if (m_should_limit_instruction_count)
                 config.enable_instruction_count_limit();
-            config.set_frame(Frame {
+            config.set_frame(IsTailcall::No,
                 main_module_instance,
-                Vector<Value> {},
+                Vector<Value, ArgumentsStaticSize> {},
                 entry,
-                entry.instructions().size() - 1,
-            });
+                entry.instructions().size() - 1);
             auto result = config.execute(interpreter);
             if (result.is_trap())
                 return InstantiationError { "Element section initialisation trapped", move(result.trap()) };
@@ -348,12 +350,11 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
         Configuration config { m_store };
         if (m_should_limit_instruction_count)
             config.enable_instruction_count_limit();
-        config.set_frame(Frame {
+        config.set_frame(IsTailcall::No,
             main_module_instance,
-            Vector<Value> {},
+            Vector<Value, ArgumentsStaticSize> {},
             active_ptr->expression,
-            1,
-        });
+            1);
         auto result = config.execute(interpreter);
         if (result.is_trap())
             return InstantiationError { "Element section initialisation trapped", move(result.trap()) };
@@ -364,10 +365,9 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
         if (!table_instance || !elem_instance)
             return InstantiationError { "Invalid element referenced by active element segment" };
 
-        Checked<size_t> total_size = elem_instance->references().size();
-        total_size.saturating_add(d);
+        auto total_size = saturating_add(elem_instance->references().size(), static_cast<size_t>(d));
 
-        if (total_size.value() > table_instance->elements().size())
+        if (total_size > table_instance->elements().size())
             return InstantiationError { "Table instantiation out of bounds" };
 
         size_t i = 0;
@@ -383,12 +383,11 @@ InstantiationResult AbstractMachine::instantiate(Module const& module, Vector<Ex
                 Configuration config { m_store };
                 if (m_should_limit_instruction_count)
                     config.enable_instruction_count_limit();
-                config.set_frame(Frame {
+                config.set_frame(IsTailcall::No,
                     main_module_instance,
-                    Vector<Value> {},
+                    Vector<Value, ArgumentsStaticSize> {},
                     data.offset,
-                    1,
-                });
+                    1);
                 auto result = config.execute(interpreter);
                 if (result.is_trap())
                     return InstantiationError { "Data section initialisation trapped", move(result.trap()) };
@@ -483,7 +482,7 @@ Optional<InstantiationError> AbstractMachine::allocate_all_initial_phase(Module 
 
     for (auto& entry : module.tag_section().tags()) {
         auto& type = module.type_section().types()[entry.type().value()];
-        auto address = m_store.allocate(type, entry.flags());
+        auto address = m_store.allocate(type.function(), entry.flags());
         VERIFY(address.has_value());
         module_instance.tags().append(*address);
     }
@@ -561,7 +560,9 @@ Result AbstractMachine::invoke(Interpreter& interpreter, FunctionAddress address
     Configuration configuration { m_store };
     if (m_should_limit_instruction_count)
         configuration.enable_instruction_count_limit();
-    return configuration.call(interpreter, address, move(arguments));
+
+    Vector<Value, ArgumentsStaticSize> args = move(arguments);
+    return configuration.call(interpreter, address, args);
 }
 
 void Linker::link(ModuleInstance const& instance)

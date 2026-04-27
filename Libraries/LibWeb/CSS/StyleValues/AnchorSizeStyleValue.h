@@ -20,9 +20,11 @@ public:
         ValueComparingRefPtr<StyleValue const> const& fallback_value);
     virtual ~AnchorSizeStyleValue() override = default;
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(AnchorSizeStyleValue const& other) const { return m_properties == other.m_properties; }
+
+    virtual bool is_computationally_independent() const override { return true; }
 
     Optional<FlyString const&> anchor_name() const { return m_properties.anchor_name; }
     Optional<AnchorSize> anchor_size() const { return m_properties.anchor_size; }
@@ -32,7 +34,9 @@ public:
     }
 
 private:
-    AnchorSizeStyleValue(Optional<FlyString> const& anchor_name, Optional<AnchorSize> const& anchor_size,
+    AnchorSizeStyleValue(
+        Optional<FlyString> const& anchor_name,
+        Optional<AnchorSize> const& anchor_size,
         ValueComparingRefPtr<StyleValue const> const& fallback_value);
 
     struct Properties {

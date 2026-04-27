@@ -26,7 +26,7 @@ public:
     virtual double raw_value() const override { return m_frequency.raw_value(); }
     virtual FlyString unit_name() const override { return m_frequency.unit_name(); }
 
-    virtual String to_string(SerializationMode serialization_mode) const override { return m_frequency.to_string(serialization_mode); }
+    virtual void serialize(StringBuilder& builder, SerializationMode mode) const override { m_frequency.serialize(builder, mode); }
 
     bool equals(StyleValue const& other) const override
     {
@@ -35,6 +35,8 @@ public:
         auto const& other_frequency = other.as_frequency();
         return m_frequency == other_frequency.m_frequency;
     }
+
+    virtual bool is_computationally_independent() const override { return true; }
 
 private:
     explicit FrequencyStyleValue(Frequency frequency)

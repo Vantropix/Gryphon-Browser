@@ -4,16 +4,17 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibGC/Heap.h>
+#include <LibGC/WeakInlines.h>
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/Painting/ScrollFrame.h>
 
 namespace Web::Painting {
 
-ScrollFrame::ScrollFrame(PaintableBox const& paintable_box, size_t id, bool sticky, RefPtr<ScrollFrame const> parent)
+ScrollFrame::ScrollFrame(PaintableBox const& paintable_box, bool sticky, ScrollFrameIndex parent_index)
     : m_paintable_box(paintable_box)
-    , m_id(id)
     , m_sticky(sticky)
-    , m_parent(move(parent))
+    , m_parent_index(parent_index)
 {
 }
 

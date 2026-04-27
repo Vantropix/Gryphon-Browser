@@ -12,6 +12,7 @@
 #include <AK/JsonValue.h>
 #include <AK/Math.h>
 #include <AK/Utf8View.h>
+#include <LibCore/Timer.h>
 #include <LibWeb/Crypto/Crypto.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/BrowsingContext.h>
@@ -204,7 +205,7 @@ static ErrorOr<CSSPixelPoint, WebDriver::Error> get_coordinates_relative_to_orig
             auto element = TRY(actions_options.get_element_origin(browsing_context, origin));
 
             // 3. Let x element and y element be the result of calculating the in-view center point of element.
-            auto position = in_view_center_point(element, viewport);
+            auto position = TRY(in_view_center_point(element, viewport));
 
             // 4. Let x equal x element + x offset, and y equal y element + y offset.
             return position.translated(offset);
@@ -790,6 +791,8 @@ struct KeyCodeData {
 };
 
 // https://w3c.github.io/webdriver/#dfn-code
+// NOTE: The normalised key values (0xE000-0xE05D) are defined in the keyboard actions table:
+//       https://w3c.github.io/webdriver/#keyboard-actions
 static KeyCodeData key_code_data(u32 code_point)
 {
     // The code for key is the value in the last column of the following table on the row with key in either the first
@@ -1119,9 +1122,10 @@ static ErrorOr<void, WebDriver::Error> dispatch_pointer_down_action(ActionObject
     //     and [POINTER-EVENTS]. set ctrlKey, shiftKey, altKey, and metaKey equal to the corresponding items in global
     //     key state. Type specific properties for the pointer that are not exposed through the webdriver API must be
     //     set to the default value specified for hardware that doesn't support that property.
+    int click_count = 1;
     switch (pointer_type) {
     case PointerInputSource::Subtype::Mouse:
-        browsing_context.page().handle_mousedown(position, position, button, buttons, global_key_state.modifiers());
+        browsing_context.page().handle_mousedown(position, position, button, buttons, global_key_state.modifiers(), click_count);
         break;
     case PointerInputSource::Subtype::Pen:
         return WebDriver::Error::from_code(WebDriver::ErrorCode::UnsupportedOperation, "Pen events not implemented"sv);
@@ -1362,7 +1366,7 @@ GC_DEFINE_ALLOCATOR(ActionExecutor);
 void wait_for_an_action_queue_token(InputState& input_state)
 {
     // 1. Let token be a new unique identifier.
-    auto token = MUST(Crypto::generate_random_uuid());
+    auto token = Crypto::generate_random_uuid();
 
     // 2. Enqueue token in input state's actions queue.
     input_state.actions_queue.append(token);

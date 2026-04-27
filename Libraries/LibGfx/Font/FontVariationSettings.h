@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#pragma once
+
 #include <AK/HashMap.h>
 #include <AK/QuickSort.h>
 #include <AK/Vector.h>
 #include <LibGfx/FourCC.h>
-
-#pragma once
 
 namespace Gfx {
 
@@ -45,6 +45,12 @@ struct FontVariationSettings {
     void set_width(float value)
     {
         axes.set(FourCC("wdth"), value);
+    }
+
+    // https://learn.microsoft.com/en-us/typography/opentype/spec/dvaraxistag_opsz
+    void set_optical_sizing(float value)
+    {
+        axes.set(FourCC("opsz"), value);
     }
 
     bool is_empty() const { return axes.is_empty(); }

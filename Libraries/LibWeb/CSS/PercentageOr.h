@@ -7,6 +7,7 @@
 #pragma once
 
 #include <AK/String.h>
+#include <AK/StringBuilder.h>
 #include <AK/Variant.h>
 #include <LibWeb/CSS/Angle.h>
 #include <LibWeb/CSS/Frequency.h>
@@ -18,6 +19,9 @@
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/Time.h>
 
+// FIXME: LengthPercentage is the only remaining derived class of PercentageOr so we can just merge them together. It
+//        should also probably instead be CSSPixelsPercentage since it is only used after computation where we resolve
+//        all relative lengths.
 namespace Web::CSS {
 
 template<typename T>
@@ -121,13 +125,22 @@ public:
             });
     }
 
+    void serialize(StringBuilder& builder, SerializationMode mode) const
+    {
+        if (is_calculated()) {
+            m_value.template get<NonnullRefPtr<CalculatedStyleValue const>>()->serialize(builder, mode);
+        } else if (is_percentage()) {
+            m_value.template get<Percentage>().serialize(builder, mode);
+        } else {
+            m_value.template get<T>().serialize(builder, mode);
+        }
+    }
+
     String to_string(SerializationMode mode) const
     {
-        if (is_calculated())
-            return m_value.template get<NonnullRefPtr<CalculatedStyleValue const>>()->to_string(mode);
-        if (is_percentage())
-            return m_value.template get<Percentage>().to_string();
-        return m_value.template get<T>().to_string();
+        StringBuilder builder;
+        serialize(builder, mode);
+        return builder.to_string_without_validation();
     }
 
     bool operator==(PercentageOr<T> const& other) const
@@ -174,22 +187,6 @@ bool operator==(Percentage const& percentage, PercentageOr<T> const& percentage_
 {
     return percentage == percentage_or;
 }
-
-class AnglePercentage : public PercentageOr<Angle> {
-public:
-    using PercentageOr<Angle>::PercentageOr;
-
-    bool is_angle() const { return is_t(); }
-    Angle const& angle() const { return get_t(); }
-};
-
-class FrequencyPercentage : public PercentageOr<Frequency> {
-public:
-    using PercentageOr<Frequency>::PercentageOr;
-
-    bool is_frequency() const { return is_t(); }
-    Frequency const& frequency() const { return get_t(); }
-};
 
 class LengthPercentage : public PercentageOr<Length> {
 public:
@@ -267,11 +264,19 @@ public:
         return length_percentage().to_px(layout_node, reference_value);
     }
 
-    String to_string(SerializationMode mode) const
+    void serialize(StringBuilder& builder, SerializationMode mode) const
     {
         if (is_auto())
-            return "auto"_string;
-        return m_length_percentage->to_string(mode);
+            builder.append("auto"sv);
+        else
+            m_length_percentage->serialize(builder, mode);
+    }
+
+    String to_string(SerializationMode mode) const
+    {
+        StringBuilder builder;
+        serialize(builder, mode);
+        return builder.to_string_without_validation();
     }
 
     bool operator==(LengthPercentageOrAuto const&) const = default;
@@ -282,39 +287,7 @@ private:
     Optional<LengthPercentage> m_length_percentage;
 };
 
-class TimePercentage : public PercentageOr<Time> {
-public:
-    using PercentageOr<Time>::PercentageOr;
-
-    bool is_time() const { return is_t(); }
-    Time const& time() const { return get_t(); }
-};
-
-struct NumberPercentage : public PercentageOr<Number> {
-public:
-    using PercentageOr<Number>::PercentageOr;
-
-    bool is_number() const { return is_t(); }
-    Number const& number() const { return get_t(); }
-};
-
 }
-
-template<>
-struct AK::Formatter<Web::CSS::AnglePercentage> : Formatter<StringView> {
-    ErrorOr<void> format(FormatBuilder& builder, Web::CSS::AnglePercentage const& angle_percentage)
-    {
-        return Formatter<StringView>::format(builder, angle_percentage.to_string(Web::CSS::SerializationMode::Normal));
-    }
-};
-
-template<>
-struct AK::Formatter<Web::CSS::FrequencyPercentage> : Formatter<StringView> {
-    ErrorOr<void> format(FormatBuilder& builder, Web::CSS::FrequencyPercentage const& frequency_percentage)
-    {
-        return Formatter<StringView>::format(builder, frequency_percentage.to_string(Web::CSS::SerializationMode::Normal));
-    }
-};
 
 template<>
 struct AK::Formatter<Web::CSS::LengthPercentage> : Formatter<StringView> {
@@ -329,13 +302,5 @@ struct AK::Formatter<Web::CSS::LengthPercentageOrAuto> : Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Web::CSS::LengthPercentageOrAuto const& length_percentage_or_auto)
     {
         return Formatter<StringView>::format(builder, length_percentage_or_auto.to_string(Web::CSS::SerializationMode::Normal));
-    }
-};
-
-template<>
-struct AK::Formatter<Web::CSS::TimePercentage> : Formatter<StringView> {
-    ErrorOr<void> format(FormatBuilder& builder, Web::CSS::TimePercentage const& time_percentage)
-    {
-        return Formatter<StringView>::format(builder, time_percentage.to_string(Web::CSS::SerializationMode::Normal));
     }
 };

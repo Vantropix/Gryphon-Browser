@@ -8,38 +8,55 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#pragma once
+
+#include <AK/ByteString.h>
 #include <LibGC/CellAllocator.h>
 #include <LibGfx/FontCascadeList.h>
+#include <LibWeb/CSS/Fetch.h>
+#include <LibWeb/CSS/FontFeatureData.h>
+#include <LibWeb/CSS/Percentage.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
-
-#pragma once
+#include <LibWeb/PixelUnits.h>
 
 namespace Web::CSS {
 
-struct FontFaceKey;
-
-struct OwnFontFaceKey {
-    explicit OwnFontFaceKey(FontFaceKey const& other);
-
-    operator FontFaceKey() const;
-
-    [[nodiscard]] u32 hash() const { return pair_int_hash(family_name.hash(), pair_int_hash(weight, slope)); }
-    [[nodiscard]] bool operator==(OwnFontFaceKey const& other) const = default;
-    [[nodiscard]] bool operator==(FontFaceKey const& other) const;
-
-    FlyString family_name;
-    int weight { 0 };
-    int slope { 0 };
+struct FontWeightRange {
+    int min { 0 };
+    int max { 0 };
+    [[nodiscard]] u32 hash() const { return pair_int_hash(min, max); }
+    [[nodiscard]] bool operator==(FontWeightRange const&) const = default;
+    [[nodiscard]] bool contains_inclusive(int weight) const { return min <= weight && weight <= max; }
 };
 
-struct FontMatchingAlgorithmCacheKey {
+struct FontFaceKey {
     FlyString family_name;
-    int weight;
-    int slope;
-    float font_size_in_pt;
+    FontWeightRange weight;
+    int slope { 0 };
+    int width { 100 };
+    [[nodiscard]] u32 hash() const { return pair_int_hash(family_name.ascii_case_insensitive_hash(), pair_int_hash(weight.hash(), pair_int_hash(slope, width))); }
+    [[nodiscard]] bool operator==(FontFaceKey const& other) const
+    {
+        return family_name.equals_ignoring_ascii_case(other.family_name)
+            && weight == other.weight
+            && slope == other.slope
+            && width == other.width;
+    }
+};
 
-    [[nodiscard]] bool operator==(FontMatchingAlgorithmCacheKey const& other) const = default;
+struct ComputedFontCacheKey {
+    ValueComparingNonnullRefPtr<StyleValue const> font_family;
+    FontOpticalSizing font_optical_sizing;
+    CSSPixels font_size;
+    int font_slope;
+    double font_weight;
+    Percentage font_width;
+    HashMap<FlyString, double> font_variation_settings;
+    FontFeatureData font_feature_data;
+
+    [[nodiscard]] bool operator==(ComputedFontCacheKey const& other) const = default;
 };
 
 class FontLoader final : public GC::Cell {
@@ -47,33 +64,37 @@ class FontLoader final : public GC::Cell {
     GC_DECLARE_ALLOCATOR(FontLoader);
 
 public:
-    FontLoader(FontComputer& font_computer, GC::Ptr<CSSStyleSheet> parent_style_sheet, FlyString family_name, Vector<Gfx::UnicodeRange> unicode_ranges, Vector<URL> urls, ESCAPING Function<void(RefPtr<Gfx::Typeface const>)> on_load = {});
+    FontLoader(FontComputer&, RuleOrDeclaration, FlyString family_name, Vector<Gfx::UnicodeRange> unicode_ranges, Vector<URL> urls, GC::Ptr<GC::Function<void(RefPtr<Gfx::Typeface const>)>> on_load = {});
 
     virtual ~FontLoader();
 
     Vector<Gfx::UnicodeRange> const& unicode_ranges() const { return m_unicode_ranges; }
-    RefPtr<Gfx::Typeface const> vector_font() const { return m_vector_font; }
 
-    RefPtr<Gfx::Font const> font_with_point_size(float point_size, Gfx::FontVariationSettings const& variations = {});
+    RefPtr<Gfx::Font const> font_with_point_size(float point_size, Gfx::FontVariationSettings const& variations, Gfx::ShapeFeatures const& shape_features);
     void start_loading_next_url();
 
     bool is_loading() const;
 
+    FlyString family_name() const { return m_family_name; }
+
+    void subscribe(GC::Ref<GC::Function<void(RefPtr<Gfx::Typeface const>)>>);
+
 private:
     virtual void visit_edges(Visitor&) override;
 
-    ErrorOr<NonnullRefPtr<Gfx::Typeface const>> try_load_font(Fetch::Infrastructure::Response const&, ByteBuffer const&);
+    Optional<ByteString> try_load_font_mime_type_essence(Fetch::Infrastructure::Response const&, ByteBuffer const&);
 
     void font_did_load_or_fail(RefPtr<Gfx::Typeface const>);
 
     GC::Ref<FontComputer> m_font_computer;
-    GC::Ptr<CSSStyleSheet> m_parent_style_sheet;
+    RuleOrDeclaration m_rule_or_declaration;
     FlyString m_family_name;
     Vector<Gfx::UnicodeRange> m_unicode_ranges;
-    RefPtr<Gfx::Typeface const> m_vector_font;
+    RefPtr<Gfx::Typeface const> m_typeface;
     Vector<URL> m_urls;
     GC::Ptr<Fetch::Infrastructure::FetchController> m_fetch_controller;
-    Function<void(RefPtr<Gfx::Typeface const>)> m_on_load;
+    Vector<GC::Ref<GC::Function<void(RefPtr<Gfx::Typeface const>)>>> m_subscribers;
+    bool m_has_completed { false };
 };
 
 class WEB_API FontComputer final : public GC::Cell {
@@ -93,32 +114,38 @@ public:
 
     Gfx::Font const& initial_font() const;
 
+    void clear_computed_font_cache(FlyString const& family_name);
+    void clear_font_feature_values_cache(FlyString const& family_name);
     void did_load_font(FlyString const& family_name);
 
-    GC::Ptr<FontLoader> load_font_face(ParsedFontFace const&, ESCAPING Function<void(RefPtr<Gfx::Typeface const>)> on_load = {});
+    void register_font_face(GC::Ref<FontFace>);
+    void unregister_font_face(GC::Ref<FontFace>);
+
+    GC::Ptr<FontLoader> load_font_face(ParsedFontFace const&, GC::Ptr<GC::Function<void(RefPtr<Gfx::Typeface const>)>> on_load = {});
 
     void load_fonts_from_sheet(CSSStyleSheet&);
     void unload_fonts_from_sheet(CSSStyleSheet&);
 
-    NonnullRefPtr<Gfx::FontCascadeList const> compute_font_for_style_values(StyleValue const& font_family, CSSPixels const& font_size, int font_slope, double font_weight, Percentage const& font_width, HashMap<FlyString, double> const& font_variation_settings) const;
-
-    size_t number_of_css_font_faces_with_loading_in_progress() const;
+    NonnullRefPtr<Gfx::FontCascadeList const> compute_font_for_style_values(StyleValue const& font_family, CSSPixels const& font_size, int font_slope, double font_weight, Percentage const& font_width, FontOpticalSizing font_optical_sizing, HashMap<FlyString, double> const& font_variation_settings, FontFeatureData const& font_feature_data) const;
 
 private:
     virtual void visit_edges(Visitor&) override;
 
     struct MatchingFontCandidate;
-    static RefPtr<Gfx::FontCascadeList const> find_matching_font_weight_ascending(Vector<MatchingFontCandidate> const& candidates, int target_weight, float font_size_in_pt, Gfx::FontVariationSettings const& variations, bool inclusive);
-    static RefPtr<Gfx::FontCascadeList const> find_matching_font_weight_descending(Vector<MatchingFontCandidate> const& candidates, int target_weight, float font_size_in_pt, Gfx::FontVariationSettings const& variations, bool inclusive);
-    RefPtr<Gfx::FontCascadeList const> font_matching_algorithm(FlyString const& family_name, int weight, int slope, float font_size_in_pt) const;
-    RefPtr<Gfx::FontCascadeList const> font_matching_algorithm_impl(FlyString const& family_name, int weight, int slope, float font_size_in_pt) const;
+    RefPtr<Gfx::FontCascadeList const> find_matching_font_weight_ascending(Vector<MatchingFontCandidate> const& candidates, int target_weight, float font_size_in_pt, Gfx::FontVariationSettings const& variations, FontFeatureData const& font_feature_data, HashMap<FontFeatureValueKey, Vector<u32>> const& font_feature_values, bool inclusive) const;
+    RefPtr<Gfx::FontCascadeList const> find_matching_font_weight_descending(Vector<MatchingFontCandidate> const& candidates, int target_weight, float font_size_in_pt, Gfx::FontVariationSettings const& variations, FontFeatureData const& font_feature_data, HashMap<FontFeatureValueKey, Vector<u32>> const& font_feature_values, bool inclusive) const;
+    NonnullRefPtr<Gfx::FontCascadeList const> compute_font_for_style_values_impl(StyleValue const& font_family, CSSPixels const& font_size, int font_slope, double font_weight, Percentage const& font_width, FontOpticalSizing font_optical_sizing, HashMap<FlyString, double> const& font_variation_settings, FontFeatureData const& font_feature_data) const;
+    RefPtr<Gfx::FontCascadeList const> font_matching_algorithm(FlyString const& family_name, int weight, Percentage const& font_width, int slope, float font_size_in_pt, Gfx::FontVariationSettings const& variations, FontFeatureData const& font_feature_data, HashMap<FontFeatureValueKey, Vector<u32>> const& font_feature_values) const;
+
+    HashMap<FontFeatureValueKey, Vector<u32>> const& font_feature_values_for_family(FlyString const& family_name) const;
 
     GC::Ref<DOM::Document> m_document;
 
-    using FontLoaderList = Vector<GC::Ref<FontLoader>>;
-    HashMap<OwnFontFaceKey, FontLoaderList> m_loaded_fonts;
+    HashMap<FontFaceKey, Vector<GC::Ref<FontFace>>> m_font_faces;
+    HashMap<String, GC::Ref<FontLoader>> m_loaders_by_url;
 
-    mutable HashMap<FontMatchingAlgorithmCacheKey, RefPtr<Gfx::FontCascadeList const>> m_font_matching_algorithm_cache;
+    mutable HashMap<ComputedFontCacheKey, NonnullRefPtr<Gfx::FontCascadeList const>> m_computed_font_cache;
+    mutable HashMap<FlyString, HashMap<FontFeatureValueKey, Vector<u32>>> m_font_feature_values_cache;
 };
 
 }

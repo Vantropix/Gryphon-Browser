@@ -1,7 +1,11 @@
 set(SOURCES
     Application.cpp
+    CaptureFile.cpp
+    Debug.cpp
+    Display.cpp
     Fixture.cpp
     Fuzzy.cpp
+    TestRunCapture.cpp
     TestWebView.cpp
     main.cpp
 )
@@ -14,25 +18,22 @@ if (APPLE)
     target_compile_definitions(test-web PRIVATE LADYBIRD_BINARY_PATH="$<TARGET_FILE_DIR:ladybird>")
 elseif (WIN32)
     target_link_libraries(test-web PRIVATE LibDevTools)
-    find_package(pthread REQUIRED)
     target_include_directories(test-web PRIVATE $<BUILD_INTERFACE:${PTHREAD_INCLUDE_DIR}>)
     lagom_windows_bin(test-web CONSOLE)
 endif()
 
-# FIXME: Increase support for building targets on Windows
-if (WIN32 AND ENABLE_WINDOWS_CI)
+# FIXME: Add support for running test-web on Windows
+if (WIN32)
     return()
 endif()
 
 if (BUILD_TESTING)
-    find_package(Python3 REQUIRED)
-
     add_test(
         NAME LibWeb
-        COMMAND $<TARGET_FILE:test-web> --python-executable ${Python3_EXECUTABLE} --dump-failed-ref-tests --per-test-timeout 120 --verbose
+        COMMAND $<TARGET_FILE:test-web> --python-executable ${Python3_EXECUTABLE} --per-test-timeout 120 -v -v
     )
 
     set_tests_properties(LibWeb PROPERTIES
-        ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_PROJECT_ROOT}
+        ENVIRONMENT LADYBIRD_SOURCE_DIR=${LADYBIRD_SOURCE_DIR}
         TIMEOUT_SIGNAL_NAME SIGTERM)
 endif()

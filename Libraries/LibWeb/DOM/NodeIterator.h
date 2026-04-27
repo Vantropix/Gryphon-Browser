@@ -17,6 +17,8 @@ class NodeIterator final : public Bindings::PlatformObject {
     GC_DECLARE_ALLOCATOR(NodeIterator);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     static GC::Ref<NodeIterator> create(JS::Realm& realm, Node& root, unsigned what_to_show, GC::Ptr<NodeFilter>);
 
     virtual ~NodeIterator() override;
@@ -26,7 +28,7 @@ public:
     bool pointer_before_reference_node() const { return m_reference.is_before_node; }
     unsigned what_to_show() const { return m_what_to_show; }
 
-    JS::Object* filter() const;
+    GC::Ptr<NodeFilter> filter() const;
 
     JS::ThrowCompletionOr<GC::Ptr<Node>> next_node();
     JS::ThrowCompletionOr<GC::Ptr<Node>> previous_node();

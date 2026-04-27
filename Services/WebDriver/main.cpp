@@ -33,12 +33,15 @@ static ErrorOr<Core::Process> launch_process(StringView application, ReadonlySpa
     return result;
 }
 
-static Vector<ByteString> create_arguments(ByteString const& socket_path, bool headless, bool force_cpu_painting, Optional<StringView> debug_process, Optional<StringView> default_time_zone)
+static Vector<ByteString> create_arguments(ByteString const& webdriver_endpoint, bool headless, bool expose_experimental_interfaces, bool force_cpu_painting, Optional<StringView> debug_process, Optional<StringView> default_time_zone)
 {
-    Vector<ByteString> arguments {
-        "--webdriver-content-path"sv,
-        socket_path,
-    };
+    Vector<ByteString> arguments;
+#if defined(AK_OS_MACOS)
+    arguments.append("--webdriver-mach-server-name"sv);
+#else
+    arguments.append("--webdriver-content-path"sv);
+#endif
+    arguments.append(webdriver_endpoint);
 
     Vector<ByteString> certificate_args;
     for (auto const& certificate : certificates) {
@@ -53,6 +56,8 @@ static Vector<ByteString> create_arguments(ByteString const& socket_path, bool h
     arguments.append("--force-new-process"sv);
     arguments.append("--enable-autoplay"sv);
     arguments.append("--disable-scrollbar-painting"sv);
+    if (expose_experimental_interfaces)
+        arguments.append("--expose-experimental-interfaces"sv);
     if (force_cpu_painting)
         arguments.append("--force-cpu-painting"sv);
 
@@ -75,6 +80,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
 
     auto listen_address = "0.0.0.0"sv;
     int port = 8000;
+    bool expose_experimental_interfaces = false;
     bool force_cpu_painting = false;
     bool headless = false;
     Optional<StringView> debug_process;
@@ -84,6 +90,7 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     args_parser.add_option(listen_address, "IP address to listen on", "listen-address", 'l', "listen_address");
     args_parser.add_option(port, "Port to listen on", "port", 'p', "port");
     args_parser.add_option(certificates, "Path to a certificate file", "certificate", 'C', "certificate");
+    args_parser.add_option(expose_experimental_interfaces, "Expose experimental IDL interfaces", "expose-experimental-interfaces");
     args_parser.add_option(force_cpu_painting, "Launch browser with GPU painting disabled", "force-cpu-painting");
     args_parser.add_option(debug_process, "Wait for a debugger to attach to the given process name (WebContent, RequestServer, etc.)", "debug-process", 0, "process-name");
     args_parser.add_option(headless, "Launch browser without a graphical interface", "headless");
@@ -127,8 +134,8 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
             return;
         }
 
-        auto launch_browser_callback = [&](ByteString const& socket_path, bool headless) {
-            auto arguments = create_arguments(socket_path, headless, force_cpu_painting, debug_process, default_time_zone);
+        auto launch_browser_callback = [&](ByteString const& webdriver_endpoint, bool headless) {
+            auto arguments = create_arguments(webdriver_endpoint, headless, expose_experimental_interfaces, force_cpu_painting, debug_process, default_time_zone);
             return launch_process("Ladybird"sv, arguments.span());
         };
 
@@ -139,10 +146,10 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         }
 
         auto client = maybe_client.release_value();
-        client->on_death = [&] {
+        client->on_death = [&clients, client] {
             clients.remove(client);
         };
-        clients.set(move(client));
+        clients.set(client);
     };
 
     TRY(server->listen(ipv4_address.value(), port, Core::TCPServer::AllowAddressReuse::Yes));

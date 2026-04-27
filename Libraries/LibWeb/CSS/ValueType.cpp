@@ -25,6 +25,8 @@ Optional<ValueType> value_type_from_string(StringView string)
         return ValueType::Color;
     if (string.equals_ignoring_ascii_case("counter"sv))
         return ValueType::Counter;
+    if (string.equals_ignoring_ascii_case("counter-style"sv))
+        return ValueType::CounterStyle;
     if (string.equals_ignoring_ascii_case("custom-ident"sv))
         return ValueType::CustomIdent;
     if (string.equals_ignoring_ascii_case("dashed-ident"sv))
@@ -37,6 +39,14 @@ Optional<ValueType> value_type_from_string(StringView string)
         return ValueType::FitContent;
     if (string.equals_ignoring_ascii_case("flex"sv))
         return ValueType::Flex;
+    if (string.equals_ignoring_ascii_case("font-variant-alternates"sv))
+        return ValueType::FontVariantAlternates;
+    if (string.equals_ignoring_ascii_case("font-variant-east-asian"sv))
+        return ValueType::FontVariantEastAsian;
+    if (string.equals_ignoring_ascii_case("font-variant-ligatures"sv))
+        return ValueType::FontVariantLigatures;
+    if (string.equals_ignoring_ascii_case("font-variant-numeric"sv))
+        return ValueType::FontVariantNumeric;
     if (string.equals_ignoring_ascii_case("frequency"sv))
         return ValueType::Frequency;
     if (string.equals_ignoring_ascii_case("frequency-percentage"sv))
@@ -51,8 +61,8 @@ Optional<ValueType> value_type_from_string(StringView string)
         return ValueType::LengthPercentage;
     if (string.equals_ignoring_ascii_case("number"sv))
         return ValueType::Number;
-    if (string.equals_ignoring_ascii_case("opacity"sv))
-        return ValueType::Opacity;
+    if (string.equals_ignoring_ascii_case("opacity-value"sv))
+        return ValueType::OpacityValue;
     if (string.equals_ignoring_ascii_case("opentype-tag"sv))
         return ValueType::OpentypeTag;
     if (string.equals_ignoring_ascii_case("paint"sv))
@@ -109,6 +119,8 @@ StringView value_type_to_string(ValueType value_type)
         return "CornerShape"sv;
     case Web::CSS::ValueType::Counter:
         return "Counter"sv;
+    case Web::CSS::ValueType::CounterStyle:
+        return "CounterStyle"sv;
     case Web::CSS::ValueType::CustomIdent:
         return "CustomIdent"sv;
     case Web::CSS::ValueType::DashedIdent:
@@ -121,6 +133,16 @@ StringView value_type_to_string(ValueType value_type)
         return "FitContent"sv;
     case Web::CSS::ValueType::Flex:
         return "Flex"sv;
+    case Web::CSS::ValueType::FontStyle:
+        return "FontStyle"sv;
+    case Web::CSS::ValueType::FontVariantAlternates:
+        return "FontVariantAlternates"sv;
+    case Web::CSS::ValueType::FontVariantEastAsian:
+        return "FontVariantEastAsian"sv;
+    case Web::CSS::ValueType::FontVariantLigatures:
+        return "FontVariantLigatures"sv;
+    case Web::CSS::ValueType::FontVariantNumeric:
+        return "FontVariantNumeric"sv;
     case Web::CSS::ValueType::Frequency:
         return "Frequency"sv;
     case Web::CSS::ValueType::FrequencyPercentage:
@@ -135,8 +157,8 @@ StringView value_type_to_string(ValueType value_type)
         return "LengthPercentage"sv;
     case Web::CSS::ValueType::Number:
         return "Number"sv;
-    case Web::CSS::ValueType::Opacity:
-        return "Opacity"sv;
+    case Web::CSS::ValueType::OpacityValue:
+        return "OpacityValue"sv;
     case Web::CSS::ValueType::OpentypeTag:
         return "OpenTypeTag"sv;
     case Web::CSS::ValueType::Paint:

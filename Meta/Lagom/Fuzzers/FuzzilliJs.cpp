@@ -7,11 +7,9 @@
 #include <AK/Format.h>
 #include <AK/Function.h>
 #include <AK/StringView.h>
-#include <LibJS/Bytecode/Interpreter.h>
 #include <LibJS/Forward.h>
-#include <LibJS/Lexer.h>
-#include <LibJS/Parser.h>
 #include <LibJS/Runtime/GlobalObject.h>
+#include <LibJS/Runtime/VM.h>
 #include <errno.h>
 
 #include <stddef.h>
@@ -124,6 +122,7 @@ extern "C" void __sanitizer_cov_trace_pc_guard(uint32_t* guard)
 
 class TestRunnerGlobalObject final : public JS::GlobalObject {
     JS_OBJECT(TestRunnerGlobalObject, JS::GlobalObject);
+    GC_DECLARE_ALLOCATOR(TestRunnerGlobalObject);
 
 public:
     TestRunnerGlobalObject(JS::Realm&);
@@ -133,6 +132,8 @@ public:
 private:
     JS_DECLARE_NATIVE_FUNCTION(fuzzilli);
 };
+
+GC_DEFINE_ALLOCATOR(TestRunnerGlobalObject);
 
 TestRunnerGlobalObject::TestRunnerGlobalObject(JS::Realm& realm)
     : GlobalObject(realm)
@@ -223,7 +224,7 @@ int main(int, char**)
             if (parse_result.is_error()) {
                 result = 1;
             } else {
-                auto completion = vm->bytecode_interpreter().run(parse_result.value());
+                auto completion = vm->run(parse_result.value());
                 if (completion.is_error()) {
                     result = 1;
                 }

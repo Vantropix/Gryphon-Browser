@@ -26,6 +26,7 @@
     M(BindingNotInitialized, "Binding {} is not initialized")                                                                       \
     M(BufferOutOfBounds, "{} contains a property which references a value at an index not contained within its buffer's bounds")    \
     M(ByteLengthExceedsMaxByteLength, "ArrayBuffer byte length of {} exceeds the max byte length of {}")                            \
+    M(ByteLengthLessThanPreviousByteLength, "SharedArrayBuffer byte length of {} is less than the previous byte length of {}")      \
     M(CallStackSizeExceeded, "Call stack size limit exceeded")                                                                      \
     M(CannotBeHeldWeakly, "{} cannot be held weakly")                                                                               \
     M(CannotDeclareGlobalFunction, "Cannot declare global function of name '{}'")                                                   \
@@ -226,6 +227,7 @@
     M(ReferenceNullishSetProperty, "Cannot set property '{}' of {}")                                                                \
     M(ReferencePrimitiveSetProperty, "Cannot set property '{}' of {} '{}'")                                                         \
     M(ReferenceUnresolvable, "Unresolvable reference")                                                                              \
+    M(RegExpBacktrackLimitExceeded, "Regular expression backtrack limit exceeded")                                                  \
     M(RegExpCompileError, "RegExp compile error: {}")                                                                               \
     M(RegExpObjectBadFlag, "Invalid RegExp flag '{}'")                                                                              \
     M(RegExpObjectIncompatibleFlags, "RegExp flag '{}' is incompatible with flag '{}'")                                             \
@@ -235,8 +237,6 @@
     M(RestrictedGlobalProperty, "Cannot declare global property '{}'")                                                              \
     M(SetLegacyRegExpStaticPropertyThisValueMismatch,                                                                               \
         "Legacy RegExp static property setter must be called with the RegExp constructor for the this value")                       \
-    M(ShadowRealmEvaluateAbruptCompletion, "The evaluated script did not complete normally")                                        \
-    M(ShadowRealmWrappedValueNonFunctionObject, "Wrapped value must be primitive or a function object, got {}")                     \
     M(SharedArrayBuffer, "The array buffer object cannot be a SharedArrayBuffer")                                                   \
     M(SpeciesConstructorDidNotCreate, "Species constructor did not create {}")                                                      \
     M(SpeciesConstructorReturned, "Species constructor returned {}")                                                                \
@@ -267,6 +267,7 @@
     M(TemporalInvalidPlainMonthDay, "Invalid plain month day")                                                                      \
     M(TemporalInvalidPlainTime, "Invalid plain time")                                                                               \
     M(TemporalInvalidPlainYearMonth, "Invalid plain year month")                                                                    \
+    M(TemporalInvalidPlainYearMonthAddition, "Only years and months may be {} Temporal.PlainYearMonth")                             \
     M(TemporalInvalidTime, "Invalid time")                                                                                          \
     M(TemporalInvalidTimeLikeField, "Invalid value {} for time field '{}'")                                                         \
     M(TemporalInvalidTimeZoneName, "Invalid time zone name '{}'")                                                                   \
@@ -303,7 +304,8 @@
     M(URIMalformed, "URI malformed") /* LibWeb bindings */                                                                          \
     M(WrappedFunctionCallThrowCompletion, "Call of wrapped target function did not complete normally")                              \
     M(WrappedFunctionCopyNameAndLengthThrowCompletion, "Trying to copy target name and length did not complete normally")           \
-    M(YieldFromIteratorMissingThrowMethod, "yield* protocol violation: iterator must have a throw method")
+    M(YieldFromIteratorMissingThrowMethod, "yield* protocol violation: iterator must have a throw method")                          \
+    M(ZipIteratorNotEnoughResults, "Not enough iterator results in 'strict' mode")
 
 namespace JS {
 

@@ -42,6 +42,7 @@ TESTJS_GLOBAL_FUNCTION(read_binary_wasm_file, readBinaryWasmFile)
 
 class WebAssemblyModule final : public JS::Object {
     JS_OBJECT(WebAssemblyModule, JS::Object);
+    GC_DECLARE_ALLOCATOR(WebAssemblyModule);
 
 public:
     explicit WebAssemblyModule(JS::Object& prototype)
@@ -139,7 +140,7 @@ private:
     static Optional<Wasm::FunctionAddress> alloc_noop_function(Wasm::FunctionType type)
     {
         return m_machine.store().allocate(Wasm::HostFunction {
-            [](auto&, auto&) -> Wasm::Result {
+            [](auto&, auto) -> Wasm::Result {
                 // Noop, this just needs to exist.
                 return Wasm::Result { Vector<Wasm::Value> {} };
             },
@@ -152,6 +153,8 @@ private:
     RefPtr<Wasm::Module> m_module;
     OwnPtr<Wasm::ModuleInstance> m_module_instance;
 };
+
+GC_DEFINE_ALLOCATOR(WebAssemblyModule);
 
 Wasm::AbstractMachine WebAssemblyModule::m_machine;
 HashMap<Wasm::Linker::Name, Wasm::ExternValue> WebAssemblyModule::s_spec_test_namespace;
@@ -170,14 +173,12 @@ TESTJS_GLOBAL_FUNCTION(parse_webassembly_module, parseWebAssemblyModule)
 
     HashMap<Wasm::Linker::Name, Wasm::ExternValue> imports;
     auto import_value = vm.argument(1);
-    if (import_value.is_object()) {
-        auto& import_object = import_value.as_object();
-        for (auto& property : import_object.shape().property_table()) {
-            auto value = import_object.get_without_side_effects(property.key);
-            if (!value.is_object() || !is<WebAssemblyModule>(value.as_object()))
+    if (auto import_object = import_value.template as_if<JS::Object>()) {
+        for (auto const& property : import_object->shape().property_table()) {
+            auto module_object = import_object->get_without_side_effects(property.key).as_if<WebAssemblyModule>();
+            if (!module_object)
                 continue;
-            auto& module_object = static_cast<WebAssemblyModule&>(value.as_object());
-            for (auto& entry : module_object.module_instance().exports()) {
+            for (auto& entry : module_object->module_instance().exports()) {
                 // FIXME: Don't pretend that everything is a function
                 imports.set({ property.key.as_string().to_utf16_string().to_byte_string(), entry.name(), Wasm::TypeIndex(0) }, entry.value());
             }
@@ -258,10 +259,12 @@ TESTJS_GLOBAL_FUNCTION(test_simd_vector, testSIMDVector)
     auto& got_array = static_cast<JS::TypedArrayBase&>(*got);
     auto element_size = 128 / TRY(TRY(expected_array.get("length"_utf16_fly_string)).to_u32(vm));
     size_t i = 0;
-    for (auto it = expected_array.indexed_properties().begin(false); it != expected_array.indexed_properties().end(); ++it) {
+    for (u32 it_index = 0; it_index < expected_array.indexed_array_like_size(); ++it_index) {
+        if (!expected_array.indexed_has(it_index))
+            continue;
         auto got_value = TRY(got_array.get(i++));
         u64 got = got_value.is_bigint() ? TRY(got_value.to_bigint_uint64(vm)) : (u64)TRY(got_value.to_index(vm));
-        auto expect = TRY(expected_array.get(it.index()));
+        auto expect = TRY(expected_array.get(it_index));
         if (expect.is_string()) {
             if (element_size != 32 && element_size != 64)
                 return vm.throw_completion<JS::TypeError>("Expected element of size 32 or 64"sv);
@@ -331,6 +334,7 @@ JS_DEFINE_NATIVE_FUNCTION(WebAssemblyModule::get_export)
                         [](Wasm::Reference::Exception const&) -> JS::Value { return JS::js_undefined(); },
                         [&](auto const& ref) -> JS::Value { return JS::Value(static_cast<double>(ref.address.value())); });
                 }
+                case Wasm::ValueType::TypeUseReference:
                 case Wasm::ValueType::UnsupportedHeapReference:
                     return vm.throw_completion<JS::TypeError>("Unsupported heap reference"sv);
                 }
@@ -419,6 +423,12 @@ JS_DEFINE_NATIVE_FUNCTION(WebAssemblyModule::wasm_invoke)
             else
                 return vm.throw_completion<JS::TypeError>("Exception references are not supported"sv);
             break;
+        case Wasm::ValueType::Kind::TypeUseReference:
+            if (argument.is_null())
+                arguments.append(Wasm::Value(Wasm::Reference { Wasm::Reference::Null { Wasm::ValueType(Wasm::ValueType::Kind::TypeUseReference, param.unsafe_typeindex()) } }));
+            else
+                return vm.throw_completion<JS::TypeError>("GC Heap references are not supported"sv);
+            break;
         case Wasm::ValueType::Kind::UnsupportedHeapReference:
             return vm.throw_completion<JS::TypeError>("GC Heap references are not supported"sv);
         }
@@ -456,6 +466,8 @@ JS_DEFINE_NATIVE_FUNCTION(WebAssemblyModule::wasm_invoke)
         case Wasm::ValueType::ExternReference:
             return (value.to<Wasm::Reference>()).ref().visit([&](Wasm::Reference::Null) { return JS::js_null(); }, [&](Wasm::Reference::Exception) { return JS::Value(); }, [&](auto const& ref) { return JS::Value(static_cast<double>(ref.address.value())); });
         case Wasm::ValueType::ExceptionReference:
+            return JS::js_null();
+        case Wasm::ValueType::TypeUseReference:
             return JS::js_null();
         case Wasm::ValueType::UnsupportedHeapReference:
             return vm.throw_completion<JS::TypeError>("Unsupported heap reference"sv);

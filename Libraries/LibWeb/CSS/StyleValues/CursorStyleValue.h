@@ -9,7 +9,6 @@
 #include <AK/Optional.h>
 #include <LibGfx/Color.h>
 #include <LibGfx/Cursor.h>
-#include <LibWeb/CSS/CalculatedOr.h>
 #include <LibWeb/CSS/Length.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/Forward.h>
@@ -28,11 +27,13 @@ public:
 
     Optional<Gfx::ImageCursor> make_image_cursor(Layout::NodeWithStyle const&) const;
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(CursorStyleValue const& other) const { return m_properties == other.m_properties; }
+
+    virtual bool is_computationally_independent() const override;
 
 private:
     CursorStyleValue(ValueComparingNonnullRefPtr<AbstractImageStyleValue const> image,
@@ -45,8 +46,8 @@ private:
 
     struct Properties {
         ValueComparingNonnullRefPtr<AbstractImageStyleValue const> image;
-        RefPtr<StyleValue const> x;
-        RefPtr<StyleValue const> y;
+        ValueComparingRefPtr<StyleValue const> x;
+        ValueComparingRefPtr<StyleValue const> y;
         bool operator==(Properties const&) const = default;
     } m_properties;
 

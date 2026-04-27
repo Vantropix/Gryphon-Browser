@@ -25,24 +25,25 @@
 #include <LibJS/Runtime/StringObject.h>
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibJS/Runtime/VM.h>
-#include <LibWeb/Bindings/DOMExceptionPrototype.h>
-#include <LibWeb/Bindings/DOMMatrixPrototype.h>
-#include <LibWeb/Bindings/DOMMatrixReadOnlyPrototype.h>
-#include <LibWeb/Bindings/DOMPointPrototype.h>
-#include <LibWeb/Bindings/DOMPointReadOnlyPrototype.h>
-#include <LibWeb/Bindings/DOMQuadPrototype.h>
-#include <LibWeb/Bindings/DOMRectPrototype.h>
-#include <LibWeb/Bindings/DOMRectReadOnlyPrototype.h>
-#include <LibWeb/Bindings/FileListPrototype.h>
-#include <LibWeb/Bindings/FilePrototype.h>
-#include <LibWeb/Bindings/ImageBitmapPrototype.h>
+#include <LibWeb/Bindings/DOMException.h>
+#include <LibWeb/Bindings/DOMMatrix.h>
+#include <LibWeb/Bindings/DOMMatrixReadOnly.h>
+#include <LibWeb/Bindings/DOMPoint.h>
+#include <LibWeb/Bindings/DOMPointReadOnly.h>
+#include <LibWeb/Bindings/DOMQuad.h>
+#include <LibWeb/Bindings/DOMRect.h>
+#include <LibWeb/Bindings/DOMRectReadOnly.h>
+#include <LibWeb/Bindings/File.h>
+#include <LibWeb/Bindings/FileList.h>
+#include <LibWeb/Bindings/ImageBitmap.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/MessagePortPrototype.h>
-#include <LibWeb/Bindings/ReadableStreamPrototype.h>
+#include <LibWeb/Bindings/MessagePort.h>
+#include <LibWeb/Bindings/QuotaExceededError.h>
+#include <LibWeb/Bindings/ReadableStream.h>
 #include <LibWeb/Bindings/Serializable.h>
 #include <LibWeb/Bindings/Transferable.h>
-#include <LibWeb/Bindings/TransformStreamPrototype.h>
-#include <LibWeb/Bindings/WritableStreamPrototype.h>
+#include <LibWeb/Bindings/TransformStream.h>
+#include <LibWeb/Bindings/WritableStream.h>
 #include <LibWeb/Crypto/CryptoKey.h>
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/FileAPI/File.h>
@@ -63,6 +64,7 @@
 #include <LibWeb/Streams/TransformStream.h>
 #include <LibWeb/Streams/WritableStream.h>
 #include <LibWeb/WebIDL/DOMException.h>
+#include <LibWeb/WebIDL/QuotaExceededError.h>
 
 namespace Web::HTML {
 
@@ -108,7 +110,7 @@ enum ErrorType {
 #undef __JS_ENUMERATE
 };
 
-static ErrorType error_name_to_type(String const& name)
+static ErrorType error_name_to_type(StringView name)
 {
 #define __JS_ENUMERATE(ClassName, snake_name, PrototypeName, ConstructorName, ArrayType) \
     if (name == #ClassName##sv)                                                          \
@@ -125,10 +127,10 @@ static WebIDL::ExceptionOr<void> serialize_array_buffer(JS::VM& vm, TransferData
 
     // 1. If IsSharedArrayBuffer(value) is true, then:
     if (array_buffer.is_shared_array_buffer()) {
-        // 1. If the current principal settings object's cross-origin isolated capability is false, then throw a "DataCloneError" DOMException.
+        // 1. If the current settings object's cross-origin isolated capability is false, then throw a "DataCloneError" DOMException.
         // NOTE: This check is only needed when serializing (and not when deserializing) as the cross-origin isolated capability cannot change
         //       over time and a SharedArrayBuffer cannot leave an agent cluster.
-        if (current_principal_settings_object().cross_origin_isolated_capability() == CanUseCrossOriginIsolatedAPIs::No)
+        if (current_settings_object().cross_origin_isolated_capability() == CanUseCrossOriginIsolatedAPIs::No)
             return WebIDL::DataCloneError::create(*vm.current_realm(), "Cannot serialize SharedArrayBuffer when cross-origin isolated"_utf16);
 
         // 2. If forStorage is true, then throw a "DataCloneError" DOMException.
@@ -189,19 +191,14 @@ static WebIDL::ExceptionOr<void> serialize_viewed_array_buffer(JS::VM& vm, Trans
 {
     // 14. Otherwise, if value has a [[ViewedArrayBuffer]] internal slot, then:
 
-    auto view_record = [&]() {
-        if constexpr (IsSame<ViewType, JS::DataView>)
-            return JS::make_data_view_with_buffer_witness_record(view, JS::ArrayBuffer::Order::SeqCst);
-        else
-            return JS::make_typed_array_with_buffer_witness_record(view, JS::ArrayBuffer::Order::SeqCst);
-    }();
-
     // 1. If IsArrayBufferViewOutOfBounds(value) is true, then throw a "DataCloneError" DOMException.
     if constexpr (IsSame<ViewType, JS::DataView>) {
+        auto view_record = JS::make_data_view_with_buffer_witness_record(view, JS::ArrayBuffer::Order::SeqCst);
         if (JS::is_view_out_of_bounds(view_record))
             return WebIDL::DataCloneError::create(*vm.current_realm(), Utf16String::formatted(JS::ErrorType::BufferOutOfBounds.format(), "DataView"sv));
     } else {
-        if (JS::is_typed_array_out_of_bounds(view_record))
+        auto typed_array_record = JS::make_typed_array_with_buffer_witness_record(view, JS::ArrayBuffer::Order::SeqCst);
+        if (JS::is_typed_array_out_of_bounds(typed_array_record))
             return WebIDL::DataCloneError::create(*vm.current_realm(), Utf16String::formatted(JS::ErrorType::BufferOutOfBounds.format(), "TypedArray"sv));
     }
 
@@ -218,13 +215,21 @@ static WebIDL::ExceptionOr<void> serialize_viewed_array_buffer(JS::VM& vm, Trans
     VERIFY(first_is_one_of(tag, ValueTag::ArrayBuffer, ValueTag::ResizeableArrayBuffer, ValueTag::SharedArrayBuffer, ValueTag::GrowableSharedArrayBuffer)
         || (tag == ValueTag::ObjectReference && memory.contains(buffer)));
 
+    auto serialize_byte_length = [&](JS::ByteLength byte_length) {
+        VERIFY(!byte_length.is_detached());
+
+        data_holder.encode(byte_length.is_auto());
+        if (!byte_length.is_auto())
+            data_holder.encode(byte_length.length());
+    };
+
     // 5. If value has a [[DataView]] internal slot, then set serialized to { [[Type]]: "ArrayBufferView", [[Constructor]]: "DataView",
     //    [[ArrayBufferSerialized]]: bufferSerialized, [[ByteLength]]: value.[[ByteLength]], [[ByteOffset]]: value.[[ByteOffset]] }.
     if constexpr (IsSame<ViewType, JS::DataView>) {
         data_holder.encode(ValueTag::ArrayBufferView);
         data_holder.append(move(buffer_serialized)); // [[ArrayBufferSerialized]]
         data_holder.encode("DataView"_utf16);        // [[Constructor]]
-        data_holder.encode(JS::get_view_byte_length(view_record));
+        serialize_byte_length(view.byte_length());
         data_holder.encode(view.byte_offset());
     }
     // 6. Otherwise:
@@ -237,9 +242,9 @@ static WebIDL::ExceptionOr<void> serialize_viewed_array_buffer(JS::VM& vm, Trans
         data_holder.encode(ValueTag::ArrayBufferView);
         data_holder.append(move(buffer_serialized));               // [[ArrayBufferSerialized]]
         data_holder.encode(view.element_name().to_utf16_string()); // [[Constructor]]
-        data_holder.encode(JS::typed_array_byte_length(view_record));
+        serialize_byte_length(view.byte_length());
         data_holder.encode(view.byte_offset());
-        data_holder.encode(JS::typed_array_length(view_record));
+        serialize_byte_length(view.array_length());
     }
 
     return {};
@@ -259,7 +264,6 @@ public:
     }
 
     // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
-    // https://whatpr.org/html/9893/structured-data.html#structuredserializeinternal
     WebIDL::ExceptionOr<SerializationRecord> serialize(JS::Value value)
     {
         TransferDataEncoder serialized;
@@ -306,36 +310,33 @@ public:
 
         // 6. Let serialized be an uninitialized value.
         // NOTE: We created the serialized value above.
-
-        if (value.is_object()) {
-            auto const& object = value.as_object();
-
+        if (auto object = value.as_if<JS::Object>()) {
             // 7. If value has a [[BooleanData]] internal slot, then set serialized to { [[Type]]: "Boolean", [[BooleanData]]: value.[[BooleanData]] }.
-            if (auto const* boolean_object = as_if<JS::BooleanObject>(object)) {
+            if (auto const* boolean_object = as_if<JS::BooleanObject>(*object)) {
                 serialized.encode(ValueTag::BooleanObject);
                 serialized.encode(boolean_object->boolean());
             }
 
             // 8. Otherwise, if value has a [[NumberData]] internal slot, then set serialized to { [[Type]]: "Number", [[NumberData]]: value.[[NumberData]] }.
-            else if (auto const* number_object = as_if<JS::NumberObject>(object)) {
+            else if (auto const* number_object = as_if<JS::NumberObject>(*object)) {
                 serialized.encode(ValueTag::NumberObject);
                 serialized.encode(number_object->number());
             }
 
             // 9. Otherwise, if value has a [[BigIntData]] internal slot, then set serialized to { [[Type]]: "BigInt", [[BigIntData]]: value.[[BigIntData]] }.
-            else if (auto const* big_int_object = as_if<JS::BigIntObject>(object)) {
+            else if (auto const* big_int_object = as_if<JS::BigIntObject>(*object)) {
                 serialized.encode(ValueTag::BigIntObject);
                 serialized.encode(MUST(big_int_object->bigint().big_integer().to_base(10)));
             }
 
             // 10. Otherwise, if value has a [[StringData]] internal slot, then set serialized to { [[Type]]: "String", [[StringData]]: value.[[StringData]] }.
-            else if (auto const* string_object = as_if<JS::StringObject>(object)) {
+            else if (auto const* string_object = as_if<JS::StringObject>(*object)) {
                 serialized.encode(ValueTag::StringObject);
                 serialized.encode(string_object->primitive_string().utf8_string());
             }
 
             // 11. Otherwise, if value has a [[DateValue]] internal slot, then set serialized to { [[Type]]: "Date", [[DateValue]]: value.[[DateValue]] }.
-            else if (auto const* date = as_if<JS::Date>(object)) {
+            else if (auto const* date = as_if<JS::Date>(*object)) {
                 serialized.encode(ValueTag::DateObject);
                 serialized.encode(date->date_value());
             }
@@ -343,8 +344,8 @@ public:
             // 12. Otherwise, if value has a [[RegExpMatcher]] internal slot, then set serialized to
             //     { [[Type]]: "RegExp", [[RegExpMatcher]]: value.[[RegExpMatcher]], [[OriginalSource]]: value.[[OriginalSource]],
             //       [[OriginalFlags]]: value.[[OriginalFlags]] }.
-            else if (auto const* reg_exp_object = as_if<JS::RegExpObject>(object)) {
-                // NOTE: A Regex<ECMA262> object is perfectly happy to be reconstructed with just the source+flags.
+            else if (auto const* reg_exp_object = as_if<JS::RegExpObject>(*object)) {
+                // NOTE: ECMAScriptRegex is perfectly happy to be reconstructed with just the source+flags.
                 //       In the future, we could optimize the work being done on the deserialize step by serializing
                 //       more of the internal state (the [[RegExpMatcher]] internal slot).
                 serialized.encode(ValueTag::RegExpObject);
@@ -353,19 +354,19 @@ public:
             }
 
             // 13. Otherwise, if value has an [[ArrayBufferData]] internal slot, then:
-            else if (auto const* array_buffer = as_if<JS::ArrayBuffer>(object)) {
+            else if (auto const* array_buffer = as_if<JS::ArrayBuffer>(*object)) {
                 TRY(serialize_array_buffer(m_vm, serialized, *array_buffer, m_for_storage));
             }
 
             // 14. Otherwise, if value has a [[ViewedArrayBuffer]] internal slot, then:
-            else if (auto const* typed_array_base = as_if<JS::TypedArrayBase>(object)) {
+            else if (auto const* typed_array_base = as_if<JS::TypedArrayBase>(*object)) {
                 TRY(serialize_viewed_array_buffer(m_vm, serialized, *typed_array_base, m_for_storage, m_memory));
-            } else if (auto const* data_view = as_if<JS::DataView>(object)) {
+            } else if (auto const* data_view = as_if<JS::DataView>(*object)) {
                 TRY(serialize_viewed_array_buffer(m_vm, serialized, *data_view, m_for_storage, m_memory));
             }
 
             // 15. Otherwise, if value has a [[MapData]] internal slot, then:
-            else if (is<JS::Map>(object)) {
+            else if (is<JS::Map>(*object)) {
                 // 1. Set serialized to { [[Type]]: "Map", [[MapData]]: a new empty List }.
                 serialized.encode(ValueTag::MapObject);
 
@@ -374,7 +375,7 @@ public:
             }
 
             // 16. Otherwise, if value has a [[SetData]] internal slot, then:
-            else if (is<JS::Set>(object)) {
+            else if (is<JS::Set>(*object)) {
                 // 1. Set serialized to { [[Type]]: "Set", [[SetData]]: a new empty List }.
                 serialized.encode(ValueTag::SetObject);
 
@@ -383,38 +384,46 @@ public:
             }
 
             // 17. Otherwise, if value has an [[ErrorData]] internal slot and value is not a platform object, then:
-            else if (is<JS::Error>(object) && !is<Bindings::PlatformObject>(object)) {
+            else if (is<JS::Error>(*object) && !is<Bindings::PlatformObject>(*object)) {
                 // 1. Let name be ? Get(value, "name").
-                auto name_property = TRY(object.get(m_vm.names.name));
-
-                // FIXME: Spec bug - https://github.com/whatwg/html/issues/9923
-                // MISSING STEP: Set name to ? ToString(name).
-                auto name = TRY(name_property.to_string(m_vm));
+                auto name = TRY(object->get(m_vm.names.name));
 
                 // 2. If name is not one of "Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError", "TypeError", or "URIError", then set name to "Error".
-                auto type = error_name_to_type(name);
+                auto type = ErrorType::Error;
+                if (name.is_string())
+                    type = error_name_to_type(name.as_string().utf8_string_view());
 
                 // 3. Let valueMessageDesc be ? value.[[GetOwnProperty]]("message").
-                auto value_message_descriptor = TRY(object.internal_get_own_property(m_vm.names.message));
+                auto value_message_descriptor = TRY(object->internal_get_own_property(m_vm.names.message));
 
                 // 4. Let message be undefined if IsDataDescriptor(valueMessageDesc) is false, and ? ToString(valueMessageDesc.[[Value]]) otherwise.
                 Optional<Utf16String> message;
                 if (value_message_descriptor.has_value() && value_message_descriptor->is_data_descriptor())
                     message = TRY(value_message_descriptor->value->to_utf16_string(m_vm));
 
+                // FIXME: Spec bug - https://github.com/whatwg/html/issues/11321
+                // MISSING STEP: Let valueCauseDesc be ? value.[[GetOwnProperty]]("cause").
+                auto value_cause_descriptor = TRY(object->internal_get_own_property(m_vm.names.cause));
+
+                // MISSING STEP: Let cause be undefined if IsDataDescriptor(valueCauseDesc) is false, and ? ToString(valueCauseDesc.[[Value]]) otherwise.
+                Optional<Utf16String> cause;
+                if (value_cause_descriptor.has_value() && value_cause_descriptor->is_data_descriptor())
+                    cause = TRY(value_cause_descriptor->value->to_utf16_string(m_vm));
+
                 // 5. Set serialized to { [[Type]]: "Error", [[Name]]: name, [[Message]]: message }.
                 // FIXME: 6. User agents should attach a serialized representation of any interesting accompanying data which are not yet specified, notably the stack property, to serialized.
                 serialized.encode(ValueTag::ErrorObject);
                 serialized.encode(type);
                 serialized.encode(message);
+                serialized.encode(cause);
             }
 
             // 18. Otherwise, if value is an Array exotic object, then:
-            else if (is<JS::Array>(object)) {
+            else if (is<JS::Array>(*object)) {
                 // 1. Let valueLenDescriptor be ? OrdinaryGetOwnProperty(value, "length").
                 // 2. Let valueLen be valueLenDescriptor.[[Value]].
                 // NON-STANDARD: Array objects in LibJS do not have a real length property, so it must be accessed the usual way
-                u64 length = MUST(JS::length_of_array_like(m_vm, object));
+                u64 length = MUST(JS::length_of_array_like(m_vm, *object));
 
                 // 3. Set serialized to { [[Type]]: "Array", [[Length]]: valueLen, [[Properties]]: a new empty List }.
                 serialized.encode(ValueTag::ArrayObject);
@@ -425,20 +434,20 @@ public:
             }
 
             // 19. Otherwise, if value is a platform object that is a serializable object:
-            else if (auto const* serializable = as_if<Bindings::Serializable>(object)) {
+            else if (auto const* serializable = as_if<Bindings::Serializable>(*object)) {
                 // FIXME: 1. If value has a [[Detached]] internal slot whose value is true, then throw a "DataCloneError" DOMException.
 
                 // 2. Let typeString be the identifier of the primary interface of value.
                 // 3. Set serialized to { [[Type]]: typeString }.
                 serialized.encode(ValueTag::SerializableObject);
-                serialized.encode(serializable->serialize_type());
+                serialized.encode(as<Bindings::PlatformObject>(serializable)->interface_name());
 
                 // 4. Set deep to true
                 deep = true;
             }
 
             // 20. Otherwise, if value is a platform object, then throw a "DataCloneError" DOMException.
-            else if (is<Bindings::PlatformObject>(object)) {
+            else if (is<Bindings::PlatformObject>(*object)) {
                 return throw_completion(WebIDL::DataCloneError::create(*m_vm.current_realm(), "Cannot serialize platform objects"_utf16));
             }
 
@@ -729,25 +738,35 @@ public:
             auto array_buffer_value = TRY(deserialize());
             auto& array_buffer = as<JS::ArrayBuffer>(array_buffer_value.as_object());
 
+            auto deserialize_byte_length = [&]() -> JS::ByteLength {
+                auto is_auto = m_serialized.decode<bool>();
+                if (is_auto)
+                    return JS::ByteLength::auto_();
+
+                auto length = m_serialized.decode<u32>();
+                return length;
+            };
+
             auto constructor_name = m_serialized.decode<Utf16String>();
-            auto byte_length = m_serialized.decode<u32>();
+            auto byte_length = deserialize_byte_length();
             auto byte_offset = m_serialized.decode<u32>();
 
             if (constructor_name == "DataView"sv) {
                 value = JS::DataView::create(realm, &array_buffer, byte_length, byte_offset);
             } else {
-                auto array_length = m_serialized.decode<u32>();
+                auto array_length = deserialize_byte_length();
 
                 GC::Ptr<JS::TypedArrayBase> typed_array;
 #define __JS_ENUMERATE(ClassName, snake_name, PrototypeName, ConstructorName, Type) \
     if (constructor_name == #ClassName##sv)                                         \
-        typed_array = JS::ClassName::create(realm, array_length, array_buffer);
+        typed_array = JS::ClassName::create(realm, 0, array_buffer);
                 JS_ENUMERATE_TYPED_ARRAYS
 #undef __JS_ENUMERATE
 #undef CREATE_TYPED_ARRAY
 
                 VERIFY(typed_array); // FIXME: Handle errors better here? Can a fuzzer put weird stuff in the buffer?
 
+                typed_array->set_array_length(array_length);
                 typed_array->set_byte_length(byte_length);
                 typed_array->set_byte_offset(byte_offset);
                 value = typed_array;
@@ -800,6 +819,7 @@ public:
         case ValueTag::ErrorObject: {
             auto type = m_serialized.decode<ErrorType>();
             auto message = m_serialized.decode<Optional<Utf16String>>();
+            auto cause = m_serialized.decode<Optional<Utf16String>>();
 
             GC::Ptr<JS::Error> error;
 
@@ -820,6 +840,9 @@ public:
             if (message.has_value())
                 error->set_message(message.release_value());
 
+            if (cause.has_value())
+                error->create_non_enumerable_data_property_or_throw(m_vm.names.cause, JS::PrimitiveString::create(m_vm, cause.release_value()));
+
             value = error;
             break;
         }
@@ -829,10 +852,10 @@ public:
             VERIFY(tag == ValueTag::SerializableObject);
 
             // 1. Let interfaceName be serialized.[[Type]].
-            auto interface_name = m_serialized.decode<SerializeType>();
+            auto interface_name = m_serialized.decode<Bindings::InterfaceName>();
 
             // 2. If the interface identified by interfaceName is not exposed in targetRealm, then throw a "DataCloneError" DOMException.
-            if (!is_serializable_interface_exposed_on_target_realm(interface_name, realm))
+            if (!is_exposed(interface_name, realm))
                 return WebIDL::DataCloneError::create(realm, "Unsupported type"_utf16);
 
             // 3. Set value to a new instance of the interface identified by interfaceName, created in targetRealm.
@@ -915,79 +938,40 @@ public:
     }
 
 private:
-    static bool is_serializable_interface_exposed_on_target_realm(SerializeType name, JS::Realm& realm)
-    {
-        auto const& intrinsics = Bindings::host_defined_intrinsics(realm);
-        switch (name) {
-        case SerializeType::Blob:
-            return intrinsics.is_interface_exposed<Bindings::BlobPrototype>(realm);
-        case SerializeType::File:
-            return intrinsics.is_interface_exposed<Bindings::FilePrototype>(realm);
-        case SerializeType::FileList:
-            return intrinsics.is_interface_exposed<Bindings::FileListPrototype>(realm);
-        case SerializeType::DOMException:
-            return intrinsics.is_interface_exposed<Bindings::DOMExceptionPrototype>(realm);
-        case SerializeType::DOMMatrixReadOnly:
-            return intrinsics.is_interface_exposed<Bindings::DOMMatrixReadOnlyPrototype>(realm);
-        case SerializeType::DOMMatrix:
-            return intrinsics.is_interface_exposed<Bindings::DOMMatrixPrototype>(realm);
-        case SerializeType::DOMPointReadOnly:
-            return intrinsics.is_interface_exposed<Bindings::DOMPointReadOnlyPrototype>(realm);
-        case SerializeType::DOMPoint:
-            return intrinsics.is_interface_exposed<Bindings::DOMPointPrototype>(realm);
-        case SerializeType::DOMRectReadOnly:
-            return intrinsics.is_interface_exposed<Bindings::DOMRectReadOnlyPrototype>(realm);
-        case SerializeType::DOMRect:
-            return intrinsics.is_interface_exposed<Bindings::DOMRectPrototype>(realm);
-        case SerializeType::CryptoKey:
-            return intrinsics.is_interface_exposed<Bindings::CryptoKeyPrototype>(realm);
-        case SerializeType::DOMQuad:
-            return intrinsics.is_interface_exposed<Bindings::DOMQuadPrototype>(realm);
-        case SerializeType::ImageData:
-            return intrinsics.is_interface_exposed<Bindings::ImageDataPrototype>(realm);
-        case SerializeType::ImageBitmap:
-            return intrinsics.is_interface_exposed<Bindings::ImageBitmapPrototype>(realm);
-        case SerializeType::Unknown:
-            dbgln("Unknown interface type for serialization: {}", to_underlying(name));
-            break;
-        default:
-            VERIFY_NOT_REACHED();
-        }
-        return false;
-    }
-
-    static GC::Ref<Bindings::PlatformObject> create_serialized_type(SerializeType serialize_type, JS::Realm& realm)
+    static GC::Ref<Bindings::PlatformObject> create_serialized_type(Bindings::InterfaceName serialize_type, JS::Realm& realm)
     {
         switch (serialize_type) {
-        case SerializeType::Blob:
+        case Bindings::InterfaceName::Blob:
             return FileAPI::Blob::create(realm);
-        case SerializeType::File:
+        case Bindings::InterfaceName::File:
             return FileAPI::File::create(realm);
-        case SerializeType::FileList:
+        case Bindings::InterfaceName::FileList:
             return FileAPI::FileList::create(realm);
-        case SerializeType::DOMException:
+        case Bindings::InterfaceName::DOMException:
             return WebIDL::DOMException::create(realm);
-        case SerializeType::DOMMatrixReadOnly:
+        case Bindings::InterfaceName::DOMMatrixReadOnly:
             return Geometry::DOMMatrixReadOnly::create(realm);
-        case SerializeType::DOMMatrix:
+        case Bindings::InterfaceName::DOMMatrix:
             return Geometry::DOMMatrix::create(realm);
-        case SerializeType::DOMPointReadOnly:
+        case Bindings::InterfaceName::DOMPointReadOnly:
             return Geometry::DOMPointReadOnly::create(realm);
-        case SerializeType::DOMPoint:
+        case Bindings::InterfaceName::DOMPoint:
             return Geometry::DOMPoint::create(realm);
-        case SerializeType::DOMRectReadOnly:
+        case Bindings::InterfaceName::DOMRectReadOnly:
             return Geometry::DOMRectReadOnly::create(realm);
-        case SerializeType::DOMRect:
+        case Bindings::InterfaceName::DOMRect:
             return Geometry::DOMRect::create(realm);
-        case SerializeType::CryptoKey:
+        case Bindings::InterfaceName::CryptoKey:
             return Crypto::CryptoKey::create(realm);
-        case SerializeType::DOMQuad:
+        case Bindings::InterfaceName::DOMQuad:
             return Geometry::DOMQuad::create(realm);
-        case SerializeType::ImageData:
+        case Bindings::InterfaceName::ImageData:
             return ImageData::create(realm);
-        case SerializeType::ImageBitmap:
+        case Bindings::InterfaceName::ImageBitmap:
             return ImageBitmap::create(realm);
-        case SerializeType::Unknown:
+        case Bindings::InterfaceName::QuotaExceededError:
+            return WebIDL::QuotaExceededError::create(realm);
+        case Bindings::InterfaceName::Unknown:
         default:
             VERIFY_NOT_REACHED();
         }
@@ -1110,18 +1094,17 @@ WebIDL::ExceptionOr<SerializedTransferRecord> structured_serialize_with_transfer
 
 static bool is_transferable_interface_exposed_on_target_realm(TransferType name, JS::Realm& realm)
 {
-    auto const& intrinsics = Bindings::host_defined_intrinsics(realm);
     switch (name) {
     case TransferType::MessagePort:
-        return intrinsics.is_interface_exposed<Bindings::MessagePortPrototype>(realm);
+        return is_exposed(Bindings::InterfaceName::MessagePort, realm);
     case TransferType::ReadableStream:
-        return intrinsics.is_interface_exposed<Bindings::ReadableStreamPrototype>(realm);
+        return is_exposed(Bindings::InterfaceName::ReadableStream, realm);
     case TransferType::WritableStream:
-        return intrinsics.is_interface_exposed<Bindings::WritableStreamPrototype>(realm);
+        return is_exposed(Bindings::InterfaceName::WritableStream, realm);
     case TransferType::TransformStream:
-        return intrinsics.is_interface_exposed<Bindings::TransformStreamPrototype>(realm);
+        return is_exposed(Bindings::InterfaceName::TransformStream, realm);
     case TransferType::ImageBitmap:
-        return intrinsics.is_interface_exposed<Bindings::ImageBitmapPrototype>(realm);
+        return is_exposed(Bindings::InterfaceName::ImageBitmap, realm);
     case TransferType::Unknown:
         dbgln("Unknown interface type for transfer: {}", to_underlying(name));
         break;
@@ -1308,32 +1291,43 @@ TransferDataEncoder::TransferDataEncoder(IPC::MessageBuffer&& buffer)
 {
 }
 
+IPC::MessageBuffer const& TransferDataEncoder::buffer() const
+{
+    return m_buffer;
+}
+
+IPC::MessageBuffer TransferDataEncoder::take_buffer() const
+{
+    VERIFY(!m_buffer_has_been_taken);
+    m_buffer_has_been_taken = true;
+    return move(m_buffer);
+}
+
 void TransferDataEncoder::append(SerializationRecord&& record)
 {
+    VERIFY(!m_buffer_has_been_taken);
     MUST(m_buffer.append_data(record.data(), record.size()));
 }
 
 void TransferDataEncoder::extend(Vector<TransferDataEncoder> data_holders)
 {
     for (auto& data_holder : data_holders)
-        MUST(m_buffer.extend(move(data_holder.m_buffer)));
+        MUST(m_buffer.extend(data_holder.take_buffer()));
 }
 
 TransferDataDecoder::TransferDataDecoder(SerializationRecord const& record)
     : m_stream(record.span())
-    , m_decoder(m_stream, m_files)
+    , m_decoder(m_stream, m_attachments)
 {
 }
 
 TransferDataDecoder::TransferDataDecoder(TransferDataEncoder&& data_holder)
     : m_buffer(data_holder.take_buffer())
     , m_stream(m_buffer.data().span())
-    , m_decoder(m_stream, m_files)
+    , m_decoder(m_stream, m_attachments)
 {
-    // FIXME: The churn between IPC::File and IPC::AutoCloseFileDescriptor is pretty awkward, we should find a way to
-    //        consolidate the way we use these type.
-    for (auto& auto_fd : m_buffer.take_fds())
-        m_files.enqueue(IPC::File::adopt_fd(auto_fd->take_fd()));
+    for (auto& attachment : m_buffer.take_attachments())
+        m_attachments.enqueue(move(attachment));
 }
 
 WebIDL::ExceptionOr<ByteBuffer> TransferDataDecoder::decode_buffer(JS::Realm& realm)
@@ -1355,18 +1349,15 @@ namespace IPC {
 template<>
 ErrorOr<void> encode(Encoder& encoder, Web::HTML::TransferDataEncoder const& data_holder)
 {
-    // FIXME: The churn between IPC::File and IPC::AutoCloseFileDescriptor is pretty awkward, we should find a way to
-    //        consolidate the way we use these type.
-    Vector<IPC::File> files;
-    files.ensure_capacity(data_holder.buffer().fds().size());
+    auto buffer = data_holder.take_buffer();
+    auto data = buffer.take_data();
+    auto attachments = buffer.take_attachments();
 
-    for (auto const& auto_fd : data_holder.buffer().fds()) {
-        auto fd = const_cast<AutoCloseFileDescriptor&>(*auto_fd).take_fd();
-        files.unchecked_append(IPC::File::adopt_fd(fd));
-    }
+    TRY(encoder.encode(data));
+    TRY(encoder.encode(static_cast<u32>(attachments.size())));
+    for (auto& attachment : attachments)
+        TRY(encoder.append_attachment(move(attachment)));
 
-    TRY(encoder.encode(data_holder.buffer().data()));
-    TRY(encoder.encode(files));
     return {};
 }
 
@@ -1374,19 +1365,14 @@ template<>
 ErrorOr<Web::HTML::TransferDataEncoder> decode(Decoder& decoder)
 {
     auto data = TRY(decoder.decode<Web::HTML::SerializationRecord>());
-    auto files = TRY(decoder.decode<Vector<IPC::File>>());
+    auto attachment_count = TRY(decoder.decode<u32>());
 
-    // FIXME: The churn between IPC::File and IPC::AutoCloseFileDescriptor is pretty awkward, we should find a way to
-    //        consolidate the way we use these type.
-    MessageFileType auto_files;
-    auto_files.ensure_capacity(files.size());
+    Vector<Attachment> attachments;
+    TRY(attachments.try_ensure_capacity(attachment_count));
+    for (u32 i = 0; i < attachment_count; ++i)
+        attachments.unchecked_append(TRY(decoder.attachments().try_dequeue()));
 
-    for (auto& fd : files) {
-        auto auto_fd = adopt_ref(*new AutoCloseFileDescriptor(fd.take_fd()));
-        auto_files.unchecked_append(move(auto_fd));
-    }
-
-    IPC::MessageBuffer buffer { move(data), move(auto_files) };
+    IPC::MessageBuffer buffer { move(data), move(attachments) };
     return Web::HTML::TransferDataEncoder { move(buffer) };
 }
 

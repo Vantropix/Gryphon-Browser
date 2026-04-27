@@ -10,18 +10,17 @@
 #include <AK/MemoryStream.h>
 #include <AK/Queue.h>
 #include <LibCore/Socket.h>
+#include <LibIPC/Attachment.h>
 #include <LibIPC/AutoCloseFileDescriptor.h>
-#include <LibIPC/File.h>
+#include <LibIPC/TransportHandle.h>
 #include <LibThreading/ConditionVariable.h>
 #include <LibThreading/Forward.h>
-#include <LibThreading/MutexProtected.h>
-#include <LibThreading/RWLock.h>
 
 namespace IPC {
 
 class SendQueue : public AtomicRefCounted<SendQueue> {
 public:
-    void enqueue_message(Vector<u8>&& bytes, Vector<int>&& fds);
+    void enqueue_message(ReadonlyBytes header, ReadonlyBytes payload, Vector<int>&& fds);
     struct BytesAndFds {
         Vector<u8> bytes;
         Vector<int> fds;
@@ -42,6 +41,13 @@ class TransportSocket {
 public:
     static constexpr socklen_t SOCKET_BUFFER_SIZE = 128 * KiB;
 
+    struct Paired {
+        NonnullOwnPtr<TransportSocket> local;
+        TransportHandle remote_handle;
+    };
+    static ErrorOr<Paired> create_paired();
+    static ErrorOr<NonnullOwnPtr<TransportSocket>> from_socket(NonnullOwnPtr<Core::LocalSocket> socket);
+
     explicit TransportSocket(NonnullOwnPtr<Core::LocalSocket> socket);
     ~TransportSocket();
 
@@ -53,7 +59,7 @@ public:
 
     void wait_until_readable();
 
-    void post_message(Vector<u8> const&, Vector<NonnullRefPtr<AutoCloseFileDescriptor>> const&);
+    void post_message(Vector<u8> const&, Vector<Attachment>& attachments);
 
     enum class ShouldShutdown {
         No,
@@ -61,14 +67,11 @@ public:
     };
     struct Message {
         Vector<u8> bytes;
-        Queue<File> fds;
+        Queue<Attachment> attachments;
     };
     ShouldShutdown read_as_many_messages_as_possible_without_blocking(Function<void(Message&&)>&&);
 
-    // Obnoxious name to make it clear that this is a dangerous operation.
-    ErrorOr<int> release_underlying_transport_for_transfer();
-
-    ErrorOr<IPC::File> clone_for_transfer();
+    ErrorOr<TransportHandle> release_for_transfer();
 
 private:
     enum class TransferState {
@@ -88,6 +91,7 @@ private:
     void stop_io_thread(IOThreadState desired_state);
     void wake_io_thread();
     void read_incoming_messages();
+    void notify_read_available();
 
     NonnullOwnPtr<Core::LocalSocket> m_socket;
 
@@ -100,9 +104,10 @@ private:
     RefPtr<Threading::Thread> m_io_thread;
     RefPtr<SendQueue> m_send_queue;
     Atomic<IOThreadState> m_io_thread_state { IOThreadState::Running };
+    Atomic<bool> m_is_being_transferred { false };
     Atomic<bool> m_peer_eof { false };
     ByteBuffer m_unprocessed_bytes;
-    Queue<File> m_unprocessed_fds;
+    Queue<Attachment> m_unprocessed_attachments;
     Threading::Mutex m_incoming_mutex;
     Threading::ConditionVariable m_incoming_cv { m_incoming_mutex };
     Vector<NonnullOwnPtr<Message>> m_incoming_messages;

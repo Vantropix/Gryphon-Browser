@@ -15,6 +15,7 @@
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/CORSSettingAttribute.h>
 #include <LibWeb/HTML/HTMLElement.h>
+#include <LibWeb/HTML/PreloadEntry.h>
 
 namespace Web::HTML {
 
@@ -26,7 +27,7 @@ public:
     virtual ~HTMLLinkElement() override;
 
     virtual void inserted() override;
-    virtual void removed_from(Node* old_parent, Node& old_root) override;
+    virtual void removed_from(IsSubtreeRoot, Node* old_ancestor, Node& old_root) override;
 
     String rel() const { return get_attribute_value(HTML::AttributeNames::rel); }
     String type() const { return get_attribute_value(HTML::AttributeNames::type); }
@@ -47,6 +48,12 @@ public:
     String media() const;
 
     GC::Ptr<CSS::CSSStyleSheet> sheet() const;
+
+    enum class AnyFailed : u8 {
+        No,
+        Yes,
+    };
+    void finished_loading_critical_style_subresources(AnyFailed);
 
 private:
     // https://html.spec.whatwg.org/multipage/semantics.html#link-processing-options
@@ -125,47 +132,6 @@ private:
         // fetch priority (default Auto)
         //     A fetch priority attribute state
         Fetch::Infrastructure::Request::Priority fetch_priority { Fetch::Infrastructure::Request::Priority::Auto };
-    };
-
-    // https://html.spec.whatwg.org/multipage/links.html#preload-key
-    struct PreloadKey {
-        static PreloadKey create(Fetch::Infrastructure::Request const&);
-
-        // URL
-        //     A URL
-        URL::URL url;
-
-        // destination
-        //     A string
-        Optional<Fetch::Infrastructure::Request::Destination> destination;
-
-        // mode
-        //     A request mode, either "same-origin", "cors", or "no-cors"
-        Fetch::Infrastructure::Request::Mode mode;
-
-        // credentials mode
-        //     A credentials mode
-        Fetch::Infrastructure::Request::CredentialsMode credentials_mode;
-    };
-
-    // https://html.spec.whatwg.org/multipage/links.html#preload-entry
-    struct PreloadEntry final : public JS::Cell {
-        GC_CELL(PreloadEntry, JS::Cell);
-        GC_DECLARE_ALLOCATOR(PreloadEntry);
-
-        virtual void visit_edges(Cell::Visitor& visitor) override;
-
-        // integrity metadata
-        //     A string
-        String integrity_metadata;
-
-        // response
-        //     Null or a response
-        GC::Ptr<Fetch::Infrastructure::Response> response;
-
-        // on response available
-        //     Null, or an algorithm accepting a response or null
-        GC::Ptr<GC::Function<void(GC::Ptr<Fetch::Infrastructure::Response>)>> on_response_available;
     };
 
     HTMLLinkElement(DOM::Document&, DOM::QualifiedName);

@@ -3,13 +3,13 @@ include(audio)
 include(ffmpeg)
 
 set(SOURCES
-    Color/ColorConverter.cpp
-    Color/ColorPrimaries.cpp
-    Color/TransferCharacteristics.cpp
+    Audio/AudioDevices.cpp
     Containers/Matroska/MatroskaDemuxer.cpp
     Containers/Matroska/Reader.cpp
     IncrementallyPopulatedStream.cpp
     PlaybackManager.cpp
+    PlaybackStates/StartingStateHandler.cpp
+    PlaybackStates/PausedStateHandler.cpp
     PlaybackStates/PlaybackStateHandler.cpp
     PlaybackStates/ResumingStateHandler.cpp
     Providers/AudioDataProvider.cpp
@@ -17,6 +17,8 @@ set(SOURCES
     Providers/VideoDataProvider.cpp
     Sinks/AudioMixingSink.cpp
     Sinks/DisplayingVideoSink.cpp
+    TimedImage.cpp
+    TimeRanges.cpp
     VideoFrame.cpp
 )
 
@@ -50,6 +52,9 @@ elseif (LADYBIRD_AUDIO_BACKEND STREQUAL "AUDIO_UNIT")
     target_sources(LibMedia PRIVATE Audio/PlaybackStreamAudioUnit.cpp)
     find_library(AUDIO_TOOLBOX AudioToolbox REQUIRED)
     target_link_libraries(LibMedia PRIVATE ${AUDIO_TOOLBOX})
+elseif(LADYBIRD_AUDIO_BACKEND STREQUAL "WASAPI")
+    target_sources(LibMedia PRIVATE Audio/PlaybackStreamWasapi.cpp)
+    target_link_libraries(LibMedia PRIVATE ole32 avrt winmm)
 elseif (DEFINED LADYBIRD_AUDIO_BACKEND)
     message(FATAL_ERROR "Please update ${CMAKE_CURRENT_LIST_FILE} for audio backend ${LADYBIRD_AUDIO_BACKEND}")
 else ()

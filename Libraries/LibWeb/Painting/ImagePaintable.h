@@ -12,9 +12,7 @@
 
 namespace Web::Painting {
 
-class ImagePaintable final
-    : public PaintableBox
-    , public DOM::Document::ViewportClient {
+class ImagePaintable final : public PaintableBox {
     GC_CELL(ImagePaintable, PaintableBox);
     GC_DECLARE_ALLOCATOR(ImagePaintable);
 
@@ -23,14 +21,11 @@ public:
     static GC::Ref<ImagePaintable> create(Layout::SVGImageBox const& layout_box);
 
     virtual void paint(DisplayListRecordingContext&, PaintPhase) const override;
+    virtual void reset_for_relayout() override;
 
 private:
     // ^JS::Cell
     virtual void visit_edges(Visitor&) override;
-    virtual void finalize() override;
-
-    // ^Document::ViewportClient
-    virtual void did_set_viewport_rect(CSSPixelRect const&) final;
 
     ImagePaintable(Layout::Box const& layout_box, Layout::ImageProvider const& image_provider, bool renders_as_alt_text, String alt_text, bool is_svg_image);
 

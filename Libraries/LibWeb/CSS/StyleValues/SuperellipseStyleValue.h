@@ -23,17 +23,16 @@ public:
     // NOTE: This function can only be called after absolutization
     double parameter() const
     {
-        if (m_parameter->is_calculated())
-            return m_parameter->as_calculated().resolve_number({}).value();
-
-        return m_parameter->as_number().number();
+        return number_from_style_value(*m_parameter, {});
     }
 
-    virtual String to_string(SerializationMode serialization_mode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(SuperellipseStyleValue const& other) const { return m_parameter == other.m_parameter; }
+
+    virtual bool is_computationally_independent() const override { return m_parameter->is_computationally_independent(); }
 
 private:
     explicit SuperellipseStyleValue(ValueComparingNonnullRefPtr<StyleValue const> const& parameter)

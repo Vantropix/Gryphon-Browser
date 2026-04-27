@@ -27,7 +27,7 @@ jobs:
         os: [macos-14]
 
     steps:
-      - uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v6.0.2
 
       - name: Set Up Environment
         uses: ./.github/actions/setup
@@ -42,7 +42,7 @@ jobs:
           java-version: 17
 
       - name: Set Up Gradle
-        uses: gradle/actions/setup-gradle@v5
+        uses: gradle/actions/setup-gradle@v6
 
       # === PREPARE FOR BUILDING ===
 
@@ -52,9 +52,9 @@ jobs:
         with:
           os: ${{ matrix.os_name }}
           arch: 'Lagom'
+          toolchain: 'Clang'
           cache_key_extra: 'Nightly Android'
           ccache_path: ${{ env.CCACHE_DIR }}
-          download_cache_path: ${{ github.workspace }}/Build/caches
           vcpkg_cache_path: ${{ github.workspace }}/Build/caches/vcpkg-binary-cache
 
       - name: Assign Build Parameters

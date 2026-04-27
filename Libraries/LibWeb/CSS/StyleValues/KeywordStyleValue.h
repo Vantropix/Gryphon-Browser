@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2018-2020, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021, Tobias Christiansen <tobyase@serenityos.org>
- * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2026, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2022-2023, MacDue <macdue@dueutil.tech>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -50,11 +50,25 @@ public:
     static bool is_color(Keyword);
     virtual bool has_color() const override;
     virtual Optional<Color> to_color(ColorResolutionContext) const override;
-    virtual String to_string(SerializationMode) const override;
+    virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
     virtual Vector<Parser::ComponentValue> tokenize() const override;
     virtual GC::Ref<CSSStyleValue> reify(JS::Realm&, FlyString const& associated_property) const override;
 
     bool properties_equal(KeywordStyleValue const& other) const { return m_keyword == other.m_keyword; }
+
+    virtual bool is_computationally_independent() const override
+    {
+        if (is_css_wide_keyword())
+            return false;
+
+        // FIXME: Are there any other color keywords which aren't computationally independent?
+        if (first_is_one_of(m_keyword, Keyword::Accentcolor, Keyword::Accentcolortext))
+            return false;
+
+        // FIXME: Are there any other keywords which aren't computationally independent?
+        return true;
+    }
 
 private:
     explicit KeywordStyleValue(Keyword keyword)

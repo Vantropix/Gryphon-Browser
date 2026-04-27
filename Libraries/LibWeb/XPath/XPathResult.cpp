@@ -7,7 +7,7 @@
 #include <LibJS/Runtime/Realm.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/PlatformObject.h>
-#include <LibWeb/Bindings/XPathResultPrototype.h>
+#include <LibWeb/Bindings/XPathResult.h>
 #include <LibWeb/DOM/Node.h>
 
 #include "XPathResult.h"
@@ -32,6 +32,8 @@ void XPathResult::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     visitor.visit(m_node_set);
+    if (!m_node_set_iter.is_end())
+        visitor.visit(*m_node_set_iter);
 }
 
 XPathResult::~XPathResult() = default;

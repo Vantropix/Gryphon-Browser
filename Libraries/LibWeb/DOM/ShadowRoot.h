@@ -6,10 +6,12 @@
 
 #pragma once
 
-#include <LibWeb/Bindings/ShadowRootPrototype.h>
+#include <LibWeb/Bindings/ShadowRoot.h>
 #include <LibWeb/CSS/StyleScope.h>
+#include <LibWeb/DOM/AnchorNameMap.h>
 #include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/ElementByIdMap.h>
+#include <LibWeb/DOM/SlotRegistry.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/WebIDL/ObservableArray.h>
 
@@ -20,6 +22,8 @@ class WEB_API ShadowRoot final : public DocumentFragment {
     GC_DECLARE_ALLOCATOR(ShadowRoot);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     Bindings::ShadowRootMode mode() const { return m_mode; }
 
     Bindings::SlotAssignmentMode slot_assignment() const { return m_slot_assignment; }
@@ -43,6 +47,12 @@ public:
     bool available_to_element_internals() const { return m_available_to_element_internals; }
     void set_available_to_element_internals(bool available_to_element_internals) { m_available_to_element_internals = available_to_element_internals; }
 
+    [[nodiscard]] bool is_user_agent_internal() const { return m_user_agent_internal; }
+    void set_user_agent_internal(bool user_agent_internal) { m_user_agent_internal = user_agent_internal; }
+
+    [[nodiscard]] bool uses_document_style_sheets() const { return m_uses_document_style_sheets; }
+    void set_uses_document_style_sheets(bool value) { m_uses_document_style_sheets = value; }
+
     // ^EventTarget
     virtual EventTarget* get_parent(Event const&) override;
 
@@ -64,11 +74,26 @@ public:
     WebIDL::ExceptionOr<void> set_adopted_style_sheets(JS::Value);
 
     void for_each_css_style_sheet(Function<void(CSS::CSSStyleSheet&)>&& callback) const;
-    void for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)>&& callback) const;
+    void for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)> const& callback) const;
 
     WebIDL::ExceptionOr<Vector<GC::Ref<Animations::Animation>>> get_animations();
 
     ElementByIdMap& element_by_id() const;
+
+    AnchorNameMap& anchor_name_map() { return m_anchor_name_map; }
+    AnchorNameMap const& anchor_name_map() const { return m_anchor_name_map; }
+
+    void register_slot(HTML::HTMLSlotElement&);
+    void unregister_slot(HTML::HTMLSlotElement&);
+
+    template<typename Callback>
+    void for_each_registered_slot(Callback callback)
+    {
+        if (m_slot_registry)
+            m_slot_registry->for_each_slot(callback);
+    }
+
+    GC::Ptr<HTML::HTMLSlotElement> first_slot_with_name(FlyString const& name) const;
 
     CSS::StyleScope const& style_scope() const { return m_style_scope; }
     CSS::StyleScope& style_scope() { return m_style_scope; }
@@ -76,7 +101,15 @@ public:
     using PartElementMap = HashMap<FlyString, OrderedHashTable<AbstractElement>>;
     PartElementMap const& part_element_map() const;
 
+    GC::Ptr<HTML::CustomElementRegistry> custom_element_registry() const;
+    void set_custom_element_registry(GC::Ptr<HTML::CustomElementRegistry> registry) { m_custom_element_registry = registry; }
+
+    bool keep_custom_element_registry_null() const { return m_keep_custom_element_registry_null; }
+    void set_keep_custom_element_registry_null(bool value) { m_keep_custom_element_registry_null = value; }
+
     virtual void finalize() override;
+
+    GC::Ptr<Element> fullscreen_element_for_bindings() const;
 
 protected:
     virtual void visit_edges(Cell::Visitor&) override;
@@ -96,6 +129,8 @@ private:
     Bindings::SlotAssignmentMode m_slot_assignment { Bindings::SlotAssignmentMode::Named };
     bool m_delegates_focus { false };
     bool m_available_to_element_internals { false };
+    bool m_user_agent_internal { false };
+    bool m_uses_document_style_sheets { false };
 
     // https://dom.spec.whatwg.org/#shadowroot-declarative
     bool m_declarative { false };
@@ -108,6 +143,10 @@ private:
 
     mutable OwnPtr<ElementByIdMap> m_element_by_id;
 
+    AnchorNameMap m_anchor_name_map;
+
+    OwnPtr<SlotRegistry> m_slot_registry;
+
     GC::Ptr<CSS::StyleSheetList> m_style_sheets;
     mutable GC::Ptr<WebIDL::ObservableArray> m_adopted_style_sheets;
 
@@ -117,6 +156,12 @@ private:
 
     mutable PartElementMap m_part_element_map;
     mutable u64 m_dom_tree_version_when_calculated_part_element_map { 0 };
+
+    // https://dom.spec.whatwg.org/#shadowroot-custom-element-registry
+    GC::Ptr<HTML::CustomElementRegistry> m_custom_element_registry;
+
+    // https://dom.spec.whatwg.org/#shadowroot-keep-custom-element-registry-null
+    bool m_keep_custom_element_registry_null { false };
 
 public:
     using DocumentShadowRootList = IntrusiveList<&ShadowRoot::m_list_node>;

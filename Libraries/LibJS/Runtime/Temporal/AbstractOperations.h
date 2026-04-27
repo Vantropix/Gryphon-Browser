@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2021, Idan Horowitz <idan.horowitz@serenityos.org>
  * Copyright (c) 2021-2023, Linus Groh <linusg@serenityos.org>
- * Copyright (c) 2024-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2024-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -196,7 +196,7 @@ ThrowCompletionOr<String> parse_temporal_calendar_string(VM&, String const&);
 ThrowCompletionOr<GC::Ref<Duration>> parse_temporal_duration_string(VM&, StringView iso_string);
 ThrowCompletionOr<ParsedTimeZoneIdentifier> parse_temporal_time_zone_string(VM&, StringView time_zone_string);
 ThrowCompletionOr<String> to_offset_string(VM&, Value argument);
-CalendarFields iso_date_to_fields(StringView calendar, ISODate, DateType);
+CalendarFields iso_date_to_fields(String const& calendar, ISODate, DateType);
 ThrowCompletionOr<DifferenceSettings> get_difference_settings(VM&, DurationOperation, Object const& options, UnitGroup, ReadonlySpan<Unit> disallowed_units, Unit fallback_smallest_unit, Unit smallest_largest_default_unit);
 
 // 13.40 ToIntegerWithTruncation ( argument ), https://tc39.es/proposal-temporal/#sec-tointegerwithtruncation
@@ -206,7 +206,7 @@ ThrowCompletionOr<double> to_integer_with_truncation(VM& vm, Value argument, Err
     // 1. Let number be ? ToNumber(argument).
     auto number = TRY(argument.to_number(vm));
 
-    // 2. If number is NaN, +∞𝔽 or -∞𝔽, throw a RangeError exception.
+    // 2. If number is one of NaN, +∞𝔽, or -∞𝔽, throw a RangeError exception.
     if (number.is_nan() || number.is_infinity())
         return vm.throw_completion<RangeError>(error_type, forward<Args>(args)...);
 
@@ -223,7 +223,7 @@ ThrowCompletionOr<double> to_integer_with_truncation(VM& vm, StringView argument
     // 1. Let number be ? ToNumber(argument).
     auto number = string_to_number(argument);
 
-    // 2. If number is NaN, +∞𝔽 or -∞𝔽, throw a RangeError exception.
+    // 2. If number is one of NaN, +∞𝔽, or -∞𝔽, throw a RangeError exception.
     if (isnan(number) || isinf(number))
         return vm.throw_completion<RangeError>(error_type, forward<Args>(args)...);
 

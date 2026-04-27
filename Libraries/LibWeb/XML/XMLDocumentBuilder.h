@@ -7,7 +7,6 @@
 #pragma once
 
 #include <LibWeb/DOM/Comment.h>
-#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/ElementFactory.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/Text.h>
@@ -21,7 +20,7 @@ enum class XMLScriptingSupport {
     Enabled,
 };
 
-ErrorOr<Variant<ByteString, Vector<XML::MarkupDeclaration>>> resolve_xml_resource(XML::SystemID const&, Optional<XML::PublicID> const&);
+Optional<String> resolve_named_html_entity(StringView entity_name);
 
 class XMLDocumentBuilder final : public XML::Listener {
 public:

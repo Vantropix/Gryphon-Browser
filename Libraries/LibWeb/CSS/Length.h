@@ -8,6 +8,7 @@
 #pragma once
 
 #include <AK/String.h>
+#include <AK/StringBuilder.h>
 #include <LibGfx/Forward.h>
 #include <LibGfx/Rect.h>
 #include <LibWeb/CSS/SerializationMode.h>
@@ -49,6 +50,8 @@ public:
     bool is_font_relative() const { return CSS::is_font_relative(m_unit); }
     bool is_viewport_relative() const { return CSS::is_viewport_relative(m_unit); }
     bool is_relative() const { return CSS::is_relative(m_unit); }
+    // FIXME: Mark container query units as not computationally independent once we support them
+    bool is_computationally_independent() const { return !is_font_relative(); }
 
     double raw_value() const { return m_value; }
     LengthUnit unit() const { return m_unit; }
@@ -57,9 +60,6 @@ public:
     struct ResolutionContext {
         [[nodiscard]] static ResolutionContext for_document(DOM::Document const&);
         [[nodiscard]] static ResolutionContext for_element(DOM::AbstractElement const&);
-        // FIXME: Anywhere we use this we probably want to use `for_document` instead since this uses the window's
-        //        viewport rather than the documents which can differ e.g. with iframes.
-        [[nodiscard]] static ResolutionContext for_window(HTML::Window const&);
         [[nodiscard]] static ResolutionContext for_layout_node(Layout::Node const&);
 
         CSSPixelRect viewport_rect;
@@ -112,6 +112,7 @@ public:
         return ratio_between_units(m_unit, LengthUnit::Px) * m_value;
     }
 
+    void serialize(StringBuilder&, SerializationMode = SerializationMode::Normal) const;
     String to_string(SerializationMode = SerializationMode::Normal) const;
 
     bool operator==(Length const& other) const
@@ -125,8 +126,9 @@ public:
     double viewport_relative_length_to_px_without_rounding(CSSPixelRect const& viewport_rect) const;
 
     // Returns empty optional if it's already absolute.
-    Optional<Length> absolutize(CSSPixelRect const& viewport_rect, FontMetrics const& font_metrics, FontMetrics const& root_font_metrics) const;
-    Length absolutized(CSSPixelRect const& viewport_rect, FontMetrics const& font_metrics, FontMetrics const& root_font_metrics) const;
+    Optional<Length> absolutize(ResolutionContext const&) const;
+
+    static Length from_style_value(NonnullRefPtr<StyleValue const> const&, Optional<Length> percentage_basis);
 
     static Length resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, Layout::Node const&, Length const& reference_value);
     static Length resolve_calculated(NonnullRefPtr<CalculatedStyleValue const> const&, Layout::Node const&, CSSPixels reference_value);
@@ -146,17 +148,26 @@ public:
     }
 
     static LengthOrAuto make_auto() { return LengthOrAuto { OptionalNone {} }; }
+    static LengthOrAuto from_style_value(NonnullRefPtr<StyleValue const> const& style_value, Optional<Length> percentage_basis);
 
     bool is_length() const { return m_length.has_value(); }
     bool is_auto() const { return !m_length.has_value(); }
 
     Length const& length() const { return m_length.value(); }
 
-    String to_string(SerializationMode mode = SerializationMode::Normal) const
+    void serialize(StringBuilder& builder, SerializationMode mode = SerializationMode::Normal) const
     {
         if (is_auto())
-            return "auto"_string;
-        return m_length->to_string(mode);
+            builder.append("auto"sv);
+        else
+            m_length->serialize(builder, mode);
+    }
+
+    String to_string(SerializationMode mode = SerializationMode::Normal) const
+    {
+        StringBuilder builder;
+        serialize(builder, mode);
+        return builder.to_string_without_validation();
     }
 
     CSSPixels to_px_or_zero(Layout::Node const& node) const
@@ -165,6 +176,9 @@ public:
             return 0;
         return m_length->to_px(node);
     }
+
+    bool is_font_relative() const { return m_length.has_value() && m_length->is_font_relative(); }
+    bool is_computationally_independent() const { return !m_length.has_value() || m_length->is_computationally_independent(); }
 
     bool operator==(LengthOrAuto const&) const = default;
 

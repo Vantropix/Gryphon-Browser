@@ -10,6 +10,7 @@
 
 #include "IDLParser.h"
 #include <AK/Assertions.h>
+#include <AK/CharacterTypes.h>
 #include <AK/Function.h>
 #include <AK/LexicalPath.h>
 #include <AK/QuickSort.h>
@@ -186,52 +187,6 @@ HashMap<ByteString, ByteString> Parser::parse_extended_attributes()
     return extended_attributes;
 }
 
-static HashTable<ByteString> import_stack;
-Optional<Interface&> Parser::resolve_import(auto path)
-{
-    ByteString include_path;
-    for (auto import_base_path : import_base_paths) {
-        auto maybe_include_path = LexicalPath::join(import_base_path, path).string();
-        if (!FileSystem::exists(maybe_include_path))
-            continue;
-
-        include_path = maybe_include_path;
-        break;
-    }
-
-    if (include_path.is_empty()) {
-        StringBuilder error_message;
-        error_message.appendff("Failed to find {} in the following directories:\n", path);
-        error_message.join('\n', import_base_paths);
-        report_parsing_error(error_message.to_byte_string(), filename, input, lexer.tell());
-    }
-
-    auto real_path_error_or = FileSystem::real_path(include_path);
-    if (real_path_error_or.is_error())
-        report_parsing_error(ByteString::formatted("Failed to resolve path {}: {}", include_path, real_path_error_or.error()), filename, input, lexer.tell());
-    auto real_path = real_path_error_or.release_value();
-
-    if (top_level_resolved_imports().contains(real_path))
-        return *top_level_resolved_imports().find(real_path)->value;
-
-    if (import_stack.contains(real_path))
-        report_parsing_error(ByteString::formatted("Circular import detected: {}", include_path), filename, input, lexer.tell());
-    import_stack.set(real_path);
-
-    auto file_or_error = Core::File::open(real_path, Core::File::OpenMode::Read);
-    if (file_or_error.is_error())
-        report_parsing_error(ByteString::formatted("Failed to open {}: {}", real_path, file_or_error.error()), filename, input, lexer.tell());
-
-    auto data_or_error = file_or_error.value()->read_until_eof();
-    if (data_or_error.is_error())
-        report_parsing_error(ByteString::formatted("Failed to read {}: {}", real_path, data_or_error.error()), filename, input, lexer.tell());
-    auto& result = Parser(this, real_path, data_or_error.value(), import_base_paths).parse();
-    import_stack.remove(real_path);
-
-    top_level_resolved_imports().set(real_path, &result);
-    return result;
-}
-
 NonnullRefPtr<Type const> Parser::parse_type()
 {
     if (lexer.consume_specific('(')) {
@@ -349,6 +304,8 @@ void Parser::parse_attribute(HashMap<ByteString, ByteString>& extended_attribute
         consume_whitespace();
     else if (lexer.consume_specific("setlike"sv) && !inherit)
         parse_setlike(interface, readonly);
+    else if (lexer.consume_specific("maplike"sv) && !inherit)
+        parse_maplike(interface, readonly);
     else
         report_parsing_error("expected 'attribute'"sv, filename, input, lexer.tell());
 
@@ -445,7 +402,15 @@ Vector<Parameter> Parser::parse_parameters()
         if (lexer.next_is('=') && optional) {
             assert_specific('=');
             consume_whitespace();
-            auto default_value = lexer.consume_until([](auto ch) { return is_ascii_space(ch) || ch == ',' || ch == ')'; });
+            StringView default_value;
+            if (lexer.next_is('"')) {
+                auto start = lexer.tell();
+                lexer.consume_quoted_string();
+                auto end = lexer.tell();
+                default_value = lexer.input().substring_view(start, end - start);
+            } else {
+                default_value = lexer.consume_until([](auto ch) { return is_ascii_space(ch) || ch == ',' || ch == ')'; });
+            }
             parameter.optional_default_value = default_value;
         }
         parameters.append(move(parameter));
@@ -583,11 +548,39 @@ void Parser::parse_setlike(Interface& interface, bool is_readonly)
     if (interface.value_iterator_type.has_value() || interface.pair_iterator_types.has_value())
         report_parsing_error("Interfaces with a setlike declaration must not must not be iterable."sv, filename, input, lexer.tell());
 
+    if (interface.map_key_type.has_value())
+        report_parsing_error("Interfaces with a setlike declaration must not have a maplike declaration."sv, filename, input, lexer.tell());
+
     assert_string("setlike"sv);
     assert_specific('<');
 
     interface.set_entry_type = parse_type();
     interface.is_set_readonly = is_readonly;
+
+    assert_specific('>');
+    assert_specific(';');
+}
+
+void Parser::parse_maplike(Interface& interface, bool is_readonly)
+{
+    if (interface.supports_indexed_properties())
+        report_parsing_error("Interfaces with a maplike declaration must not support indexed properties."sv, filename, input, lexer.tell());
+
+    if (interface.value_iterator_type.has_value() || interface.pair_iterator_types.has_value())
+        report_parsing_error("Interfaces with a maplike declaration must not must not be iterable."sv, filename, input, lexer.tell());
+
+    if (interface.set_entry_type.has_value())
+        report_parsing_error("Interfaces with a maplike declaration must not have a setlike declaration."sv, filename, input, lexer.tell());
+
+    assert_string("maplike"sv);
+    assert_specific('<');
+
+    interface.map_key_type = parse_type();
+    consume_whitespace();
+    assert_specific(',');
+    consume_whitespace();
+    interface.map_value_type = parse_type();
+    interface.is_map_readonly = is_readonly;
 
     assert_specific('>');
     assert_specific(';');
@@ -702,7 +695,8 @@ void Parser::parse_deleter(HashMap<ByteString, ByteString>& extended_attributes,
 void Parser::parse_interface(Interface& interface)
 {
     consume_whitespace();
-    interface.name = parse_identifier_ending_with_space();
+    // FIXME: This shouldn't only stop at ' ' and ':', but at any character that isn't valid in an identifier.
+    interface.name = parse_identifier_ending_with_space_or(':');
     consume_whitespace();
     if (lexer.consume_specific(':')) {
         consume_whitespace();
@@ -756,6 +750,12 @@ void Parser::parse_interface(Interface& interface)
         if (lexer.next_is("setlike"sv)) {
             bool is_readonly = false;
             parse_setlike(interface, is_readonly);
+            continue;
+        }
+
+        if (lexer.next_is("maplike"sv)) {
+            bool is_readonly = false;
+            parse_maplike(interface, is_readonly);
             continue;
         }
 
@@ -825,10 +825,11 @@ void Parser::parse_partial_interface(HashMap<ByteString, ByteString> extended_at
     consume_whitespace();
     assert_string("interface"sv);
 
-    auto partial_interface = make<Interface>();
+    auto partial_interface = make<Interface>(context);
+    partial_interface->is_partial = true;
     partial_interface->extended_attributes = move(extended_attributes);
     parse_interface(*partial_interface);
-    parent.partial_interfaces.append(move(partial_interface));
+    parent.context.partial_interfaces.append(move(partial_interface));
 }
 
 void Parser::parse_namespace(Interface& interface)
@@ -836,6 +837,7 @@ void Parser::parse_namespace(Interface& interface)
     consume_whitespace();
 
     interface.name = parse_identifier_ending_with_space();
+    interface.implemented_name = interface.name;
     interface.is_namespace = true;
 
     consume_whitespace();
@@ -871,9 +873,20 @@ void Parser::parse_partial_namespace(Interface& parent)
     consume_whitespace();
     assert_string("namespace"sv);
 
-    auto partial_namespace = make<Interface>();
+    auto partial_namespace = make<Interface>(context);
+    partial_namespace->is_partial = true;
     parse_namespace(*partial_namespace);
-    parent.partial_namespaces.append(move(partial_namespace));
+    parent.context.partial_namespaces.append(move(partial_namespace));
+}
+
+void Parser::parse_callback_interface(HashMap<ByteString, ByteString> extended_attributes, Interface& interface)
+{
+    assert_string("callback"sv);
+    consume_whitespace();
+    assert_string("interface"sv);
+    interface.is_callback_interface = true;
+    interface.extended_attributes = move(extended_attributes);
+    parse_interface(interface);
 }
 
 // https://webidl.spec.whatwg.org/#prod-Enum
@@ -884,6 +897,7 @@ void Parser::parse_enumeration(HashMap<ByteString, ByteString> extended_attribut
 
     Enumeration enumeration {};
     enumeration.extended_attributes = move(extended_attributes);
+    enumeration.module_own_path = interface.module_own_path;
 
     auto name = parse_identifier_ending_with_space();
     consume_whitespace();
@@ -920,7 +934,8 @@ void Parser::parse_enumeration(HashMap<ByteString, ByteString> extended_attribut
     for (auto& entry : enumeration.values)
         enumeration.translated_cpp_names.set(entry, convert_enumeration_value_to_cpp_enum_member(entry, names_already_seen));
 
-    interface.enumerations.set(name, move(enumeration));
+    interface.own_enumerations.set(name);
+    interface.context.enumerations.set(name, move(enumeration));
     consume_whitespace();
 }
 
@@ -939,7 +954,7 @@ void Parser::parse_typedef(Interface& interface)
     auto name = parse_identifier_ending_with(';');
     assert_specific(';');
 
-    interface.typedefs.set(move(name), Typedef { move(extended_attributes), move(type) });
+    interface.context.typedefs.set(move(name), Typedef { move(extended_attributes), move(type) });
     consume_whitespace();
 }
 
@@ -957,6 +972,7 @@ void Parser::parse_dictionary(HashMap<ByteString, ByteString> extended_attribute
 
     Dictionary dictionary {};
     dictionary.extended_attributes = move(extended_attributes);
+    dictionary.module_own_path = interface.module_own_path;
 
     auto name = parse_identifier_ending_with_space();
     consume_whitespace();
@@ -1024,10 +1040,11 @@ void Parser::parse_dictionary(HashMap<ByteString, ByteString> extended_attribute
     });
 
     if (partial) {
-        auto& it = interface.partial_dictionaries.ensure(name);
+        auto& it = interface.context.partial_dictionaries.ensure(name);
         it.append(move(dictionary));
     } else {
-        interface.dictionaries.set(name, move(dictionary));
+        interface.own_dictionaries.set(name);
+        interface.context.dictionaries.set(name, move(dictionary));
     }
 
     consume_whitespace();
@@ -1035,9 +1052,8 @@ void Parser::parse_dictionary(HashMap<ByteString, ByteString> extended_attribute
 
 void Parser::parse_interface_mixin(Interface& interface)
 {
-    auto mixin_interface_ptr = make<Interface>();
+    auto mixin_interface_ptr = make<Interface>(context);
     auto& mixin_interface = *mixin_interface_ptr;
-    VERIFY(top_level_interfaces().set(move(mixin_interface_ptr)) == AK::HashSetResult::InsertedNewEntry);
     mixin_interface.module_own_path = interface.module_own_path;
     mixin_interface.is_mixin = true;
 
@@ -1050,8 +1066,26 @@ void Parser::parse_interface_mixin(Interface& interface)
     if (!mixin_interface.parent_name.is_empty())
         report_parsing_error("Mixin interfaces are not allowed to have inherited parents"sv, filename, input, offset);
 
-    auto name = mixin_interface.name;
-    interface.mixins.set(move(name), &mixin_interface);
+    interface.context.add_mixin(move(mixin_interface_ptr));
+}
+
+void Parser::parse_partial_interface_mixin(Interface& interface)
+{
+    assert_string("partial"sv);
+    consume_whitespace();
+    assert_string("interface"sv);
+    consume_whitespace();
+    assert_string("mixin"sv);
+
+    auto partial_mixin = make<Interface>(context);
+    parse_interface(*partial_mixin);
+
+    if (auto it = interface.context.mixins.find(partial_mixin->name); it != interface.context.mixins.end()) {
+        it->value->extend_with_partial_interface(*partial_mixin);
+        return;
+    }
+
+    interface.context.partial_mixins.append(move(partial_mixin));
 }
 
 void Parser::parse_callback_function(HashMap<ByteString, ByteString>& extended_attributes, Interface& interface)
@@ -1073,7 +1107,7 @@ void Parser::parse_callback_function(HashMap<ByteString, ByteString>& extended_a
     consume_whitespace();
     assert_specific(';');
 
-    interface.callback_functions.set(move(name), CallbackFunction { move(return_type), move(parameters), extended_attributes.contains("LegacyTreatNonObjectAsNull") });
+    interface.context.callback_functions.set(move(name), CallbackFunction { move(return_type), move(parameters), extended_attributes.contains("LegacyTreatNonObjectAsNull") });
     consume_whitespace();
 }
 
@@ -1091,12 +1125,16 @@ void Parser::parse_non_interface_entities(bool allow_interface, Interface& inter
             parse_enumeration(extended_attributes, interface);
         } else if (lexer.next_is("typedef"sv)) {
             parse_typedef(interface);
+        } else if (lexer.next_is("partial interface mixin"sv)) {
+            parse_partial_interface_mixin(interface);
         } else if (lexer.next_is("partial interface"sv)) {
             parse_partial_interface(extended_attributes, interface);
         } else if (lexer.next_is("interface mixin"sv)) {
             parse_interface_mixin(interface);
         } else if (lexer.next_is("partial namespace"sv)) {
             parse_partial_namespace(interface);
+        } else if (lexer.next_is("callback interface"sv)) {
+            parse_callback_interface(extended_attributes, interface);
         } else if (lexer.next_is("callback"sv)) {
             parse_callback_function(extended_attributes, interface);
         } else if ((allow_interface && !lexer.next_is("interface"sv) && !lexer.next_is("namespace"sv)) || !allow_interface) {
@@ -1106,7 +1144,7 @@ void Parser::parse_non_interface_entities(bool allow_interface, Interface& inter
             if (lexer.consume_specific("includes"sv)) {
                 consume_whitespace();
                 auto mixin_name = parse_identifier_ending_with_space_or(';');
-                interface.included_mixins.ensure(name).set(mixin_name);
+                interface.context.included_mixins.ensure(name).set(mixin_name);
                 consume_whitespace();
                 assert_specific(';');
                 consume_whitespace();
@@ -1124,6 +1162,27 @@ void Parser::parse_non_interface_entities(bool allow_interface, Interface& inter
 
 static void resolve_union_typedefs(Interface& interface, UnionType& union_);
 
+static NonnullRefPtr<Type const> clone_type(Type const& type, bool nullable)
+{
+    if (is<ParameterizedType>(type)) {
+        Vector<NonnullRefPtr<Type const>> parameters;
+        for (auto& parameter : type.as_parameterized().parameters())
+            parameters.append(clone_type(parameter, parameter->is_nullable()));
+
+        return adopt_ref(*new ParameterizedType(type.name(), nullable, move(parameters)));
+    }
+
+    if (is<UnionType>(type)) {
+        Vector<NonnullRefPtr<Type const>> member_types;
+        for (auto& member_type : type.as_union().member_types())
+            member_types.append(clone_type(member_type, member_type->is_nullable()));
+
+        return adopt_ref(*new UnionType(type.name(), nullable, move(member_types)));
+    }
+
+    return adopt_ref(*new Type(type.name(), nullable));
+}
+
 static void resolve_typedef(Interface& interface, NonnullRefPtr<Type const>& type, HashMap<ByteString, ByteString>* extended_attributes = {})
 {
     if (is<ParameterizedType>(*type)) {
@@ -1140,12 +1199,10 @@ static void resolve_typedef(Interface& interface, NonnullRefPtr<Type const>& typ
         return;
     }
 
-    auto it = interface.typedefs.find(type->name());
-    if (it == interface.typedefs.end())
+    auto it = interface.context.typedefs.find(type->name());
+    if (it == interface.context.typedefs.end())
         return;
-    bool nullable = type->is_nullable();
-    type = it->value.type;
-    const_cast<Type&>(*type).set_nullable(nullable);
+    type = clone_type(it->value.type, type->is_nullable());
     if (extended_attributes) {
         for (auto& attribute : it->value.extended_attributes)
             extended_attributes->set(attribute.key, attribute.value);
@@ -1186,111 +1243,8 @@ void resolve_function_typedefs(Interface& interface, FunctionType& function)
     resolve_parameters_typedefs(interface, function.parameters);
 }
 
-Interface& Parser::parse()
+static void resolve_typedefs(Interface& interface)
 {
-    auto this_module_or_error = FileSystem::real_path(filename);
-    if (this_module_or_error.is_error()) {
-        report_parsing_error(ByteString::formatted("Failed to resolve path '{}': {}", filename, this_module_or_error.error()), filename, input, 0);
-        VERIFY_NOT_REACHED();
-    }
-    auto this_module = this_module_or_error.release_value();
-
-    auto interface_ptr = make<Interface>();
-    auto& interface = *interface_ptr;
-    VERIFY(top_level_interfaces().set(move(interface_ptr)) == AK::HashSetResult::InsertedNewEntry);
-    interface.module_own_path = this_module;
-    top_level_resolved_imports().set(this_module, &interface);
-
-    Vector<Interface&> imports;
-    {
-        while (lexer.consume_specific("#import"sv)) {
-            consume_whitespace();
-            assert_specific('<');
-            auto path = lexer.consume_until('>');
-            lexer.ignore();
-            auto maybe_interface = resolve_import(path);
-            if (maybe_interface.has_value()) {
-                imports.append(maybe_interface.release_value());
-            }
-            consume_whitespace();
-        }
-    }
-
-    parse_non_interface_entities(true, interface);
-
-    if (lexer.consume_specific("interface"sv))
-        parse_interface(interface);
-    else if (lexer.consume_specific("namespace"sv))
-        parse_namespace(interface);
-
-    parse_non_interface_entities(false, interface);
-
-    for (auto& import : imports) {
-        // FIXME: Instead of copying every imported entity into the current interface, query imports directly
-        for (auto& partial_interface : import.partial_interfaces) {
-            if (partial_interface->name == interface.name)
-                interface.extend_with_partial_interface(*partial_interface);
-        }
-
-        for (auto& dictionary : import.dictionaries) {
-            auto dictionary_copy = dictionary.value;
-            dictionary_copy.is_original_definition = false;
-            interface.dictionaries.set(dictionary.key, move(dictionary_copy));
-        }
-
-        for (auto& partial_dictionary : import.partial_dictionaries) {
-            auto& it = interface.partial_dictionaries.ensure(partial_dictionary.key);
-            it.extend(partial_dictionary.value);
-        }
-
-        for (auto& enumeration : import.enumerations) {
-            auto enumeration_copy = enumeration.value;
-            enumeration_copy.is_original_definition = false;
-            interface.enumerations.set(enumeration.key, move(enumeration_copy));
-        }
-
-        for (auto& partial_namespace : import.partial_namespaces) {
-            if (partial_namespace->namespace_class == interface.namespace_class)
-                interface.extend_with_partial_interface(*partial_namespace);
-        }
-
-        interface.typedefs.update(import.typedefs);
-
-        for (auto& mixin : import.mixins) {
-            if (auto it = interface.mixins.find(mixin.key); it != interface.mixins.end() && it->value != mixin.value)
-                report_parsing_error(ByteString::formatted("Mixin '{}' was already defined in {}", mixin.key, mixin.value->module_own_path), filename, input, lexer.tell());
-            interface.mixins.set(mixin.key, mixin.value);
-        }
-
-        interface.callback_functions.update(import.callback_functions);
-    }
-
-    // Resolve mixins
-    if (auto it = interface.included_mixins.find(interface.name); it != interface.included_mixins.end()) {
-        for (auto& entry : it->value) {
-            auto mixin_it = interface.mixins.find(entry);
-            if (mixin_it == interface.mixins.end())
-                report_parsing_error(ByteString::formatted("Mixin '{}' was never defined", entry), filename, input, lexer.tell());
-
-            auto& mixin = mixin_it->value;
-            interface.attributes.extend(mixin->attributes);
-            interface.constants.extend(mixin->constants);
-            interface.functions.extend(mixin->functions);
-            interface.static_functions.extend(mixin->static_functions);
-            if (interface.has_stringifier && mixin->has_stringifier)
-                report_parsing_error(ByteString::formatted("Both interface '{}' and mixin '{}' have defined stringifier attributes", interface.name, mixin->name), filename, input, lexer.tell());
-
-            if (mixin->has_stringifier) {
-                interface.stringifier_attribute = mixin->stringifier_attribute;
-                interface.has_stringifier = true;
-            }
-
-            if (mixin->has_unscopable_member)
-                interface.has_unscopable_member = true;
-        }
-    }
-
-    // Resolve typedefs
     for (auto& attribute : interface.attributes)
         resolve_typedef(interface, attribute.type, &attribute.extended_attributes);
     for (auto& attribute : interface.static_attributes)
@@ -1321,20 +1275,28 @@ Interface& Parser::parse()
         resolve_function_typedefs(interface, *interface.named_property_deleter);
     if (interface.named_property_getter.has_value())
         resolve_function_typedefs(interface, *interface.named_property_getter);
-    for (auto& dictionary : interface.dictionaries) {
+    for (auto& dictionary : interface.context.dictionaries) {
         for (auto& dictionary_member : dictionary.value.members)
             resolve_typedef(interface, dictionary_member.type, &dictionary_member.extended_attributes);
     }
-    for (auto& dictionaries : interface.partial_dictionaries) {
+    for (auto& dictionaries : interface.context.partial_dictionaries) {
         for (auto& dictionary : dictionaries.value)
             for (auto& dictionary_member : dictionary.members)
                 resolve_typedef(interface, dictionary_member.type, &dictionary_member.extended_attributes);
     }
-    for (auto& callback_function : interface.callback_functions)
+    for (auto& callback_function : interface.context.callback_functions)
         resolve_function_typedefs(interface, callback_function.value);
+}
 
-    // Create overload sets
+static void build_overload_sets(Interface& interface)
+{
+    interface.overload_sets.clear();
+    interface.static_overload_sets.clear();
+    interface.constructor_overload_sets.clear();
+
     for (auto& function : interface.functions) {
+        function.overload_index = 0;
+        function.is_overloaded = false;
         if (function.extended_attributes.contains("FIXME"))
             continue;
         auto& overload_set = interface.overload_sets.ensure(function.name);
@@ -1347,7 +1309,10 @@ Interface& Parser::parse()
         for (auto& overloaded_function : overload_set.value)
             overloaded_function.is_overloaded = true;
     }
+
     for (auto& function : interface.static_functions) {
+        function.overload_index = 0;
+        function.is_overloaded = false;
         if (function.extended_attributes.contains("FIXME"))
             continue;
         auto& overload_set = interface.static_overload_sets.ensure(function.name);
@@ -1360,7 +1325,10 @@ Interface& Parser::parse()
         for (auto& overloaded_function : overload_set.value)
             overloaded_function.is_overloaded = true;
     }
+
     for (auto& constructor : interface.constructors) {
+        constructor.overload_index = 0;
+        constructor.is_overloaded = false;
         if (constructor.extended_attributes.contains("FIXME"))
             continue;
         auto& overload_set = interface.constructor_overload_sets.ensure(constructor.name);
@@ -1373,7 +1341,10 @@ Interface& Parser::parse()
         for (auto& overloaded_constructor : overload_set.value)
             overloaded_constructor.is_overloaded = true;
     }
+}
 
+static void validate_overload_sets(Interface& interface, StringView filename, StringView input)
+{
     // Check overload sets for repeated instances of the same function
     // as these will produce very cryptic errors if left alone.
     for (auto& overload_set : interface.overload_sets) {
@@ -1399,53 +1370,106 @@ Interface& Parser::parse()
             }
         }
     }
-
-    interface.imported_modules = move(imports);
-
-    if (top_level_parser() == this)
-        VERIFY(import_stack.is_empty());
-
-    return interface;
 }
 
-Parser::Parser(ByteString filename, StringView contents, Vector<ByteString> import_base_paths)
-    : import_base_paths(move(import_base_paths))
-    , filename(move(filename))
+Module Parser::parse(ByteString filename, StringView contents, Context& context)
+{
+    Parser parser(move(filename), contents, context);
+    return parser.parse();
+}
+
+Module& Parser::parse()
+{
+    auto this_module_or_error = FileSystem::real_path(filename);
+    if (this_module_or_error.is_error()) {
+        report_parsing_error(ByteString::formatted("Failed to resolve path '{}': {}", filename, this_module_or_error.error()), filename, input, 0);
+        VERIFY_NOT_REACHED();
+    }
+    auto this_module = this_module_or_error.release_value();
+
+    if (auto* module = context.find_parsed_module(this_module))
+        return *module;
+
+    auto module_ptr = make<Module>();
+    auto& module = *module_ptr;
+    module.module_own_path = this_module;
+    context.add_module(move(module_ptr));
+
+    auto interface_ptr = make<Interface>(context);
+    auto& interface = *interface_ptr;
+    interface.module_own_path = this_module;
+
+    parse_non_interface_entities(true, interface);
+
+    if (lexer.consume_specific("interface"sv))
+        parse_interface(interface);
+    else if (lexer.consume_specific("namespace"sv))
+        parse_namespace(interface);
+
+    parse_non_interface_entities(false, interface);
+
+    if (!interface.name.is_empty())
+        module.interface = interface.context.add_interface(move(interface_ptr));
+
+    return module;
+}
+
+Parser::Parser(ByteString filename, StringView contents, Context& context)
+    : filename(move(filename))
     , input(contents)
     , lexer(input)
+    , context(context)
 {
 }
 
-Parser::Parser(Parser* parent, ByteString filename, StringView contents, Vector<ByteString> import_base_paths)
-    : import_base_paths(move(import_base_paths))
-    , filename(move(filename))
-    , input(contents)
-    , lexer(input)
-    , parent(parent)
+static void resolve_partials_and_mixins(Context& context)
 {
+    for (auto& interface : context.owned_interfaces) {
+        for (auto& partial_interface : context.partial_interfaces) {
+            if (partial_interface->extended_attributes.get("Exposed"sv) == "Nobody"sv)
+                continue;
+            if (partial_interface->name == interface->name)
+                interface->extend_with_partial_interface(*partial_interface);
+        }
+
+        for (auto& partial_namespace : context.partial_namespaces) {
+            if (partial_namespace->namespace_class == interface->namespace_class)
+                interface->extend_with_partial_interface(*partial_namespace);
+        }
+
+        if (auto it = context.included_mixins.find(interface->name); it != context.included_mixins.end()) {
+            for (auto& entry : it->value) {
+                auto mixin_it = context.mixins.find(entry);
+                VERIFY(mixin_it != context.mixins.end());
+
+                auto& mixin = *mixin_it->value;
+                interface->attributes.extend(mixin.attributes);
+                interface->constants.extend(mixin.constants);
+                interface->functions.extend(mixin.functions);
+                interface->static_functions.extend(mixin.static_functions);
+                VERIFY(!interface->has_stringifier || !mixin.has_stringifier);
+
+                if (mixin.has_stringifier) {
+                    interface->stringifier_attribute = mixin.stringifier_attribute;
+                    interface->has_stringifier = true;
+                }
+
+                if (mixin.has_unscopable_member)
+                    interface->has_unscopable_member = true;
+            }
+        }
+    }
 }
 
-Parser* Parser::top_level_parser()
+void Context::resolve()
 {
-    Parser* current = this;
-    for (Parser* next = this; next; next = next->parent)
-        current = next;
-    return current;
-}
+    resolve_partials_and_mixins(*this);
 
-HashMap<ByteString, Interface*>& Parser::top_level_resolved_imports()
-{
-    return top_level_parser()->resolved_imports;
-}
-
-HashTable<NonnullOwnPtr<Interface>>& Parser::top_level_interfaces()
-{
-    return top_level_parser()->interfaces;
-}
-
-Vector<ByteString> Parser::imported_files() const
-{
-    return const_cast<Parser*>(this)->top_level_resolved_imports().keys();
+    for (auto& interface : owned_interfaces) {
+        resolve_typedefs(*interface);
+        build_overload_sets(*interface);
+        validate_overload_sets(*interface, interface->module_own_path, {});
+    }
 }
 
 }

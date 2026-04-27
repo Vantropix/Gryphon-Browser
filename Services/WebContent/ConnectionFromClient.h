@@ -21,6 +21,7 @@
 #include <LibWeb/Loader/FileRequest.h>
 #include <LibWeb/Page/EventResult.h>
 #include <LibWeb/Page/InputEvent.h>
+#include <LibWeb/Page/ViewportIsFullscreen.h>
 #include <LibWeb/Platform/Timer.h>
 #include <LibWebView/DOMNodeProperties.h>
 #include <LibWebView/Forward.h>
@@ -46,8 +47,8 @@ public:
     PageHost& page_host() { return *m_page_host; }
     PageHost const& page_host() const { return *m_page_host; }
 
-    Function<void(IPC::File const&)> on_request_server_connection;
-    Function<void(IPC::File const&)> on_image_decoder_connection;
+    Function<void(IPC::TransportHandle const&)> on_request_server_connection;
+    Function<void(IPC::TransportHandle const&)> on_image_decoder_connection;
 
     Queue<Web::QueuedInputEvent>& input_event_queue() { return m_input_event_queue; }
 
@@ -61,17 +62,17 @@ private:
     virtual void close_server() override;
     virtual Messages::WebContentServer::GetWindowHandleResponse get_window_handle(u64 page_id) override;
     virtual void set_window_handle(u64 page_id, String handle) override;
-    virtual void connect_to_webdriver(u64 page_id, ByteString webdriver_ipc_path) override;
-    virtual void connect_to_web_ui(u64 page_id, IPC::File web_ui_socket) override;
-    virtual void connect_to_request_server(IPC::File request_server_socket) override;
-    virtual void connect_to_image_decoder(IPC::File image_decoder_socket) override;
+    virtual void connect_to_webdriver(u64 page_id, ByteString webdriver_endpoint) override;
+    virtual void connect_to_web_ui(u64 page_id, IPC::TransportHandle handle) override;
+    virtual void connect_to_request_server(IPC::TransportHandle handle) override;
+    virtual void connect_to_image_decoder(IPC::TransportHandle handle) override;
     virtual void update_system_theme(u64 page_id, Core::AnonymousBuffer) override;
     virtual void update_screen_rects(u64 page_id, Vector<Web::DevicePixelRect>, u32) override;
     virtual void load_url(u64 page_id, URL::URL) override;
     virtual void load_html(u64 page_id, ByteString) override;
     virtual void reload(u64 page_id) override;
     virtual void traverse_the_history_by_delta(u64 page_id, i32 delta) override;
-    virtual void set_viewport_size(u64 page_id, Web::DevicePixelSize) override;
+    virtual void set_viewport(u64 page_id, Web::DevicePixelSize, double device_pixel_ratio, Web::ViewportIsFullscreen is_fullscreen) override;
     virtual void key_event(u64 page_id, Web::KeyEvent) override;
     virtual void mouse_event(u64 page_id, Web::MouseEvent) override;
     virtual void drag_event(u64 page_id, Web::DragEvent) override;
@@ -90,6 +91,8 @@ private:
     virtual void request_style_sheet_source(u64 page_id, Web::CSS::StyleSheetIdentifier identifier) override;
 
     virtual void set_listen_for_dom_mutations(u64 page_id, bool) override;
+    virtual void did_connect_devtools_client(u64 page_id) override;
+    virtual void did_disconnect_devtools_client(u64 page_id) override;
     virtual void get_dom_node_inner_html(u64 page_id, Web::UniqueNodeID node_id) override;
     virtual void get_dom_node_outer_html(u64 page_id, Web::UniqueNodeID node_id) override;
     virtual void set_dom_node_outer_html(u64 page_id, Web::UniqueNodeID node_id, String html) override;
@@ -111,10 +114,11 @@ private:
     virtual void set_preferred_contrast(u64 page_id, Web::CSS::PreferredContrast) override;
     virtual void set_preferred_motion(u64 page_id, Web::CSS::PreferredMotion) override;
     virtual void set_preferred_languages(u64 page_id, Vector<String>) override;
+    virtual void set_browsing_behavior(u64 page_id, WebView::BrowsingBehavior) override;
     virtual void set_enable_global_privacy_control(u64 page_id, bool) override;
     virtual void set_has_focus(u64 page_id, bool) override;
     virtual void set_is_scripting_enabled(u64 page_id, bool) override;
-    virtual void set_device_pixels_per_css_pixel(u64 page_id, float) override;
+    virtual void set_zoom_level(u64 page_id, double zoom_level) override;
     virtual void set_maximum_frames_per_second(u64 page_id, double) override;
     virtual void set_window_position(u64 page_id, Web::DevicePixelPoint) override;
     virtual void set_window_size(u64 page_id, Web::DevicePixelSize) override;
@@ -125,7 +129,6 @@ private:
 
     virtual void js_console_input(u64 page_id, String) override;
     virtual void run_javascript(u64 page_id, String) override;
-    virtual void js_console_request_messages(u64 page_id, i32) override;
 
     virtual void alert_closed(u64 page_id) override;
     virtual void confirm_closed(u64 page_id, bool accepted) override;
@@ -139,6 +142,7 @@ private:
     virtual void toggle_media_play_state(u64 page_id) override;
     virtual void toggle_media_mute_state(u64 page_id) override;
     virtual void toggle_media_loop_state(u64 page_id) override;
+    virtual void toggle_media_fullscreen_state(u64 page_id) override;
     virtual void toggle_media_controls_state(u64 page_id) override;
 
     virtual void toggle_page_mute_state(u64 page_id) override;
@@ -160,7 +164,15 @@ private:
     virtual void paste(u64 page_id, Utf16String text) override;
 
     virtual void system_time_zone_changed() override;
-    virtual void cookies_changed(Vector<Web::Cookie::Cookie>) override;
+
+    virtual void set_document_cookie_version_buffer(u64 page_id, Core::AnonymousBuffer document_cookie_version_buffer) override;
+    virtual void set_document_cookie_version_index(u64 page_id, i64 document_id, Core::SharedVersionIndex document_index) override;
+    virtual void cookies_changed(u64 page_id, Vector<HTTP::Cookie::Cookie>) override;
+    virtual void broadcast_channel_message(Web::HTML::BroadcastChannelMessage message) override;
+
+    virtual void request_close(u64 page_id) override;
+
+    virtual void exit_fullscreen(u64 page_id) override;
 
     NonnullOwnPtr<PageHost> m_page_host;
 

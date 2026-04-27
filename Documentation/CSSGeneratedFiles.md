@@ -2,7 +2,7 @@
 
 We generate a significant amount of CSS-related code, taking in one or more .json files in
 [`Libraries/LibWeb/CSS`](../Libraries/LibWeb/CSS) and producing C++ code from them, located in
-`Build/<build-preset>/Lagom/Libraries/LibWeb/CSS/`.
+`Build/<build-preset>/Libraries/LibWeb/CSS/`.
 It's likely that you'll need to work with these if you add or modify a CSS property or its values.
 
 The generators are found in [`Meta/Lagom/Tools/CodeGenerators/LibWeb`](../Meta/Lagom/Tools/CodeGenerators/LibWeb).
@@ -19,24 +19,25 @@ Each property will have some set of these fields on it:
 
 (Note that required fields are not required on properties with `legacy-alias-for` or `logical-alias-for` set.)
 
-| Field                               | Required | Default    | Description                                                                                                 | Generated functions                                                                                                                                                                         |
-|-------------------------------------|----------|------------|-------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `affects-layout`                    | No       | `true`     | Boolean. Whether changing this property will invalidate the element's layout.                               | `bool property_affects_layout(PropertyID)`                                                                                                                                                  |
-| `affects-stacking-context`          | No       | `false`    | Boolean. Whether this property can cause a new stacking context for the element.                            | `bool property_affects_stacking_context(PropertyID)`                                                                                                                                        |
-| `animation-type`                    | Yes      |            | String. How the property should be animated. Defined by the spec. See below.                                | `AnimationType animation_type_from_longhand_property(PropertyID)`                                                                                                                           |
-| `inherited`                         | Yes      |            | Boolean. Whether the property is inherited by its child elements.                                           | `bool is_inherited_property(PropertyID)`                                                                                                                                                    |
-| `initial`                           | Yes      |            | String. The property's initial value if it is not specified.                                                | `NonnullRefPtr<StyleValue const> property_initial_value(PropertyID)`                                                                                                                        |
-| `legacy-alias-for`                  | No       | Nothing    | String. The name of a property this is an alias for. See below.                                             |                                                                                                                                                                                             |
-| `logical-alias-for`                 | No       | Nothing    | An object. See below.                                                                                       | `bool property_is_logical_alias(PropertyID);`<br/>`PropertyID map_logical_alias_to_physical_property(PropertyID, LogicalAliasMappingContext const&)`                                        |
-| `longhands`                         | No       | `[]`       | Array of strings. If this is a shorthand, these are the property names that it expands out into.            | `Vector<PropertyID> longhands_for_shorthand(PropertyID)`<br/>`Vector<PropertyID> expanded_longhands_for_shorthand(PropertyID)`<br/>`Vector<PropertyID> shorthands_for_longhand(PropertyID)` |
-| `max-values`                        | No       | `1`        | Integer. How many values can be parsed for this property. eg, `margin` can have up to 4 values.             | `size_t property_maximum_value_count(PropertyID)`                                                                                                                                           |
-| `multiplicity`                      | No       | `"single"` | String. Category for whether this property is a single value or a list of values. See below.                | `bool property_is_single_valued(PropertyID)`<br/>`bool property_is_list_valued(PropertyID)`<br/>`PropertyMultiplicity property_multiplicity(PropertyID)`                                    |
-| `percentages-resolve-to`            | No       | Nothing    | String. What type percentages get resolved to. eg, for `width` percentages are resolved to `length` values. | `Optional<ValueType> property_resolves_percentages_relative_to(PropertyID)`                                                                                                                 |
-| `positional-value-list-shorthand`   | No       | `false`    | Boolean. Whether this property is a "positional value list shorthand". See below.                           | `bool property_is_positional_value_list_shorthand(PropertyID)`                                                                                                                              |
-| `quirks`                            | No       | `[]`       | Array of strings. Some properties have special behavior in "quirks mode", which are listed here. See below. | `bool property_has_quirk(PropertyID, Quirk)`                                                                                                                                                |
-| `valid-identifiers`                 | No       | `[]`       | Array of strings. Which keywords the property accepts. See below.                                           | `bool property_accepts_keyword(PropertyID, Keyword)`<br/>`Optional<Keyword> resolve_legacy_value_alias(PropertyID, Keyword)`                                                                |
-| `valid-types`                       | No       | `[]`       | Array of strings. Which value types the property accepts. See below.                                        | `bool property_accepts_type(PropertyID, ValueType)`                                                                                                                                         |
-| `needs-layout-for-getcomputedstyle` | No       | `false`    | Boolean. Whether this property requires up-to-date layout before it could be queried by getComputedStyle()  | `bool property_needs_layout_for_getcomputedstyle(PropertyID)`                                                                                                                               |
+| Field                               | Required | Default    | Description                                                                                                 | Generated functions                                                                                                                                                                                                                                         |
+|-------------------------------------|----------|------------|-------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `affects-layout`                    | No       | `true`     | Boolean. Whether changing this property will invalidate the element's layout.                               | `bool property_affects_layout(PropertyID)`                                                                                                                                                                                                                  |
+| `affects-stacking-context`          | No       | `false`    | Boolean. Whether this property can cause a new stacking context for the element.                            | `bool property_affects_stacking_context(PropertyID)`                                                                                                                                                                                                        |
+| `animation-type`                    | Yes      |            | String. How the property should be animated. Defined by the spec. See below.                                | `AnimationType animation_type_from_longhand_property(PropertyID)`                                                                                                                                                                                           |
+| `inherited`                         | Yes      |            | Boolean. Whether the property is inherited by its child elements. Only applicable to longhand properties.   | `bool is_inherited_property(PropertyID)`                                                                                                                                                                                                                    |
+| `initial`                           | Yes      |            | String. The property's initial value if it is not specified.                                                | `NonnullRefPtr<StyleValue const> property_initial_value(PropertyID)`                                                                                                                                                                                        |
+| `legacy-alias-for`                  | No       | Nothing    | String. The name of a property this is an alias for. See below.                                             |                                                                                                                                                                                                                                                             |
+| `logical-alias-for`                 | No       | Nothing    | An object. See below.                                                                                       | `bool property_is_logical_alias(PropertyID);`<br/>`PropertyID map_logical_alias_to_physical_property(PropertyID, LogicalAliasMappingContext const&)`<br/>`PropertyID map_physical_property_to_logical_alias(PropertyID, LogicalAliasMappingContext const&)` |
+| `longhands`                         | No       | `[]`       | Array of strings. If this is a shorthand, these are the property names that it expands out into.            | `Vector<PropertyID> longhands_for_shorthand(PropertyID)`<br/>`Vector<PropertyID> expanded_longhands_for_shorthand(PropertyID)`<br/>`Vector<PropertyID> shorthands_for_longhand(PropertyID)`                                                                 |
+| `max-values`                        | No       | `1`        | Integer. How many values can be parsed for this property. eg, `margin` can have up to 4 values.             | `size_t property_maximum_value_count(PropertyID)`                                                                                                                                                                                                           |
+| `multiplicity`                      | No       | `"single"` | String. Category for whether this property is a single value or a list of values. See below.                | `bool property_is_single_valued(PropertyID)`<br/>`bool property_is_list_valued(PropertyID)`<br/>`PropertyMultiplicity property_multiplicity(PropertyID)`                                                                                                    |
+| `percentages-resolve-to`            | No       | Nothing    | String. What type percentages get resolved to. eg, for `width` percentages are resolved to `length` values. | `Optional<ValueType> property_resolves_percentages_relative_to(PropertyID)`                                                                                                                                                                                 |
+| `positional-value-list-shorthand`   | No       | `false`    | Boolean. Whether this property is a "positional value list shorthand". See below.                           | `bool property_is_positional_value_list_shorthand(PropertyID)`                                                                                                                                                                                              |
+| `quirks`                            | No       | `[]`       | Array of strings. Some properties have special behavior in "quirks mode", which are listed here. See below. | `bool property_has_quirk(PropertyID, Quirk)`                                                                                                                                                                                                                |
+| `requires-computation`              | Yes      |            | String. When a property's value needs to be run through the computation process. See below.                 | `bool property_requires_computation_with_inherited_value(PropertyID)`<br/>`bool property_requires_computation_with_initial_value(PropertyID)`<br/>`bool property_requires_computation_with_cascaded_value(PropertyID)`                                      |
+| `valid-identifiers`                 | No       | `[]`       | Array of strings. Which keywords the property accepts. See below.                                           | `bool property_accepts_keyword(PropertyID, Keyword)`<br/>`Optional<Keyword> resolve_legacy_value_alias(PropertyID, Keyword)`                                                                                                                                |
+| `valid-types`                       | No       | `[]`       | Array of strings. Which value types the property accepts. See below.                                        | `bool property_accepts_type(PropertyID, ValueType)`                                                                                                                                                                                                         |
+| `needs-layout-for-getcomputedstyle` | No       | `false`    | Boolean. Whether this property requires up-to-date layout before it could be queried by getComputedStyle()  | `bool property_needs_layout_for_getcomputedstyle(PropertyID)`                                                                                                                                                                                               |
 
 ### `animation-type`
 
@@ -96,6 +97,30 @@ The [Quirks spec](https://quirks.spec.whatwg.org/#css) defines these.
 | The hashless hex color quirk | `hashless-hex-color` |
 | The unitless length quirk    | `unitless-length`    |
 
+### `requires-computation`
+
+There are three ways the specified value of a property on an element can be determined:
+
+- Inherited, e.g. it is an inherited property and no value has been specified, or the `inherit` keyword has been
+  specified
+- Initial, e.g. it is _not_ an inherited property and no value has been specified, or the `initial` keyword has been
+  specified
+- Cascaded, a value has been cascaded for this element based on the styles
+
+We then turn that specified value into a computed value by running the computation (see
+`StyleComputer::compute_value_of_property`).
+
+Depending on the property, we know that for some of the above cases the computed value is guaranteed to be the same as
+the specified value, by specifying the cases where it _isn't_ we can limit running the computation process to only when
+required.
+
+| Value                 | Behavior                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `always`              | Always runs the computation process, regardless of how the specified value was determined                     |
+| `non-inherited-value` | Only run the computation process if the specified value was determined based on the initial or cascaded value |
+| `cascaded-value`      | Only run the computation process if the specified value was determined based on a cascaded value              |
+| `never`               | Always skip the computation process                                                                           |
+
 ### `valid-identifiers`
 
 A list of CSS keyword names, that the property accepts. Consider defining an enum instead and putting its name in the
@@ -148,21 +173,33 @@ The generated code provides:
 
 Each at-rule object has the following fields. Both are required.
 
-| Field         | Description                                                                                       |
-|---------------|---------------------------------------------------------------------------------------------------|
-| `spec`        | String. URL to the spec that defines this at-rule.                                                |
-| `descriptors` | Object, with keys being descriptor names and values being objects of their properties. See below. |
+| Field                | Description                                                                                                          |
+|----------------------|----------------------------------------------------------------------------------------------------------------------|
+| `spec`               | String. URL to the spec that defines this at-rule.                                                                   |
+| `descriptors`        | Object, with keys being descriptor names and values being objects of their properties. See below.                    |
+| `custom-descriptors` | Object, the configuration for custom descriptors (i.e. --foo). Omission means that custom descriptors are disallowed |
 
 ### Descriptor fields
 
 Each descriptor object can have the following fields:
 
-| Field              | Required | Description                                                           |
-|--------------------|----------|-----------------------------------------------------------------------|
-| `initial`          | No       | String. The descriptor's initial value if none is provided.           |
-| `legacy-alias-for` | No       | String. The name of a different descriptor that this is an alias for. |
-| `syntax`           | Yes      | Array of strings. Each string is one option, taken from the spec.     |
-| `FIXME` or `NOTE`  | No       | Strings, for when you want to leave a note.                           |
+| Field                                    | Default | Required | Description                                                                |
+|------------------------------------------|---------|----------|----------------------------------------------------------------------------|
+| `allow-arbitrary-substitution-functions` | `false` | No       | Boolean. Whether this descriptor supports arbitrary substitution functions |
+| `initial`                                | Nothing | No       | String. The descriptor's initial value if none is provided.                |
+| `legacy-alias-for`                       | Nothing | No       | String. The name of a different descriptor that this is an alias for.      |
+| `syntax`                                 | N/A     | Yes      | Array of strings. Each string is one option, taken from the spec.          |
+| `FIXME` or `NOTE`                        | Nothing | No       | Strings, for when you want to leave a note.                                |
+
+### Custom descriptor fields
+
+Each custom descriptor object has the following fields
+
+| Field                                    | Default | Required | Description                                                                |
+|------------------------------------------|---------|----------|----------------------------------------------------------------------------|
+| `allow-arbitrary-substitution-functions` | `false` | No       | Boolean. Whether this descriptor supports arbitrary substitution functions |
+| `syntax`                                 | N/A     | Yes      | Array of strings. Each string is one option.                               |
+| `FIXME` or `NOTE`                        | Nothing | No       | Strings, for when you want to leave a note.                                |
 
 ## Keywords.json
 
@@ -225,7 +262,9 @@ Each entry has the following properties:
 | `alias-for`          | No       | Nothing        | Use to specify that this should be treated as an alias for the named pseudo-element.                                                                                   |
 | `function-syntax`    | No       | Nothing        | Syntax for the function arguments if this is a function-type pseudo-element. Copied directly from the spec.                                                            |
 | `is-allowed-in-has`  | No       | `false`        | Whether this is a [`:has`-allowed pseudo-element](https://drafts.csswg.org/selectors/#has-allowed-pseudo-element).                                                     |
+| `is-element-backed`  | No       | `false`        | Whether this is an [element-backed pseudo-element](https://drafts.csswg.org/css-pseudo-4/#element-backed).                                                             |
 | `is-pseudo-root`     | No       | `false`        | Whether this is a [pseudo-element root](https://drafts.csswg.org/css-view-transitions/#pseudo-element-root).                                                           |
+| `is-tree-abiding`    | No       | `false`        | Whether this is a [tree-abiding pseudo-element](https://drafts.csswg.org/css-pseudo-4/#tree-abiding).                                                                  |
 | `property-whitelist` | No       | Nothing        | Some pseudo-elements only permit certain properties. If so, name them in an array here. Some special values are allowed here for categories of properties - see below. |
 | `spec`               | No       | Nothing        | Link to the spec definition, for reference. Not used in generated code.                                                                                                |
 | `type`               | No       | `"identifier"` | What type of pseudo-element is this. Either "identifier", "function", or "both".                                                                                       |
@@ -236,6 +275,8 @@ The generated code provides:
 - `Optional<PseudoElement> aliased_pseudo_element_from_string(StringView)` is similar, but returns the `PseudoElement` this name is an alias for
 - `StringView pseudo_element_name(PseudoElement)` to convert a `PseudoElement` back into a string
 - `bool is_has_allowed_pseudo_element(PseudoElement)` returns whether the pseudo-element is valid inside `:has()`
+- `bool is_element_backed_pseudo_element(PseudoElement)` returns whether the pseudo-element is element-backed
+- `bool is_tree_abiding_pseudo_element(PseudoElement)` returns whether the pseudo-element is tree-abiding
 - `bool is_pseudo_element_root(PseudoElement)` returns whether the pseudo-element is a [pseudo-element root](https://drafts.csswg.org/css-view-transitions/#pseudo-element-root)
 - `bool pseudo_element_supports_property(PseudoElement, PropertyID)` returns whether the property can be applied to this pseudo-element
 

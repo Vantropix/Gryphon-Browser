@@ -8,7 +8,7 @@
 
 #include <AK/NonnullRefPtr.h>
 #include <AK/Vector.h>
-#include <LibWeb/Bindings/BlobPrototype.h>
+#include <LibWeb/Bindings/Blob.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Bindings/Serializable.h>
 #include <LibWeb/Export.h>
@@ -58,8 +58,6 @@ public:
     ReadonlyBytes raw_bytes() const LIFETIME_BOUND { return m_byte_buffer.bytes(); }
 
     GC::Ref<Streams::ReadableStream> get_stream();
-
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::Blob; }
 
     virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
     virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;

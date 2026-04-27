@@ -11,7 +11,7 @@
 #include <LibRequests/RequestClient.h>
 #include <LibURL/Origin.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
-#include <LibWeb/Bindings/WebSocketPrototype.h>
+#include <LibWeb/Bindings/WebSocket.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Event.h>
 #include <LibWeb/DOM/EventDispatcher.h>
@@ -88,6 +88,8 @@ WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& rea
         // The elements that comprise this value MUST be non-empty strings with characters in the range U+0021 to U+007E not including
         // separator characters as defined in [RFC2616] and MUST all be unique strings.
         auto protocol = sorted_protocols[i];
+        if (protocol.is_empty())
+            return WebIDL::SyntaxError::create(realm, "Found empty protocol name"_utf16);
         if (i < sorted_protocols.size() - 1 && protocol == sorted_protocols[i + 1])
             return WebIDL::SyntaxError::create(realm, "Found a duplicate protocol name in the specified list"_utf16);
         for (auto code_point : protocol.code_points()) {
@@ -114,7 +116,6 @@ WebIDL::ExceptionOr<GC::Ref<WebSocket>> WebSocket::construct_impl(JS::Realm& rea
 WebSocket::WebSocket(JS::Realm& realm)
     : EventTarget(realm)
 {
-    set_overrides_must_survive_garbage_collection(true);
 }
 
 WebSocket::~WebSocket() = default;
@@ -131,6 +132,8 @@ void WebSocket::initialize(JS::Realm& realm)
 // https://html.spec.whatwg.org/multipage/server-sent-events.html#garbage-collection
 void WebSocket::finalize()
 {
+    Base::finalize();
+
     auto ready_state = this->ready_state();
 
     // If a WebSocket object is garbage collected while its connection is still open, the user agent must start the
@@ -202,8 +205,8 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
     auto additional_headers = HTTP::HeaderList::create();
 
     auto cookies = ([&] {
-        auto& page = Bindings::principal_host_defined_page(HTML::principal_realm(realm()));
-        return page.client().page_did_request_cookie(url_record, Cookie::Source::Http);
+        auto& page = Bindings::principal_host_defined_page(realm());
+        return page.client().page_did_request_cookie(url_record, HTTP::Cookie::Source::Http).cookie;
     })();
 
     if (!cookies.is_empty()) {
@@ -220,30 +223,18 @@ ErrorOr<void> WebSocket::establish_web_socket_connection(URL::URL const& url_rec
 
     m_websocket = request_client->websocket_connect(url_record, origin_string, protocol_byte_strings, {}, additional_headers);
 
-    m_websocket->on_open = [weak_this = GC::Weak { *this }] {
-        if (!weak_this)
-            return;
-        auto& websocket = const_cast<WebSocket&>(*weak_this);
-        websocket.on_open();
-    };
-    m_websocket->on_message = [weak_this = GC::Weak { *this }](auto message) {
-        if (!weak_this)
-            return;
-        auto& websocket = const_cast<WebSocket&>(*weak_this);
-        websocket.on_message(move(message.data), message.is_text);
-    };
-    m_websocket->on_close = [weak_this = GC::Weak { *this }](auto code, auto reason, bool was_clean) {
-        if (!weak_this)
-            return;
-        auto& websocket = const_cast<WebSocket&>(*weak_this);
-        websocket.on_close(code, String::from_byte_string(reason).release_value_but_fixme_should_propagate_errors(), was_clean);
-    };
-    m_websocket->on_error = [weak_this = GC::Weak { *this }](auto) {
-        if (!weak_this)
-            return;
-        auto& websocket = const_cast<WebSocket&>(*weak_this);
-        websocket.on_error();
-    };
+    m_websocket->on_open = GC::weak_callback(*this, [](auto& self) {
+        self.on_open();
+    });
+    m_websocket->on_message = GC::weak_callback(*this, [](auto& self, auto message) {
+        self.on_message(move(message.data), message.is_text);
+    });
+    m_websocket->on_close = GC::weak_callback(*this, [](auto& self, auto code, auto reason, bool was_clean) {
+        self.on_close(code, String::from_byte_string(reason).release_value_but_fixme_should_propagate_errors(), was_clean);
+    });
+    m_websocket->on_error = GC::weak_callback(*this, [](auto& self, auto) {
+        self.on_error();
+    });
 
     return {};
 }
@@ -295,7 +286,11 @@ WebIDL::ExceptionOr<void> WebSocket::close(Optional<u16> code, Optional<String> 
     // -> If the WebSocket connection is not yet established [WSP]
     // -> If the WebSocket closing handshake has not yet been started [WSP]
     // -> Otherwise
-    // NOTE: All of these are handled by the WebSocket Protocol when calling close()
+    // NB: All of these are handled by the WebSocket Protocol when calling close(). We still set the ready state to
+    //     CLOSING now though (which every case above expects), to prevent handling any messages from the remote server
+    //     in the meantime.
+    m_websocket->set_ready_state(Requests::WebSocket::ReadyState::Closing);
+
     // FIXME: LibProtocol does not yet support sending empty Close messages, so we use default values for now
     m_websocket->close(code.value_or(1000), reason.value_or(String {}).to_byte_string());
     return {};

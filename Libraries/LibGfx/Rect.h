@@ -9,12 +9,9 @@
 #pragma once
 
 #include <AK/Format.h>
-#include <AK/Vector.h>
-#include <LibGfx/AffineTransform.h>
 #include <LibGfx/Orientation.h>
 #include <LibGfx/Point.h>
 #include <LibGfx/Size.h>
-#include <LibGfx/TextAlignment.h>
 #include <math.h>
 
 namespace Gfx {
@@ -83,8 +80,6 @@ public:
     }
     ALWAYS_INLINE void scale_by(T dboth) { scale_by(dboth, dboth); }
     ALWAYS_INLINE void scale_by(Point<T> const& delta) { scale_by(delta.x(), delta.y()); }
-
-    void transform_by(AffineTransform const& transform) { *this = transform.map(*this); }
 
     [[nodiscard]] Point<T> center() const
     {
@@ -194,13 +189,6 @@ public:
     {
         Rect<T> rect = *this;
         rect.scale_by(s);
-        return rect;
-    }
-
-    [[nodiscard]] Rect<T> transformed(AffineTransform const& transform) const
-    {
-        Rect<T> rect = *this;
-        rect.transform_by(transform);
         return rect;
     }
 
@@ -334,11 +322,29 @@ public:
     ALWAYS_INLINE void set_primary_offset_for_orientation(Orientation orientation, T value) { m_location.set_primary_offset_for_orientation(orientation, value); }
     [[nodiscard]] ALWAYS_INLINE T secondary_offset_for_orientation(Orientation orientation) const { return m_location.secondary_offset_for_orientation(orientation); }
     ALWAYS_INLINE void set_secondary_offset_for_orientation(Orientation orientation, T value) { m_location.set_secondary_offset_for_orientation(orientation, value); }
+    ALWAYS_INLINE void translate_primary_offset_for_orientation(Orientation orientation, T delta) { m_location.set_primary_offset_for_orientation(orientation, m_location.primary_offset_for_orientation(orientation) + delta); }
+    ALWAYS_INLINE void translate_secondary_offset_for_orientation(Orientation orientation, T delta) { m_location.set_secondary_offset_for_orientation(orientation, m_location.secondary_offset_for_orientation(orientation) + delta); }
 
     [[nodiscard]] ALWAYS_INLINE T primary_size_for_orientation(Orientation orientation) const { return m_size.primary_size_for_orientation(orientation); }
     [[nodiscard]] ALWAYS_INLINE T secondary_size_for_orientation(Orientation orientation) const { return m_size.secondary_size_for_orientation(orientation); }
     ALWAYS_INLINE void set_primary_size_for_orientation(Orientation orientation, T value) { m_size.set_primary_size_for_orientation(orientation, value); }
     ALWAYS_INLINE void set_secondary_size_for_orientation(Orientation orientation, T value) { m_size.set_secondary_size_for_orientation(orientation, value); }
+
+    void inflate_primary_for_orientation(Orientation orientation, T before, T after)
+    {
+        if (orientation == Orientation::Horizontal)
+            inflate(0, after, 0, before);
+        else
+            inflate(before, 0, after, 0);
+    }
+
+    void inflate_secondary_for_orientation(Orientation orientation, T before, T after)
+    {
+        if (orientation == Orientation::Horizontal)
+            inflate(before, 0, after, 0);
+        else
+            inflate(0, after, 0, before);
+    }
 
     [[nodiscard]] T first_edge_for_orientation(Orientation orientation) const
     {
@@ -444,11 +450,6 @@ public:
         set_bottom(b);
     }
 
-    [[nodiscard]] static Rect<T> centered_on(Point<T> const& center, Size<T> const& size)
-    {
-        return { { center.x() - size.width() / 2, center.y() - size.height() / 2 }, size };
-    }
-
     [[nodiscard]] static Rect<T> from_two_points(Point<T> const& a, Point<T> const& b)
     {
         return { min(a.x(), b.x()), min(a.y(), b.y()), AK::abs(a.x() - b.x()), AK::abs(a.y() - b.y()) };
@@ -464,29 +465,6 @@ public:
     [[nodiscard]] ALWAYS_INLINE Rect<T> intersected(Rect<T> const& other) const
     {
         return intersection(*this, other);
-    }
-
-    template<typename U = T>
-    [[nodiscard]] Gfx::Rect<U> interpolated_to(Gfx::Rect<T> const& to, float factor) const
-    {
-        VERIFY(factor >= 0.f);
-        VERIFY(factor <= 1.f);
-        if (factor == 0.f)
-            return *this;
-        if (factor == 1.f)
-            return to;
-        if (this == &to)
-            return *this;
-        auto interpolated_left = round_to<U>(mix<float>(x(), to.x(), factor));
-        auto interpolated_top = round_to<U>(mix<float>(y(), to.y(), factor));
-        auto interpolated_right = round_to<U>(mix<float>(right(), to.right(), factor));
-        auto interpolated_bottom = round_to<U>(mix<float>(bottom(), to.bottom(), factor));
-        return { interpolated_left, interpolated_top, interpolated_right - interpolated_left, interpolated_bottom - interpolated_top };
-    }
-
-    [[nodiscard]] static Rect<T> centered_at(Point<T> const& point, Size<T> const& size)
-    {
-        return { { point.x() - size.width() / 2, point.y() - size.height() / 2 }, size };
     }
 
     void unite(Rect<T> const& other)
@@ -528,52 +506,6 @@ public:
     [[nodiscard]] Point<T> top_right() const { return { right(), top() }; }
     [[nodiscard]] Point<T> bottom_left() const { return { left(), bottom() }; }
     [[nodiscard]] Point<T> bottom_right() const { return { right(), bottom() }; }
-
-    void align_within(Rect<T> const& other, TextAlignment alignment)
-    {
-        switch (alignment) {
-        case TextAlignment::Center:
-            center_within(other);
-            return;
-        case TextAlignment::TopCenter:
-            center_horizontally_within(other);
-            set_y(other.y());
-            return;
-        case TextAlignment::TopLeft:
-            set_location(other.location());
-            return;
-        case TextAlignment::TopRight:
-            set_x(other.right() - width());
-            set_y(other.y());
-            return;
-        case TextAlignment::CenterLeft:
-            set_x(other.x());
-            center_vertically_within(other);
-            return;
-        case TextAlignment::CenterRight:
-            set_x(other.right() - width());
-            center_vertically_within(other);
-            return;
-        case TextAlignment::BottomCenter:
-            center_horizontally_within(other);
-            set_y(other.bottom() - height());
-            return;
-        case TextAlignment::BottomLeft:
-            set_x(other.x());
-            set_y(other.bottom() - height());
-            return;
-        case TextAlignment::BottomRight:
-            set_x(other.right() - width());
-            set_y(other.bottom() - height());
-            return;
-        }
-    }
-
-    void center_within(Rect<T> const& other)
-    {
-        center_horizontally_within(other);
-        center_vertically_within(other);
-    }
 
     [[nodiscard]] Rect centered_within(Rect const& other) const
     {

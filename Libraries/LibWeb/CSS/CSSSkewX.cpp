@@ -5,7 +5,7 @@
  */
 
 #include "CSSSkewX.h"
-#include <LibWeb/Bindings/CSSSkewXPrototype.h>
+#include <LibWeb/Bindings/CSSSkewX.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSNumericValue.h>
 #include <LibWeb/CSS/CSSUnitValue.h>
@@ -64,7 +64,7 @@ WebIDL::ExceptionOr<Utf16String> CSSSkewX::to_string() const
     builder.append("skewX("sv);
 
     // 2. Serialize this’s ax internal slot, and append it to s.
-    builder.append(TRY(m_ax->to_string()));
+    m_ax->serialize(builder, {});
 
     // 3. Append ")" to s, and return s.
     builder.append(")"sv);

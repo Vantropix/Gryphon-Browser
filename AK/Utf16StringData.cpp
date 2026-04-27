@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/RefPtr.h>
 #include <AK/Stream.h>
 #include <AK/TypedTransfer.h>
 #include <AK/Utf16StringData.h>
@@ -19,11 +20,9 @@ namespace AK::Detail {
 
 NonnullRefPtr<Utf16StringData> Utf16StringData::create_uninitialized(StorageType storage_type, size_t code_unit_length)
 {
-    auto allocation_size = storage_type == Utf16StringData::StorageType::ASCII
-        ? sizeof(Utf16StringData) + (sizeof(char) * code_unit_length)
-        : sizeof(Utf16StringData) + (sizeof(char16_t) * code_unit_length);
+    auto allocation_size = allocation_size_for_string_data(storage_type == Utf16StringData::StorageType::ASCII, code_unit_length);
 
-    void* slot = malloc(allocation_size);
+    void* slot = kmalloc(allocation_size);
     VERIFY(slot);
 
     return adopt_ref(*new (slot) Utf16StringData(storage_type, code_unit_length));

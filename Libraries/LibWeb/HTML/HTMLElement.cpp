@@ -9,7 +9,7 @@
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibWeb/ARIA/Roles.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
-#include <LibWeb/Bindings/HTMLElementPrototype.h>
+#include <LibWeb/Bindings/HTMLElement.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/DOM/Document.h>
@@ -23,6 +23,7 @@
 #include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/CloseWatcher.h>
 #include <LibWeb/HTML/CustomElements/CustomElementDefinition.h>
+#include <LibWeb/HTML/CustomElements/CustomElementRegistry.h>
 #include <LibWeb/HTML/ElementInternals.h>
 #include <LibWeb/HTML/EventHandler.h>
 #include <LibWeb/HTML/HTMLAnchorElement.h>
@@ -31,6 +32,7 @@
 #include <LibWeb/HTML/HTMLBodyElement.h>
 #include <LibWeb/HTML/HTMLDialogElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
+#include <LibWeb/HTML/HTMLImageElement.h>
 #include <LibWeb/HTML/HTMLInputElement.h>
 #include <LibWeb/HTML/HTMLLabelElement.h>
 #include <LibWeb/HTML/HTMLObjectElement.h>
@@ -72,6 +74,7 @@ void HTMLElement::visit_edges(Cell::Visitor& visitor)
 {
     Base::visit_edges(visitor);
     HTMLOrSVGElement::visit_edges(visitor);
+    FormAssociatedElement::visit_edges(visitor);
     visitor.visit(m_labels);
     visitor.visit(m_attached_internals);
     visitor.visit(m_popover_trigger);
@@ -446,22 +449,37 @@ Utf16String HTMLElement::outer_text()
     return get_the_text_steps();
 }
 
+static bool any_ancestor_establishes_a_fixed_position_containing_block(Layout::NodeWithStyle const& node)
+{
+    // https://www.w3.org/TR/css-position-3/#fixed-positioning-containing-block
+    // The containing block is established by the nearest ancestor box that establishes an fixed positioning containing
+    // block, with the bounds of the containing block determined identically to the absolute positioning containing block.
+    for (auto ancestor = node.containing_block(); ancestor; ancestor = ancestor->containing_block()) {
+        if (ancestor->establishes_a_fixed_positioning_containing_block())
+            return true;
+    }
+    return false;
+}
+
 // https://drafts.csswg.org/cssom-view/#dom-htmlelement-scrollparent
 GC::Ptr<DOM::Element> HTMLElement::scroll_parent() const
 {
     // NOTE: We have to ensure that the layout is up-to-date before querying the layout tree.
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLElementScrollParent);
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLElementScrollParent);
 
     // 1. If any of the following holds true, return null and terminate this algorithm:
     //    - The element does not have an associated box.
     //    - The element is the root element.
     //    - The element is the body element.
-    //    - FIXME: The element’s computed value of the position property is fixed and no ancestor establishes a fixed position containing block.
+    //    - The element’s computed value of the position property is fixed and no ancestor establishes a fixed position containing block.
     if (!layout_node())
         return nullptr;
     if (is_document_element())
         return nullptr;
     if (is_html_body_element())
+        return nullptr;
+    bool const no_ancestor_establishes_a_fixed_position_containing_block = !any_ancestor_establishes_a_fixed_position_containing_block(*layout_node());
+    if (layout_node()->is_fixed_position() && no_ancestor_establishes_a_fixed_position_containing_block)
         return nullptr;
 
     // 2. Let ancestor be the containing block of the element in the flat tree and repeat these substeps:
@@ -483,8 +501,10 @@ GC::Ptr<DOM::Element> HTMLElement::scroll_parent() const
             return const_cast<Element*>(static_cast<DOM::Element const*>(ancestor->dom_node()));
         }
 
-        // FIXME: 3. If the computed value of the position property of ancestor is fixed, and no ancestor establishes a fixed
+        // 3. If the computed value of the position property of ancestor is fixed, and no ancestor establishes a fixed
         //    position containing block, terminate this algorithm and return null.
+        if (ancestor->computed_values().position() == CSS::Positioning::Fixed && no_ancestor_establishes_a_fixed_position_containing_block)
+            return nullptr;
 
         // 4. Let ancestor be the containing block of ancestor in the flat tree.
         ancestor = ancestor->containing_block();
@@ -493,55 +513,69 @@ GC::Ptr<DOM::Element> HTMLElement::scroll_parent() const
     return nullptr;
 }
 
-// https://www.w3.org/TR/cssom-view-1/#dom-htmlelement-offsetparent
+// https://drafts.csswg.org/cssom-view-1/#dom-htmlelement-offsetparent
 GC::Ptr<DOM::Element> HTMLElement::offset_parent() const
 {
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLElementOffsetParent);
+    // NOTE: We have to ensure that the layout is up-to-date before querying the layout tree.
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLElementOffsetParent);
 
     // 1. If any of the following holds true return null and terminate this algorithm:
     //    - The element does not have an associated box.
     //    - The element is the root element.
     //    - The element is the HTML body element.
-    //    - The element’s computed value of the position property is fixed.
+    //    - The element’s computed value of the position property is fixed and no ancestor establishes a fixed position containing block.
     if (!layout_node())
         return nullptr;
     if (is_document_element())
         return nullptr;
     if (is_html_body_element())
         return nullptr;
-    if (layout_node()->is_fixed_position())
+    bool const no_ancestor_establishes_a_fixed_position_containing_block = !any_ancestor_establishes_a_fixed_position_containing_block(*layout_node());
+    if (layout_node()->is_fixed_position() && no_ancestor_establishes_a_fixed_position_containing_block)
         return nullptr;
 
     // 2. Let ancestor be the parent of the element in the flat tree and repeat these substeps:
-    auto ancestor = shadow_including_first_ancestor_of_type<DOM::Element>();
+    auto ancestor = first_flat_tree_ancestor_of_type<DOM::Element>();
     while (true) {
+        // 1. If ancestor is closed-shadow-hidden from the element, its computed value of the position property is
+        //    fixed, and no ancestor establishes a fixed position containing block, terminate this algorithm and return
+        //    null.
         bool ancestor_is_closed_shadow_hidden = ancestor->is_closed_shadow_hidden_from(*this);
-        // 1. If ancestor is closed-shadow-hidden from the element and its computed value of the position property is
-        //   fixed, terminate this algorithm and return null.
-        if (ancestor_is_closed_shadow_hidden && ancestor->computed_properties()->position() == CSS::Positioning::Fixed)
+        if (ancestor_is_closed_shadow_hidden
+            && ancestor->computed_properties()->position() == CSS::Positioning::Fixed
+            && no_ancestor_establishes_a_fixed_position_containing_block)
             return nullptr;
 
         // 2. If ancestor is not closed-shadow-hidden from the element and satisfies at least one of the following,
         //    terminate this algorithm and return ancestor.
         if (!ancestor_is_closed_shadow_hidden) {
-            // - ancestor is a containing block of absolutely-positioned descendants (regardless of whether there are
-            //    any absolutely-positioned descendants).
-            if (ancestor->layout_node()->is_positioned())
+            // NB: An ancestor in the flat tree may not have a layout node (e.g., it has display: none).
+            //     Such ancestors can't be positioned or establish containing blocks, so we skip those checks.
+            // - The element is in a fixed position containing block, and ancestor is a containing block for
+            //   fixed-positioned descendants.
+            // FIXME: This is ambiguous but I believe it means any ancestor establishes a fixed position containing block.
+            //        https://github.com/w3c/csswg-drafts/pull/12531/commits/48e905bb3859f80ce822299f7e6b76515d867fc3#r2623785087
+            if (!no_ancestor_establishes_a_fixed_position_containing_block && ancestor->layout_node() && ancestor->layout_node()->establishes_a_fixed_positioning_containing_block())
                 return const_cast<Element*>(ancestor);
-
+            // - The element is not in a fixed position containing block, and:
+            if (no_ancestor_establishes_a_fixed_position_containing_block) {
+                // - ancestor is a containing block of absolutely-positioned descendants (regardless of whether there
+                //   are any absolutely-positioned descendants).
+                if (ancestor->layout_node() && ancestor->layout_node()->is_positioned())
+                    return const_cast<Element*>(ancestor);
+                // - It is the body element.
+                if (ancestor->is_html_body_element())
+                    return const_cast<Element*>(ancestor);
+                // - The computed value of the position property of the element is static and the ancestor is one of
+                //   the following HTML elements: td, th, or table.
+                if (computed_properties()->position() == CSS::Positioning::Static && ancestor->local_name().is_one_of(HTML::TagNames::td, HTML::TagNames::th, HTML::TagNames::table))
+                    return const_cast<Element*>(ancestor);
+            }
             // - FIXME: The element has a different effective zoom than ancestor.
-
-            // - It is the body element.
-            if (ancestor->is_html_body_element())
-                return const_cast<Element*>(ancestor);
-
-            // - The computed value of the position property of the element is static and the ancestor is one of the following HTML elements: td, th, or table.
-            if (computed_properties()->position() == CSS::Positioning::Static && ancestor->local_name().is_one_of(HTML::TagNames::td, HTML::TagNames::th, HTML::TagNames::table))
-                return const_cast<Element*>(ancestor);
         }
 
         // 3. If there is no more parent of ancestor in the flat tree, terminate this algorithm and return null.
-        auto parent_of_ancestor = ancestor->shadow_including_first_ancestor_of_type<DOM::Element>();
+        auto parent_of_ancestor = ancestor->first_flat_tree_ancestor_of_type<DOM::Element>();
         if (!parent_of_ancestor)
             return nullptr;
 
@@ -559,7 +593,7 @@ int HTMLElement::offset_top() const
         return 0;
 
     // NOTE: Ensure that layout is up-to-date before looking at metrics.
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLElementOffsetTop);
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLElementOffsetTop);
 
     if (!paintable_box())
         return 0;
@@ -601,7 +635,7 @@ int HTMLElement::offset_left() const
         return 0;
 
     // NOTE: Ensure that layout is up-to-date before looking at metrics.
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLElementOffsetLeft);
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLElementOffsetLeft);
 
     if (!paintable_box())
         return 0;
@@ -639,7 +673,7 @@ int HTMLElement::offset_left() const
 int HTMLElement::offset_width() const
 {
     // NOTE: Ensure that layout is up-to-date before looking at metrics.
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLElementOffsetWidth);
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLElementOffsetWidth);
 
     // 1. If the element does not have any associated box return zero and terminate this algorithm.
     auto const* box = paintable_box();
@@ -651,14 +685,14 @@ int HTMLElement::offset_width() const
     //
     //    If the element’s principal box is an inline-level box which was "split" by a block-level descendant, also
     //    include fragments generated by the block-level descendants, unless they are zero width or height.
-    return box->absolute_united_border_box_rect().width().to_int();
+    return round(box->absolute_united_border_box_rect().width()).to_int();
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-htmlelement-offsetheight
 int HTMLElement::offset_height() const
 {
     // NOTE: Ensure that layout is up-to-date before looking at metrics.
-    const_cast<DOM::Document&>(document()).update_layout(DOM::UpdateLayoutReason::HTMLElementOffsetHeight);
+    const_cast<DOM::Document&>(document()).update_layout_if_needed_for_node(*this, DOM::UpdateLayoutReason::HTMLElementOffsetHeight);
 
     // 1. If the element does not have any associated box return zero and terminate this algorithm.
     auto const* box = paintable_box();
@@ -670,20 +704,7 @@ int HTMLElement::offset_height() const
     //
     //    If the element’s principal box is an inline-level box which was "split" by a block-level descendant, also
     //    include fragments generated by the block-level descendants, unless they are zero width or height.
-    return box->absolute_united_border_box_rect().height().to_int();
-}
-
-// https://html.spec.whatwg.org/multipage/links.html#cannot-navigate
-bool HTMLElement::cannot_navigate() const
-{
-    // An element element cannot navigate if one of the following is true:
-
-    // - element's node document is not fully active
-    if (!document().is_fully_active())
-        return true;
-
-    // - element is not an a element and is not connected.
-    return !is<HTML::HTMLAnchorElement>(this) && !is_connected();
+    return round(box->absolute_united_border_box_rect().height()).to_int();
 }
 
 void HTMLElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
@@ -708,6 +729,10 @@ void HTMLElement::attribute_changed(FlyString const& name, Optional<String> cons
             // Having an invalid value maps to the "inherit" state.
             m_content_editable_state = ContentEditableState::Inherit;
         }
+        for_each_in_inclusive_subtree([](Node& node) {
+            node.recompute_editable_subtree_flag();
+            return TraversalDecision::Continue;
+        });
     } else if (name == HTML::AttributeNames::inert) {
         // https://html.spec.whatwg.org/multipage/interaction.html#the-inert-attribute
         // The inert attribute is a boolean attribute that indicates, by its presence, that the element and all its flat tree descendants which don't otherwise escape inertness
@@ -746,6 +771,11 @@ void HTMLElement::attribute_changed(FlyString const& name, Optional<String> cons
             && popover_value_to_state(old_value) != popover_value_to_state(value))
             MUST(hide_popover(FocusPreviousElement::Yes, FireEvents::Yes, ThrowExceptions::No, IgnoreDomState::Yes, nullptr));
     }();
+
+    if (is_form_associated_element()) {
+        form_node_attribute_changed(name, value);
+        form_associated_element_attribute_changed(name, old_value, value, namespace_);
+    }
 }
 
 void HTMLElement::set_subtree_inertness(bool is_inert)
@@ -758,9 +788,6 @@ void HTMLElement::set_subtree_inertness(bool is_inert)
         html_element.set_inert(is_inert);
         return TraversalDecision::Continue;
     });
-
-    if (auto paintable_box = this->paintable_box())
-        paintable_box->set_needs_paint_only_properties_update(true);
 }
 
 WebIDL::ExceptionOr<void> HTMLElement::cloned(Web::DOM::Node& copy, bool clone_children) const
@@ -777,6 +804,11 @@ void HTMLElement::inserted()
 
     if (auto* parent_html_element = first_ancestor_of_type<HTMLElement>(); parent_html_element && parent_html_element->is_inert() && !has_attribute(HTML::AttributeNames::inert))
         set_subtree_inertness(true);
+
+    if (is_form_associated_element()) {
+        form_node_was_inserted();
+        form_associated_element_was_inserted();
+    }
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#fire-a-synthetic-pointer-event
@@ -830,7 +862,7 @@ GC::Ptr<DOM::NodeList> HTMLElement::labels()
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-hidden
-Variant<bool, double, String> HTMLElement::hidden() const
+Variant<bool, double, String, Empty> HTMLElement::hidden() const
 {
     // 1. If the hidden attribute is in the hidden until found state, then return "until-found".
     auto const& hidden = get_attribute(HTML::AttributeNames::hidden);
@@ -843,7 +875,7 @@ Variant<bool, double, String> HTMLElement::hidden() const
     return false;
 }
 
-void HTMLElement::set_hidden(Variant<bool, double, String> const& given_value)
+void HTMLElement::set_hidden(Variant<bool, double, String, Empty> const& given_value)
 {
     // 1. If the given value is a string that is an ASCII case-insensitive match for "until-found", then set the hidden attribute to "until-found".
     if (given_value.has<String>()) {
@@ -854,11 +886,6 @@ void HTMLElement::set_hidden(Variant<bool, double, String> const& given_value)
         }
         // 3. Otherwise, if the given value is the empty string, then remove the hidden attribute.
         if (string.is_empty()) {
-            remove_attribute(HTML::AttributeNames::hidden);
-            return;
-        }
-        // 4. Otherwise, if the given value is null, then remove the hidden attribute.
-        if (string.equals_ignoring_ascii_case("null"sv) || string.equals_ignoring_ascii_case("undefined"sv)) {
             remove_attribute(HTML::AttributeNames::hidden);
             return;
         }
@@ -878,6 +905,11 @@ void HTMLElement::set_hidden(Variant<bool, double, String> const& given_value)
             remove_attribute(HTML::AttributeNames::hidden);
             return;
         }
+    }
+    // 4. Otherwise, if the given value is null, then remove the hidden attribute.
+    else if (given_value.has<Empty>()) {
+        remove_attribute(HTML::AttributeNames::hidden);
+        return;
     }
     // 7. Otherwise, set the hidden attribute to the empty string.
     set_attribute_value(HTML::AttributeNames::hidden, ""_string);
@@ -907,12 +939,11 @@ void HTMLElement::click()
 }
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#form-associated-custom-element
-bool HTMLElement::is_form_associated_custom_element()
+bool HTMLElement::is_form_associated_custom_element() const
 {
     // An autonomous custom element is called a form-associated custom element if the element is associated with a
     // custom element definition whose form-associated field is set to true.
-    auto definition = document().lookup_custom_element_definition(namespace_uri(), local_name(), is_value());
-    return definition->form_associated();
+    return custom_element_definition() && custom_element_definition()->form_associated();
 }
 
 Optional<ARIA::Role> HTMLElement::default_role() const
@@ -1042,73 +1073,16 @@ Optional<ARIA::Role> HTMLElement::default_role() const
     return {};
 }
 
-// https://html.spec.whatwg.org/multipage/semantics.html#get-an-element's-target
-String HTMLElement::get_an_elements_target(Optional<String> target) const
-{
-    // To get an element's target, given an a, area, or form element element, and an optional string-or-null target (default null), run these steps:
-
-    // 1. If target is null, then:
-    if (!target.has_value()) {
-        // 1. If element has a target attribute, then set target to that attribute's value.
-        if (auto maybe_target = attribute(AttributeNames::target); maybe_target.has_value()) {
-            target = maybe_target.release_value();
-        }
-        // 2. Otherwise, if element's node document contains a base element with a target attribute,
-        //    set target to the value of the target attribute of the first such base element.
-        if (auto base_element = document().first_base_element_with_target_in_tree_order())
-            target = base_element->attribute(AttributeNames::target);
-    }
-
-    // 2. If target is not null, and contains an ASCII tab or newline and a U+003C (<), then set target to "_blank".
-    if (target.has_value() && target->bytes_as_string_view().contains("\t\n\r"sv) && target->contains('<'))
-        target = "_blank"_string;
-
-    // 3. Return target.
-    return target.value_or({});
-}
-
-// https://html.spec.whatwg.org/multipage/links.html#get-an-element's-noopener
-TokenizedFeature::NoOpener HTMLElement::get_an_elements_noopener(URL::URL const& url, StringView target) const
-{
-    // To get an element's noopener, given an a, area, or form element element, a URL record url, and a string target,
-    // perform the following steps. They return a boolean.
-    auto rel = MUST(get_attribute_value(HTML::AttributeNames::rel).to_lowercase());
-    auto link_types = rel.bytes_as_string_view().split_view_if(Infra::is_ascii_whitespace);
-
-    // 1. If element's link types include the noopener or noreferrer keyword, then return true.
-    if (link_types.contains_slow("noopener"sv) || link_types.contains_slow("noreferrer"sv))
-        return TokenizedFeature::NoOpener::Yes;
-
-    // 2. If element's link types do not include the opener keyword and
-    //    target is an ASCII case-insensitive match for "_blank", then return true.
-    if (!link_types.contains_slow("opener"sv) && target.equals_ignoring_ascii_case("_blank"sv))
-        return TokenizedFeature::NoOpener::Yes;
-
-    // 3. If url's blob URL entry is not null:
-    if (url.blob_url_entry().has_value()) {
-        // 1. Let blobOrigin be url's blob URL entry's environment's origin.
-        auto const& blob_origin = url.blob_url_entry()->environment.origin;
-
-        // 2. Let topLevelOrigin be element's relevant settings object's top-level origin.
-        auto const& top_level_origin = relevant_settings_object(*this).top_level_origin;
-
-        // 3. If blobOrigin is not same site with topLevelOrigin, then return true.
-        if (!blob_origin.is_same_site(top_level_origin.value()))
-            return TokenizedFeature::NoOpener::Yes;
-    }
-
-    // 4. Return false.
-    return TokenizedFeature::NoOpener::No;
-}
-
+// https://html.spec.whatwg.org/multipage/custom-elements.html#dom-attachinternals
 WebIDL::ExceptionOr<GC::Ref<ElementInternals>> HTMLElement::attach_internals()
 {
     // 1. If this's is value is not null, then throw a "NotSupportedError" DOMException.
     if (is_value().has_value())
         return WebIDL::NotSupportedError::create(realm(), "ElementInternals cannot be attached to a customized built-in element"_utf16);
 
-    // 2. Let definition be the result of looking up a custom element definition given this's node document, its namespace, its local name, and null as the is value.
-    auto definition = document().lookup_custom_element_definition(namespace_uri(), local_name(), is_value());
+    // 2. Let definition be the result of looking up a custom element definition given this's custom element registry,
+    //    this's namespace, this's local name, and null.
+    auto definition = look_up_a_custom_element_definition(custom_element_registry(), namespace_uri(), local_name(), {});
 
     // 3. If definition is null, then throw an "NotSupportedError" DOMException.
     if (!definition)
@@ -1819,7 +1793,7 @@ GC::Ptr<HTMLElement> HTMLElement::topmost_popover_ancestor(GC::Ptr<DOM::Node> ne
 
             // 5. If okNesting is false, then set candidate to candidateAncestor's parent in the flat tree.
             if (!ok_nesting)
-                candidate = candidate_ancestor->shadow_including_first_ancestor_of_type<HTMLElement>();
+                candidate = candidate_ancestor->first_flat_tree_ancestor_of_type<HTMLElement>();
         }
 
         // 5. Let candidatePosition be popoverPositions[candidateAncestor].
@@ -1831,7 +1805,7 @@ GC::Ptr<HTMLElement> HTMLElement::topmost_popover_ancestor(GC::Ptr<DOM::Node> ne
     };
 
     // 10. Run checkAncestor given newPopoverOrTopLayerElement's parent node within the flat tree.
-    check_ancestor(new_popover_or_top_layer_element->shadow_including_first_ancestor_of_type<HTMLElement>());
+    check_ancestor(new_popover_or_top_layer_element->first_flat_tree_ancestor_of_type<HTMLElement>());
 
     // 11. Run checkAncestor given source.
     check_ancestor(source.ptr());
@@ -1855,7 +1829,7 @@ GC::Ptr<HTMLElement> HTMLElement::nearest_inclusive_open_popover()
             return current_node;
 
         // 2. Set currentNode to currentNode's parent in the flat tree.
-        current_node = current_node->shadow_including_first_ancestor_of_type<HTMLElement>();
+        current_node = current_node->first_flat_tree_ancestor_of_type<HTMLElement>();
     }
 
     // 3. Return null.
@@ -1882,7 +1856,7 @@ GC::Ptr<HTMLElement> HTMLElement::nearest_inclusive_target_popover()
         }
 
         // 3. Set currentNode to currentNode's ancestor in the flat tree.
-        current_node = current_node->shadow_including_first_ancestor_of_type<HTMLElement>();
+        current_node = current_node->first_flat_tree_ancestor_of_type<HTMLElement>();
     }
 
     return {};
@@ -2004,7 +1978,7 @@ GC::Ptr<HTMLElement> HTMLElement::topmost_clicked_popover(GC::Ptr<DOM::Node> nod
 
     GC::Ptr<HTMLElement> nearest_element = as_if<HTMLElement>(*node);
     if (!nearest_element)
-        nearest_element = node->shadow_including_first_ancestor_of_type<HTMLElement>();
+        nearest_element = node->first_flat_tree_ancestor_of_type<HTMLElement>();
 
     if (!nearest_element)
         return {};
@@ -2065,29 +2039,94 @@ void HTMLElement::did_lose_focus()
     document().editing_host_manager()->set_active_contenteditable_element(nullptr);
 }
 
-void HTMLElement::removed_from(Node* old_parent, Node& old_root)
+// https://html.spec.whatwg.org/multipage/infrastructure.html#dom-trees:concept-node-remove-ext
+void HTMLElement::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor, Node& old_root)
 {
-    Element::removed_from(old_parent, old_root);
+    Element::removed_from(is_subtree_root, old_ancestor, old_root);
 
-    // https://html.spec.whatwg.org/multipage/infrastructure.html#dom-trees:concept-node-remove-ext
-    // If removedNode's popover attribute is not in the No Popover state, then run the hide popover algorithm given removedNode, false, false, false, true, and null.
+    // FIXME: 1. Let document be removedNode's node document.
+    // FIXME: 2. If document's focused area is removedNode, then set document's focused area to document's viewport,
+    //   and set document's relevant global object's navigation API's focus changed during ongoing navigation to false.
+
+    // 3. If removedNode is an element whose namespace is the HTML namespace, and this standard defines HTML element
+    //    removing steps for removedNode's local name, then run the corresponding HTML element removing steps given
+    //    removedNode, isSubtreeRoot, and oldAncestor.
+    // NB: This is done by overriding removed_from() in subclasses.
+
+    // 4. If removedNode is a form-associated element with a non-null form owner and removedNode and its form owner are
+    //    no longer in the same tree, then reset the form owner of removedNode.
+    // FIXME: Follow the spec here.
+    if (is_form_associated_element()) {
+        form_node_was_removed();
+        form_associated_element_was_removed(old_ancestor);
+    }
+
+    // 5. If removedNode's popover attribute is not in the No Popover state, then run the hide popover algorithm given
+    //    removedNode, false, false, false, true, and null.
     if (popover().has_value())
         MUST(hide_popover(FocusPreviousElement::No, FireEvents::No, ThrowExceptions::No, IgnoreDomState::Yes, nullptr));
 
-    if (old_parent) {
-        auto* parent_html_element = as_if<HTMLElement>(old_parent);
+    // AD-HOC: Update inertness
+    if (old_ancestor) {
+        auto* parent_html_element = as_if<HTMLElement>(old_ancestor);
         if (!parent_html_element)
-            parent_html_element = old_parent->first_ancestor_of_type<HTMLElement>();
+            parent_html_element = old_ancestor->first_ancestor_of_type<HTMLElement>();
         if (parent_html_element && parent_html_element->is_inert() && !has_attribute(HTML::AttributeNames::inert))
             set_subtree_inertness(false);
+    }
+}
+
+// https://html.spec.whatwg.org/multipage/infrastructure.html#dom-trees:concept-node-move-ext
+void HTMLElement::moved_from(IsSubtreeRoot is_subtree_root, GC::Ptr<DOM::Node> old_ancestor)
+{
+    Element::moved_from(is_subtree_root, old_ancestor);
+
+    // 1. If movedNode is an element whose namespace is the HTML namespace, and this standard defines HTML element
+    //    moving steps for movedNode's local name, then run the corresponding HTML element moving steps given
+    //    movedNode, isSubtreeRoot, and oldAncestor.
+    // NB: This is done by overriding moved_from() in subclasses.
+
+    // 2. If movedNode is a form-associated element with a non-null form owner and movedNode and its form owner are no
+    //    longer in the same tree, then reset the form owner of movedNode.
+    // FIXME: Follow the spec here.
+    if (is_form_associated_element()) {
+        form_node_was_moved();
+        form_associated_element_was_moved(old_ancestor);
     }
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-accesskeylabel
 String HTMLElement::access_key_label() const
 {
-    dbgln("FIXME: Implement HTMLElement::access_key_label()");
-    return String {};
+    // The accessKeyLabel IDL attribute must return a string that represents the element's assigned access key, if any.
+    // If the element does not have one, then the IDL attribute must return the empty string.
+
+    // An element's assigned access key is a key combination derived from the element's accesskey content attribute.
+    // https://html.spec.whatwg.org/multipage/interaction.html#assigned-access-key
+
+    // 1. If the element has no accesskey attribute, then skip to the fallback step below.
+    auto access_key = get_attribute(HTML::AttributeNames::accesskey);
+    if (!access_key.has_value() || access_key->is_empty())
+        return String {};
+
+    // 2. Otherwise, split the attribute's value on ASCII whitespace, and let keys be the resulting tokens.
+    // 3. For each value in keys in turn, in the order the tokens appeared in the attribute's value, run the following substeps:
+    //    3.1. If the value is not a string exactly one code point in length, then skip the remainder of these steps for this value.
+    // NB: We mimic Chromium here and treat the attribute value as a single key rather than splitting on whitespace.
+    //     The spec says to split on whitespace and try each token, but no browser besides IE/Edge implemented that.
+    //     If there is more than one code point, no access key is assigned. https://github.com/whatwg/html/issues/3769
+    if (access_key->code_points().length() > 1)
+        return String {};
+
+    // FIXME: 3.2. If the value does not correspond to a key on the system's keyboard, then skip the remainder of these steps for this value.
+    // FIXME: 3.3. If the user agent can find a mix of zero or more modifier keys that, combined with the key that corresponds to
+    //             the value given in the attribute, can be used as the access key, then the user agent may assign that combination
+    //             of keys as the element's assigned access key and return.
+    return *access_key;
+
+    // 4. Fallback: Optionally, the user agent may assign a key combination of its choosing as the element's assigned access key
+    //    and then return.
+    // 5. If this step is reached, the element has no assigned access key.
 }
 
 // https://html.spec.whatwg.org/multipage/dnd.html#dom-draggable
@@ -2459,8 +2498,7 @@ WebIDL::UnsignedLong HTMLElement::computed_heading_offset() const
             return offset;
 
         // 5. Set inclusiveAncestor to the parent node of inclusiveAncestor within the flat tree.
-        // FIXME: Flat tree parent means following slots.
-        inclusive_ancestor = inclusive_ancestor->parent();
+        inclusive_ancestor = inclusive_ancestor->flat_tree_parent();
     }
 
     // 4. Return offset.

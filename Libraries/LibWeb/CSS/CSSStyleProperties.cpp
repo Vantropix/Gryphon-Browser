@@ -5,19 +5,22 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/CSSStylePropertiesPrototype.h>
+#include <LibWeb/Bindings/CSSStyleProperties.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSStyleProperties.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/CSS/StyleComputer.h>
-#include <LibWeb/CSS/StyleValues/FitContentStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ColorFunctionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FunctionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
+#include <LibWeb/CSS/StyleValues/PendingSubstitutionStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ShorthandStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
@@ -173,13 +176,12 @@ Optional<StyleProperty const&> CSSStyleProperties::custom_property(FlyString con
 
         element.document().update_style();
 
-        auto const* element_to_check = &element;
-        while (element_to_check) {
-            if (auto property = element_to_check->custom_properties(pseudo_element).get(custom_property_name); property.has_value())
-                return *property;
+        auto data = element.custom_property_data(pseudo_element);
+        if (!data)
+            return {};
 
-            element_to_check = element_to_check->parent_element();
-        }
+        if (auto const* property = data->get(custom_property_name))
+            return *property;
 
         return {};
     }
@@ -315,8 +317,8 @@ static NonnullRefPtr<StyleValue const> style_value_for_size(Size const& size)
         return KeywordStyleValue::create(Keyword::MaxContent);
     if (size.is_fit_content()) {
         if (auto available_space = size.fit_content_available_space(); available_space.has_value())
-            return FitContentStyleValue::create(available_space.release_value());
-        return FitContentStyleValue::create();
+            return FunctionStyleValue::create("fit-content"_fly_string, style_value_for_length_percentage(available_space.release_value()));
+        return KeywordStyleValue::create(Keyword::FitContent);
     }
     TODO();
 }
@@ -486,6 +488,30 @@ Optional<StyleProperty> CSSStyleProperties::get_property_internal(PropertyNameAn
                 last_important_flag = declaration->important;
             }
 
+            // https://drafts.csswg.org/css-values-5/#pending-substitution-value
+            // If all of the component longhand properties for a given shorthand are pending-substitution values from
+            // the same original shorthand value, the shorthand property must serialize to that original
+            // (arbitrary substitution function-containing) value.
+            // Otherwise, if any of the component longhand properties for a given shorthand are pending-substitution
+            // values, or contain arbitrary substitution functions of their own that have not yet been substituted, the
+            // shorthand property must serialize to the empty string.
+            if (list.first()->is_pending_substitution()) {
+                auto const& original_shorthand_value = list.first()->as_pending_substitution().original_shorthand_value();
+                auto all_from_same_original = all_of(list, [&](auto const& value) {
+                    return value->is_pending_substitution()
+                        && &value->as_pending_substitution().original_shorthand_value() == &original_shorthand_value;
+                });
+                if (all_from_same_original) {
+                    return StyleProperty {
+                        .important = last_important_flag.value(),
+                        .property_id = property.id(),
+                        .value = original_shorthand_value,
+                    };
+                }
+            }
+            if (any_of(list, [](auto const& value) { return value->is_pending_substitution() || value->is_unresolved(); }))
+                return {};
+
             // 3. If important flags of all declarations in list are same, then return the serialization of list.
             // NOTE: Currently we implement property-specific shorthand serialization in ShorthandStyleValue::to_string().
             return StyleProperty {
@@ -515,21 +541,40 @@ Optional<StyleProperty> CSSStyleProperties::get_direct_property(PropertyNameAndI
 
         auto abstract_element = *owner_node();
 
-        // https://www.w3.org/TR/cssom-1/#dom-window-getcomputedstyle
-        // NB: This is a partial enforcement of step 5 ("If elt is connected, ...")
-        if (!abstract_element.element().is_connected())
+        // https://drafts.csswg.org/cssom/#dom-window-getcomputedstyle
+        // NB: This is a partial enforcement of step 5:
+        // If [...] elt is connected, part of the flat tree, and its shadow-including root has a browsing context which
+        // either doesn't have a browsing context container, or whose browsing context container is being rendered.
+        auto& element = abstract_element.element();
+        if (!element.is_connected())
             return {};
+        auto browsing_context = element.shadow_including_root().document().browsing_context();
+        if (!browsing_context)
+            return {};
+        // FIXME: Check if the element is part of the flat tree.
+        // FIXME: Check that the browsing context either doesn't have a browsing context container, or that its
+        //        browsing context container is being rendered.
 
-        Layout::NodeWithStyle* layout_node = abstract_element.layout_node();
+        // NB: We grab the layout node before deciding whether update_layout() is needed.
+        //     For properties that don't need layout or a layout node (the else branch below),
+        //     we skip update_layout() entirely and use whatever layout node already exists.
+        //     For the other paths, we call update_layout() and re-fetch below.
+        Layout::NodeWithStyle* layout_node = abstract_element.unsafe_layout_node();
 
-        // FIXME: Be smarter about updating layout if there's no layout node.
-        //        We may legitimately have no layout node if we're not visible, but this protects against situations
-        //        where we're requesting the computed style before layout has happened.
-        if (!layout_node || property_needs_layout_for_getcomputedstyle(property_id)) {
+        // Determine what work is needed for this property:
+        // 1. Properties that need layout computation (used values) - always run update_layout()
+        // 2. Properties that need a layout node for special resolution - ensure layout node exists
+        // 3. Everything else - just update_style() and return computed value
+        bool const needs_layout = property_needs_layout_for_getcomputedstyle(property_id);
+        bool const needs_layout_node = property_needs_layout_node_for_resolved_value(property_id) || property_is_logical_alias(property_id) || property_is_shorthand(property_id);
+
+        if (needs_layout || needs_layout_node) {
+            // Properties that need layout computation or layout node for special resolution
+            // always need update_layout() to ensure both style and layout tree are up to date.
             abstract_element.document().update_layout(DOM::UpdateLayoutReason::ResolvedCSSStyleDeclarationProperty);
             layout_node = abstract_element.layout_node();
-        } else {
-            // FIXME: If we had a way to update style for a single element, this would be a good place to use it.
+        } else if (abstract_element.document().element_needs_style_update(abstract_element)) {
+            // Just ensure styles are up to date.
             abstract_element.document().update_style();
         }
 
@@ -541,12 +586,23 @@ Optional<StyleProperty> CSSStyleProperties::get_direct_property(PropertyNameAndI
                     .value = maybe_value.release_nonnull(),
                 };
             }
+            // FIXME: Currently, to get the initial value for a registered custom property we have to look at the document.
+            //        These should be cascaded like other properties.
+            if (auto maybe_value = abstract_element.document().get_registered_custom_property(property_name_and_id.name()); maybe_value.has_value() && maybe_value->initial_value) {
+                return StyleProperty {
+                    .property_id = property_id,
+                    .value = *maybe_value->initial_value,
+                };
+            }
+
             return {};
         }
 
         if (!layout_node) {
-            auto style = abstract_element.document().style_computer().compute_style(abstract_element);
-
+            // Seed the ancestor chain before this one-off style computation, so
+            // ancestor-dependent selectors still match for no `layout_node`
+            // queries (for example `.outer .inner .target`).
+            auto style = abstract_element.document().style_computer().compute_style_with_seeded_ancestors(abstract_element);
             return StyleProperty {
                 .property_id = property_id,
                 .value = style->property(property_id),
@@ -574,11 +630,12 @@ Optional<StyleProperty> CSSStyleProperties::get_direct_property(PropertyNameAndI
 
 static RefPtr<StyleValue const> resolve_color_style_value(StyleValue const& style_value, Color computed_color)
 {
-    if (style_value.is_color_function())
+    if (style_value.is_color_function() && as<ColorFunctionStyleValue>(style_value).serializes_as_color_function())
         return style_value;
     if (style_value.is_color()) {
         auto& color_style_value = static_cast<ColorStyleValue const&>(style_value);
-        if (first_is_one_of(color_style_value.color_type(), ColorStyleValue::ColorType::Lab, ColorStyleValue::ColorType::OKLab, ColorStyleValue::ColorType::LCH, ColorStyleValue::ColorType::OKLCH))
+        if (auto color_type = color_style_value.color_type();
+            color_type.has_value() && first_is_one_of(*color_type, ColorStyleValue::ColorType::Lab, ColorStyleValue::ColorType::OKLab, ColorStyleValue::ColorType::LCH, ColorStyleValue::ColorType::OKLCH))
             return style_value;
     }
 
@@ -600,6 +657,14 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
             dbgln("FIXME: Support getting used value for property `{}` on {}", string_from_property_id(property_id), layout_node.debug_description());
         }
         return {};
+    };
+
+    auto used_size_for_property = [&layout_node, &used_value_for_property]<typename ContentBoxGetter, typename BorderBoxGetter>(ContentBoxGetter content_box_getter, BorderBoxGetter border_box_getter) -> Optional<CSSPixels> {
+        return used_value_for_property([&layout_node, content_box_getter, border_box_getter](Painting::PaintableBox const& paintable_box) {
+            if (layout_node.computed_values().box_sizing() == BoxSizing::BorderBox)
+                return border_box_getter(paintable_box);
+            return content_box_getter(paintable_box);
+        });
     };
 
     auto& element = owner_node()->element();
@@ -710,7 +775,9 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
         // display property is not none or contents, then the resolved value is the used value.
         // Otherwise the resolved value is the computed value.
     case PropertyID::Height: {
-        auto maybe_used_height = used_value_for_property([](auto const& paintable_box) { return paintable_box.content_height(); });
+        auto maybe_used_height = used_size_for_property(
+            [](auto const& paintable_box) { return paintable_box.content_height(); },
+            [](auto const& paintable_box) { return paintable_box.absolute_border_box_rect().height(); });
         if (maybe_used_height.has_value())
             return style_value_for_size(Size::make_px(maybe_used_height.release_value()));
         return style_value_for_size(layout_node.computed_values().height());
@@ -748,7 +815,9 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
             return LengthStyleValue::create(Length::make_px(maybe_used_value.release_value()));
         return style_value_for_length_percentage_or_auto(layout_node.computed_values().padding().top());
     case PropertyID::Width: {
-        auto maybe_used_width = used_value_for_property([](auto const& paintable_box) { return paintable_box.content_width(); });
+        auto maybe_used_width = used_size_for_property(
+            [](auto const& paintable_box) { return paintable_box.content_width(); },
+            [](auto const& paintable_box) { return paintable_box.absolute_border_box_rect().width(); });
         if (maybe_used_width.has_value())
             return style_value_for_size(Size::make_px(maybe_used_width.release_value()));
         return style_value_for_size(layout_node.computed_values().width());
@@ -955,10 +1024,6 @@ RefPtr<StyleValue const> CSSStyleProperties::style_value_for_computed_property(L
                 if (auto used_values_for_grid_template_rows = paintable_box.used_values_for_grid_template_rows()) {
                     return used_values_for_grid_template_rows;
                 }
-            }
-        } else if (property_id == PropertyID::ZIndex) {
-            if (auto z_index = layout_node.computed_values().z_index(); z_index.has_value()) {
-                return NumberStyleValue::create(z_index.value());
             }
         }
 
@@ -1309,7 +1374,6 @@ String CSSStyleProperties::serialize_a_css_value(Vector<StyleProperty> list) con
         return ShorthandStyleValue::create(shorthand_id, longhand_ids, longhand_values);
     };
 
-    // FIXME: Not all shorthands are represented by ShorthandStyleValue, we still need to add support for those that don't.
     return make_shorthand_value(shorthand.value())->to_string(SerializationMode::Normal);
 }
 

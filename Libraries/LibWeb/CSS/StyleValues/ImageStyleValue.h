@@ -11,7 +11,6 @@
 
 #include <LibGC/Weak.h>
 #include <LibJS/Heap/Cell.h>
-#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/StyleValues/AbstractImageStyleValue.h>
 #include <LibWeb/CSS/URL.h>
 #include <LibWeb/Forward.h>
@@ -43,8 +42,10 @@ public:
 
     virtual void visit_edges(JS::Cell::Visitor& visitor) const override;
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
     virtual bool equals(StyleValue const& other) const override;
+
+    virtual bool is_computationally_independent() const override { return true; }
 
     virtual void load_any_resources(DOM::Document&) override;
 

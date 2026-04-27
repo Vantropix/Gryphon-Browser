@@ -5,20 +5,20 @@
  */
 
 #include <AK/TypeCasts.h>
-#include <LibJS/Bytecode/BuiltinAbstractOperationsEnabled.h>
-#include <LibJS/Bytecode/Generator.h>
-#include <LibJS/Bytecode/Interpreter.h>
+#include <LibJS/Bytecode/Debug.h>
 #include <LibJS/Runtime/AsyncFunctionDriverWrapper.h>
 #include <LibJS/Runtime/AsyncGenerator.h>
 #include <LibJS/Runtime/GeneratorObject.h>
 #include <LibJS/Runtime/NativeJavaScriptBackedFunction.h>
+#include <LibJS/Runtime/VM.h>
+#include <LibJS/RustIntegration.h>
 
 namespace JS {
 
 GC_DEFINE_ALLOCATOR(NativeJavaScriptBackedFunction);
 
 // 10.3.3 CreateBuiltinFunction ( behaviour, length, name, additionalInternalSlotsList [ , realm [ , prototype [ , prefix ] ] ] ), https://tc39.es/ecma262/#sec-createbuiltinfunction
-GC::Ref<NativeJavaScriptBackedFunction> NativeJavaScriptBackedFunction::create(Realm& realm, FunctionNode const& function_node, PropertyKey const& name, i32 length)
+GC::Ref<NativeJavaScriptBackedFunction> NativeJavaScriptBackedFunction::create(Realm& realm, GC::Ref<SharedFunctionInstanceData> shared_data, PropertyKey const& name, i32 length)
 {
     // 1. If realm is not present, set realm to the current Realm Record.
     // 2. If prototype is not present, set prototype to realm.[[Intrinsics]].[[%Function.prototype%]].
@@ -32,18 +32,6 @@ GC::Ref<NativeJavaScriptBackedFunction> NativeJavaScriptBackedFunction::create(R
     // 7. Set func.[[Extensible]] to true.
     // 8. Set func.[[Realm]] to realm.
     // 9. Set func.[[InitialName]] to null.
-    auto shared_data = realm.heap().allocate<SharedFunctionInstanceData>(realm.vm(),
-        function_node.kind(),
-        function_node.name(),
-        function_node.function_length(),
-        function_node.parameters(),
-        *function_node.body_ptr(),
-        function_node.source_text(),
-        function_node.is_strict_mode(),
-        function_node.is_arrow_function(),
-        function_node.parsing_insights(),
-        function_node.local_variables_names());
-
     auto function = realm.create<NativeJavaScriptBackedFunction>(shared_data, *prototype);
 
     function->unsafe_set_shape(realm.intrinsics().native_function_shape());
@@ -61,7 +49,7 @@ GC::Ref<NativeJavaScriptBackedFunction> NativeJavaScriptBackedFunction::create(R
     return function;
 }
 
-NativeJavaScriptBackedFunction::NativeJavaScriptBackedFunction(GC::Ref<SharedFunctionInstanceData const> shared_function_instance_data, Object& prototype)
+NativeJavaScriptBackedFunction::NativeJavaScriptBackedFunction(GC::Ref<SharedFunctionInstanceData> shared_function_instance_data, Object& prototype)
     : NativeFunction(shared_function_instance_data->m_name, prototype)
     , m_shared_function_instance_data(shared_function_instance_data)
 {
@@ -73,19 +61,19 @@ void NativeJavaScriptBackedFunction::visit_edges(Visitor& visitor)
     visitor.visit(m_shared_function_instance_data);
 }
 
-ThrowCompletionOr<void> NativeJavaScriptBackedFunction::get_stack_frame_size(size_t& registers_and_constants_and_locals_count, size_t& argument_count)
+void NativeJavaScriptBackedFunction::get_stack_frame_info(size_t& registers_and_locals_count, ReadonlySpan<Value>& constants, size_t& argument_count)
 {
     auto& bytecode_executable = this->bytecode_executable();
-    registers_and_constants_and_locals_count = bytecode_executable.number_of_registers + bytecode_executable.constants.size() + bytecode_executable.local_variable_names.size();
+    registers_and_locals_count = bytecode_executable.registers_and_locals_count;
+    constants = bytecode_executable.constants;
     argument_count = max(argument_count, m_shared_function_instance_data->m_function_length);
-    return {};
 }
 
 ThrowCompletionOr<Value> NativeJavaScriptBackedFunction::call()
 {
     auto& vm = this->vm();
 
-    auto result = TRY(vm.bytecode_interpreter().run_executable(vm.running_execution_context(), bytecode_executable(), {}));
+    auto result = TRY(vm.run_executable(vm.running_execution_context(), bytecode_executable(), {}));
 
     auto kind = this->kind();
     if (kind == FunctionKind::Normal)
@@ -93,12 +81,11 @@ ThrowCompletionOr<Value> NativeJavaScriptBackedFunction::call()
 
     auto& realm = *vm.current_realm();
     if (kind == FunctionKind::AsyncGenerator)
-        return AsyncGenerator::create(realm, result, GC::Ref { *this }, vm.running_execution_context().copy());
+        return AsyncGenerator::create(realm, GC::Ref { *this }, vm.running_execution_context().copy());
 
-    auto generator_object = GeneratorObject::create(realm, result, GC::Ref { *this }, vm.running_execution_context().copy());
+    auto generator_object = GeneratorObject::create(realm, GC::Ref { *this }, vm.running_execution_context().copy());
 
-    // NOTE: Async functions are entirely transformed to generator functions, and wrapped in a custom driver that returns a promise
-    //       See AwaitExpression::generate_bytecode() for the transformation.
+    // NOTE: Async functions are entirely transformed to generator functions, and wrapped in a custom driver that returns a promise.
     if (kind == FunctionKind::Async)
         return AsyncFunctionDriverWrapper::create(realm, generator_object);
 
@@ -108,9 +95,16 @@ ThrowCompletionOr<Value> NativeJavaScriptBackedFunction::call()
 
 Bytecode::Executable& NativeJavaScriptBackedFunction::bytecode_executable()
 {
-    auto& executable = m_shared_function_instance_data->m_executable;
+    auto executable = m_shared_function_instance_data->m_executable;
     if (!executable) {
-        executable = MUST(Bytecode::compile(vm(), m_shared_function_instance_data, Bytecode::BuiltinAbstractOperationsEnabled::Yes));
+        auto rust_executable = RustIntegration::compile_function(vm(), *m_shared_function_instance_data, true);
+        VERIFY(rust_executable);
+        m_shared_function_instance_data->set_executable(rust_executable);
+        executable = rust_executable;
+        executable->name = m_shared_function_instance_data->m_name;
+        if (Bytecode::g_dump_bytecode)
+            executable->dump();
+        m_shared_function_instance_data->clear_compile_inputs();
     }
 
     return *executable;

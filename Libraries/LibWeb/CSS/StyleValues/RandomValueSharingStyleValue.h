@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
@@ -39,7 +38,7 @@ public:
 
     double random_base_value() const;
 
-    virtual String to_string(SerializationMode serialization_mode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(RandomValueSharingStyleValue const& other) const
     {
@@ -48,6 +47,8 @@ public:
             && m_name == other.m_name
             && m_element_shared == other.m_element_shared;
     }
+
+    virtual bool is_computationally_independent() const override { return !m_fixed_value || m_fixed_value->is_computationally_independent(); }
 
 private:
     explicit RandomValueSharingStyleValue(RefPtr<StyleValue const> fixed_value, bool is_auto, Optional<FlyString> name, bool element_shared)

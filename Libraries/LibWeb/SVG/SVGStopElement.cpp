@@ -6,7 +6,8 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SVGStopElementPrototype.h>
+#include <LibWeb/Bindings/SVGStopElement.h>
+#include <LibWeb/CSS/CascadedProperties.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/SVG/AttributeNames.h>
@@ -31,6 +32,7 @@ bool SVGStopElement::is_presentational_hint(FlyString const& name) const
 
 void SVGStopElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
 {
+    Base::apply_presentational_hints(cascaded_properties);
     CSS::Parser::ParsingParams parsing_context { document(), CSS::Parser::ParsingMode::SVGPresentationAttribute };
     for_each_attribute([&](auto& name, auto& value) {
         if (name == SVG::AttributeNames::stopColor) {
@@ -48,7 +50,7 @@ void SVGStopElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties>
 Gfx::Color SVGStopElement::stop_color()
 {
     if (auto computed_properties = this->computed_properties())
-        return computed_properties->color_or_fallback(CSS::PropertyID::StopColor, CSS::ColorResolutionContext::for_element({ *this }), CSS::InitialValues::stop_color());
+        return computed_properties->color(CSS::PropertyID::StopColor, CSS::ColorResolutionContext::for_element({ *this }));
     return CSS::InitialValues::stop_color();
 }
 

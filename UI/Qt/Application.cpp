@@ -10,13 +10,19 @@
 #include <UI/Qt/EventLoopImplementationQt.h>
 #include <UI/Qt/Settings.h>
 #include <UI/Qt/StringUtils.h>
+#include <UI/Qt/WebContentView.h>
 
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileOpenEvent>
+#include <QFormLayout>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QStandardPaths>
 
 #if defined(AK_OS_WINDOWS)
 #    include <AK/Windows.h>
@@ -144,9 +150,16 @@ Optional<WebView::ViewImplementation&> Application::open_blank_new_tab(Web::HTML
     return tab.view();
 }
 
-Optional<ByteString> Application::ask_user_for_download_folder() const
+Optional<ByteString> Application::ask_user_for_download_path(StringView file) const
 {
-    auto path = QFileDialog::getExistingDirectory(nullptr, "Select download directory", QDir::homePath());
+    auto default_path = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+
+    if (default_path.isNull() || default_path.isEmpty())
+        default_path = qstring_from_ak_string(file);
+    else
+        default_path = QDir { default_path }.filePath(qstring_from_ak_string(file));
+
+    auto path = QFileDialog::getSaveFileName(nullptr, "Select save location", default_path);
     if (path.isNull())
         return {};
 
@@ -218,6 +231,175 @@ void Application::insert_clipboard_entry(Web::Clipboard::SystemClipboardRepresen
 
     auto* clipboard = QGuiApplication::clipboard();
     clipboard->setMimeData(mime_data);
+}
+
+void Application::rebuild_bookmarks_menu() const
+{
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (auto* window = as_if<BrowserWindow>(widget))
+            window->rebuild_bookmarks_menu();
+    }
+}
+
+void Application::update_bookmarks_bar_display(bool show_bookmarks_bar) const
+{
+    for (auto* widget : QApplication::topLevelWidgets()) {
+        if (auto* window = as_if<BrowserWindow>(widget))
+            window->update_bookmarks_bar_display(show_bookmarks_bar);
+    }
+}
+
+void Application::show_bookmark_context_menu(Gfx::IntPoint content_position, Optional<WebView::BookmarkItem const&> item, Optional<String const&> target_folder_id)
+{
+    if (auto* active_tab = this->active_tab()) {
+        auto position = active_tab->view().mapToGlobal(QPoint { content_position.x(), content_position.y() });
+        active_tab->bookmarks_bar().show_context_menu(position, item, target_folder_id);
+    }
+}
+
+Optional<Application::BookmarkID> Application::bookmark_item_id_for_context_menu() const
+{
+    if (auto* active_tab = this->active_tab()) {
+        auto const& bookmarks_bar = active_tab->bookmarks_bar();
+
+        return Application::BookmarkID {
+            .id = bookmarks_bar.selected_bookmark_menu_item_id(),
+            .target_folder_id = bookmarks_bar.selected_bookmark_menu_target_folder_id(),
+        };
+    }
+
+    return {};
+}
+
+template<typename PromiseType>
+static NonnullRefPtr<PromiseType> display_add_or_edit_bookmark_dialog(
+    QWidget* parent,
+    QString const& dialog_title,
+    Optional<URL::URL const&> current_url,
+    Optional<String const&> current_title)
+{
+    auto promise = PromiseType::construct();
+
+    auto* dialog = new QDialog(parent);
+    dialog->resize(400, dialog->height());
+    dialog->setWindowTitle(dialog_title);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+
+    auto* url_edit = new QLineEdit(dialog);
+    auto* title_edit = new QLineEdit(dialog);
+
+    if (current_url.has_value())
+        url_edit->setText(qstring_from_ak_string(current_url->serialize()));
+    if (current_title.has_value())
+        title_edit->setText(qstring_from_ak_string(*current_title));
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+
+    auto* layout = new QFormLayout(dialog);
+    layout->addRow("URL:", url_edit);
+    layout->addRow("Title:", title_edit);
+    layout->addRow(buttons);
+
+    QObject::connect(dialog, &QDialog::finished, [promise, url_edit = QPointer { url_edit }, title_edit = QPointer { title_edit }](auto result) {
+        if (result != QDialog::Accepted || !url_edit || !title_edit) {
+            promise->reject(Error::from_errno(ECANCELED));
+            return;
+        }
+
+        auto url = WebView::sanitize_url(ak_string_from_qstring(url_edit->text()));
+        if (!url.has_value()) {
+            promise->reject(Error::from_errno(EINVAL));
+            return;
+        }
+
+        Optional<String> title;
+        if (auto title_text = ak_string_from_qstring(title_edit->text()); !title_text.is_empty())
+            title = move(title_text);
+
+        promise->resolve(WebView::BookmarkItem::Bookmark {
+            .url = url.release_value(),
+            .title = move(title),
+            .favicon_base64_png = {},
+        });
+    });
+
+    dialog->open();
+    return promise;
+}
+
+NonnullRefPtr<Application::BookmarkPromise> Application::display_add_bookmark_dialog() const
+{
+    Optional<URL::URL> current_url;
+    Optional<String> current_title;
+
+    if (auto view = active_web_view(); view.has_value()) {
+        current_url = view->url();
+        current_title = view->title().to_utf8();
+    }
+
+    return display_add_or_edit_bookmark_dialog<BookmarkPromise>(active_tab(), "Add Bookmark", current_url, current_title);
+}
+
+NonnullRefPtr<Application::BookmarkPromise> Application::display_edit_bookmark_dialog(WebView::BookmarkItem::Bookmark const& current_bookmark) const
+{
+    return display_add_or_edit_bookmark_dialog<BookmarkPromise>(active_tab(), "Edit Bookmark", current_bookmark.url, current_bookmark.title);
+}
+
+template<typename PromiseType>
+static NonnullRefPtr<PromiseType> display_add_or_edit_bookmark_folder_dialog(
+    QWidget* parent,
+    QString const& dialog_title,
+    Optional<String const&> current_title)
+{
+    auto promise = PromiseType::construct();
+
+    auto* dialog = new QDialog(parent);
+    dialog->resize(400, dialog->height());
+    dialog->setWindowTitle(dialog_title);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+
+    auto* title_edit = new QLineEdit(dialog);
+    if (current_title.has_value())
+        title_edit->setText(qstring_from_ak_string(*current_title));
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+
+    auto* layout = new QFormLayout(dialog);
+    layout->addRow("Title:", title_edit);
+    layout->addRow(buttons);
+
+    QObject::connect(dialog, &QDialog::finished, [promise, title_edit = QPointer { title_edit }](auto result) {
+        if (result != QDialog::Accepted || !title_edit) {
+            promise->reject(Error::from_errno(ECANCELED));
+            return;
+        }
+
+        Optional<String> title;
+        if (auto title_text = ak_string_from_qstring(title_edit->text()); !title_text.is_empty())
+            title = move(title_text);
+
+        promise->resolve(WebView::BookmarkItem::Folder {
+            .title = move(title),
+            .children = {},
+        });
+    });
+
+    dialog->open();
+    return promise;
+}
+
+NonnullRefPtr<Application::BookmarkFolderPromise> Application::display_add_bookmark_folder_dialog() const
+{
+    return display_add_or_edit_bookmark_folder_dialog<BookmarkFolderPromise>(active_tab(), "Add Folder", {});
+}
+
+NonnullRefPtr<Application::BookmarkFolderPromise> Application::display_edit_bookmark_folder_dialog(WebView::BookmarkItem::Folder const& current_folder) const
+{
+    return display_add_or_edit_bookmark_folder_dialog<BookmarkFolderPromise>(active_tab(), "Edit Folder", current_folder.title);
 }
 
 void Application::on_devtools_enabled() const

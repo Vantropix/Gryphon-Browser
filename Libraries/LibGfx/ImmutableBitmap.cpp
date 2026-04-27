@@ -1,18 +1,25 @@
 /*
  * Copyright (c) 2023-2024, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2026, Gregory Bertilson <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/OwnPtr.h>
 #include <LibGfx/ImmutableBitmap.h>
 #include <LibGfx/PaintingSurface.h>
+#include <LibGfx/SkiaBackendContext.h>
 #include <LibGfx/SkiaUtils.h>
+#include <LibGfx/YUVData.h>
 
 #include <core/SkBitmap.h>
 #include <core/SkCanvas.h>
 #include <core/SkColorSpace.h>
 #include <core/SkImage.h>
 #include <core/SkSurface.h>
+#include <core/SkYUVAPixmaps.h>
+#include <gpu/ganesh/GrDirectContext.h>
+#include <gpu/ganesh/SkImageGanesh.h>
 
 namespace Gfx {
 
@@ -29,9 +36,10 @@ StringView export_format_name(ExportFormat format)
 }
 
 struct ImmutableBitmapImpl {
+    RefPtr<SkiaBackendContext> context;
     sk_sp<SkImage> sk_image;
     SkBitmap sk_bitmap;
-    Variant<NonnullRefPtr<Gfx::Bitmap>, NonnullRefPtr<Gfx::PaintingSurface>, Empty> source;
+    RefPtr<Gfx::Bitmap const> bitmap;
     ColorSpace color_space;
 };
 
@@ -112,6 +120,9 @@ static SkColorType export_format_to_skia_color_type(ExportFormat format)
 
 ErrorOr<BitmapExportResult> ImmutableBitmap::export_to_byte_buffer(ExportFormat format, int flags, Optional<int> target_width, Optional<int> target_height) const
 {
+    if (SkiaBackendContext::the() && !ensure_sk_image(*SkiaBackendContext::the()))
+        return Error::from_string_literal("Failed to create a Skia image for this ImmutableBitmap");
+
     int width = target_width.value_or(this->width());
     int height = target_height.value_or(this->height());
 
@@ -135,7 +146,7 @@ ErrorOr<BitmapExportResult> ImmutableBitmap::export_to_byte_buffer(ExportFormat 
     if (width > 0 && height > 0) {
         if (format == ExportFormat::RGB888) {
             // 24 bit RGB is not supported by Skia, so we need to handle this format ourselves.
-            auto raw_buffer = buffer.data();
+            auto* raw_buffer = buffer.data();
             for (auto y = 0; y < height; y++) {
                 auto target_y = flags & ExportFlags::FlipY ? height - y - 1 : y;
                 for (auto x = 0; x < width; x++) {
@@ -176,14 +187,85 @@ ErrorOr<BitmapExportResult> ImmutableBitmap::export_to_byte_buffer(ExportFormat 
 
 RefPtr<Gfx::Bitmap const> ImmutableBitmap::bitmap() const
 {
-    // FIXME: Implement for PaintingSurface
-    return m_impl->source.get<NonnullRefPtr<Gfx::Bitmap>>();
+    if (!m_impl->bitmap && m_impl->sk_image) {
+        auto bitmap = MUST(Gfx::Bitmap::create(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, { m_impl->sk_image->width(), m_impl->sk_image->height() }));
+        auto image_info = SkImageInfo::Make(bitmap->width(), bitmap->height(), kBGRA_8888_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB());
+        SkPixmap pixmap(image_info, bitmap->begin(), bitmap->pitch());
+        if (m_impl->context)
+            m_impl->context->lock();
+        m_impl->sk_image->readPixels(pixmap, 0, 0);
+        if (m_impl->context)
+            m_impl->context->unlock();
+        m_impl->bitmap = move(bitmap);
+    }
+    return m_impl->bitmap;
+}
+
+ErrorOr<NonnullRefPtr<ImmutableBitmap>> ImmutableBitmap::create_from_yuv(NonnullOwnPtr<YUVData> yuv_data)
+{
+    auto color_space = TRY(ColorSpace::from_cicp(yuv_data->cicp()));
+
+    auto context = SkiaBackendContext::the();
+    auto* gr_context = context ? context->sk_context() : nullptr;
+
+    if (!gr_context) {
+        auto bitmap = TRY(yuv_data->to_bitmap());
+        return create(move(bitmap), move(color_space));
+    }
+
+    if (yuv_data->bit_depth() > 8)
+        yuv_data->expand_samples_to_full_16_bit_range();
+
+    context->lock();
+    auto sk_image = SkImages::TextureFromYUVAPixmaps(
+        gr_context,
+        yuv_data->make_pixmaps(),
+        skgpu::Mipmapped::kNo,
+        false,
+        color_space.color_space<sk_sp<SkColorSpace>>());
+    context->unlock();
+
+    if (!sk_image)
+        return Error::from_string_literal("Failed to upload YUV data");
+
+    ImmutableBitmapImpl impl {
+        .context = context,
+        .sk_image = move(sk_image),
+        .sk_bitmap = {},
+        .bitmap = nullptr,
+        .color_space = {},
+    };
+    return adopt_ref(*new ImmutableBitmap(make<ImmutableBitmapImpl>(move(impl))));
+}
+
+bool ImmutableBitmap::ensure_sk_image(SkiaBackendContext& context) const
+{
+    if (m_impl->context) {
+        VERIFY(m_impl->context.ptr() == &context);
+        return true;
+    }
+
+    context.lock();
+    ScopeGuard unlock_guard = [&context] {
+        context.unlock();
+    };
+
+    auto* gr_context = context.sk_context();
+
+    VERIFY(m_impl->sk_image);
+    if (!gr_context)
+        return true; // No GPU, but raster image is still usable
+    auto gpu_image = SkImages::TextureFromImage(gr_context, m_impl->sk_image.get(), skgpu::Mipmapped::kNo, skgpu::Budgeted::kYes);
+    if (gpu_image) {
+        m_impl->context = context;
+        m_impl->sk_image = move(gpu_image);
+    }
+    return true;
 }
 
 Color ImmutableBitmap::get_pixel(int x, int y) const
 {
-    // FIXME: Implement for PaintingSurface
-    return m_impl->source.get<NonnullRefPtr<Gfx::Bitmap>>()->get_pixel(x, y);
+    return m_impl->bitmap->get_pixel(x, y);
 }
 
 static SkAlphaType to_skia_alpha_type(Gfx::AlphaType alpha_type)
@@ -198,44 +280,79 @@ static SkAlphaType to_skia_alpha_type(Gfx::AlphaType alpha_type)
     }
 }
 
-NonnullRefPtr<ImmutableBitmap> ImmutableBitmap::create(NonnullRefPtr<Bitmap> bitmap, ColorSpace color_space)
+NonnullRefPtr<ImmutableBitmap> ImmutableBitmap::create(NonnullRefPtr<Bitmap const> const& bitmap, ColorSpace color_space)
 {
-    ImmutableBitmapImpl impl;
+    SkBitmap sk_bitmap;
     auto info = SkImageInfo::Make(bitmap->width(), bitmap->height(), to_skia_color_type(bitmap->format()), to_skia_alpha_type(bitmap->alpha_type()), color_space.color_space<sk_sp<SkColorSpace>>());
-    impl.sk_bitmap.installPixels(info, const_cast<void*>(static_cast<void const*>(bitmap->scanline(0))), bitmap->pitch());
-    impl.sk_bitmap.setImmutable();
-    impl.sk_image = impl.sk_bitmap.asImage();
-    impl.source = bitmap;
-    impl.color_space = move(color_space);
-    return adopt_ref(*new ImmutableBitmap(make<ImmutableBitmapImpl>(impl)));
+    sk_bitmap.installPixels(info, const_cast<void*>(static_cast<void const*>(bitmap->scanline(0))), bitmap->pitch());
+    sk_bitmap.setImmutable();
+    auto sk_image = sk_bitmap.asImage();
+
+    ImmutableBitmapImpl impl {
+        .context = nullptr,
+        .sk_image = move(sk_image),
+        .sk_bitmap = move(sk_bitmap),
+        .bitmap = bitmap,
+        .color_space = move(color_space),
+    };
+    return adopt_ref(*new ImmutableBitmap(make<ImmutableBitmapImpl>(move(impl))));
 }
 
-NonnullRefPtr<ImmutableBitmap> ImmutableBitmap::create(NonnullRefPtr<Bitmap> bitmap, AlphaType alpha_type, ColorSpace color_space)
+NonnullRefPtr<ImmutableBitmap> ImmutableBitmap::create(NonnullRefPtr<Bitmap const> const& bitmap, AlphaType alpha_type, ColorSpace color_space)
 {
     // Convert the source bitmap to the right alpha type on a mismatch. We want to do this when converting from a
     // Bitmap to an ImmutableBitmap, since at that point we usually know the right alpha type to use in context.
-    auto source_bitmap = bitmap;
-    if (source_bitmap->alpha_type() != alpha_type) {
-        source_bitmap = MUST(bitmap->clone());
-        source_bitmap->set_alpha_type_destructive(alpha_type);
-    }
+    auto converted_bitmap = [&] -> NonnullRefPtr<Bitmap const> {
+        if (bitmap->alpha_type() == alpha_type)
+            return bitmap;
+        auto new_bitmap = MUST(bitmap->clone());
+        new_bitmap->set_alpha_type_destructive(alpha_type);
+        return new_bitmap;
+    }();
 
-    return create(source_bitmap, move(color_space));
+    return create(converted_bitmap, move(color_space));
 }
 
-NonnullRefPtr<ImmutableBitmap> ImmutableBitmap::create_snapshot_from_painting_surface(NonnullRefPtr<PaintingSurface> painting_surface)
+NonnullRefPtr<ImmutableBitmap> ImmutableBitmap::create_snapshot_from_painting_surface(NonnullRefPtr<PaintingSurface> const& painting_surface)
 {
-    ImmutableBitmapImpl impl;
-    impl.sk_image = painting_surface->sk_image_snapshot<sk_sp<SkImage>>();
-    impl.source = painting_surface;
-    return adopt_ref(*new ImmutableBitmap(make<ImmutableBitmapImpl>(impl)));
+    painting_surface->lock_context();
+    auto sk_image = painting_surface->sk_image_snapshot<sk_sp<SkImage>>();
+    painting_surface->unlock_context();
+
+    ImmutableBitmapImpl impl {
+        .context = painting_surface->skia_backend_context(),
+        .sk_image = move(sk_image),
+        .sk_bitmap = {},
+        .bitmap = nullptr,
+        .color_space = {},
+    };
+    return adopt_ref(*new ImmutableBitmap(make<ImmutableBitmapImpl>(move(impl))));
 }
 
-ImmutableBitmap::ImmutableBitmap(NonnullOwnPtr<ImmutableBitmapImpl> impl)
+ImmutableBitmap::ImmutableBitmap(NonnullOwnPtr<ImmutableBitmapImpl>&& impl)
     : m_impl(move(impl))
 {
 }
 
-ImmutableBitmap::~ImmutableBitmap() = default;
+ImmutableBitmap::~ImmutableBitmap()
+{
+    lock_context();
+    m_impl->sk_image = nullptr;
+    unlock_context();
+}
+
+void ImmutableBitmap::lock_context()
+{
+    auto& context = m_impl->context;
+    if (context)
+        context->lock();
+}
+
+void ImmutableBitmap::unlock_context()
+{
+    auto& context = m_impl->context;
+    if (context)
+        context->unlock();
+}
 
 }

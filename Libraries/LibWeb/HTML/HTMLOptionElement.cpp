@@ -7,8 +7,10 @@
 
 #include <AK/StringBuilder.h>
 #include <LibWeb/ARIA/Roles.h>
-#include <LibWeb/Bindings/HTMLOptionElementPrototype.h>
+#include <LibWeb/Bindings/HTMLOptionElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/DOM/Text.h>
 #include <LibWeb/HTML/HTMLDataListElement.h>
@@ -52,7 +54,7 @@ void HTMLOptionElement::update_selection_label()
 {
     if (selected()) {
         if (auto* select_element = first_ancestor_of_type<HTMLSelectElement>()) {
-            select_element->update_inner_text_element({});
+            select_element->clone_selected_option_into_select_button();
         }
     }
 }
@@ -95,6 +97,9 @@ void HTMLOptionElement::set_selected_internal(bool selected)
     m_selected = selected;
     if (selected)
         m_selectedness_update_index = m_next_selectedness_update_index++;
+
+    // this is here to invalidate the cache on the HTMLCollection in HTMLSelectElement::selected_options
+    document().bump_dom_tree_version();
 }
 
 // https://html.spec.whatwg.org/multipage/form-elements.html#dom-option-value
@@ -335,16 +340,27 @@ void HTMLOptionElement::inserted()
     update_nearest_select_element();
 }
 
-void HTMLOptionElement::removed_from(Node* old_parent, Node& old_root)
+// https://html.spec.whatwg.org/multipage/form-elements.html#the-option-element:html-element-removing-steps
+void HTMLOptionElement::removed_from(IsSubtreeRoot is_subtree_root, Node* old_ancestor, Node& old_root)
 {
-    Base::removed_from(old_parent, old_root);
+    Base::removed_from(is_subtree_root, old_ancestor, old_root);
 
-    // The option HTML element removing steps, given removedOption and oldParent,
-    // are to run update an option's nearest ancestor select given removedOption.
+    // The option HTML element removing steps, given removedNode, isSubtreeRoot, and oldAncestor are to run update an
+    // option's nearest ancestor select given removedNode.
     update_nearest_select_element();
 }
 
-void HTMLOptionElement::children_changed(ChildrenChangedMetadata const* metadata)
+// https://html.spec.whatwg.org/multipage/form-elements.html#the-option-element:html-element-moving-steps
+void HTMLOptionElement::moved_from(IsSubtreeRoot is_subtree_root, GC::Ptr<Node> old_ancestor)
+{
+    Base::moved_from(is_subtree_root, old_ancestor);
+
+    // The option HTML element moving steps, given movedNode, isSubtreeRoot, and oldAncestor are to run update an
+    // option's nearest ancestor select given movedNode.
+    update_nearest_select_element();
+}
+
+void HTMLOptionElement::children_changed(ChildrenChangedMetadata const& metadata)
 {
     Base::children_changed(metadata);
 

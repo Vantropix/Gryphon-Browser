@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <LibWeb/Bindings/ServiceWorkerPrototype.h>
+#include <LibWeb/Bindings/ServiceWorker.h>
 #include <LibWeb/DOM/EventTarget.h>
 
 #define ENUMERATE_SERVICE_WORKER_EVENT_HANDLERS(E)  \
@@ -18,6 +18,7 @@ namespace Web::ServiceWorker {
 // https://w3c.github.io/ServiceWorker/#serviceworker-interface
 class ServiceWorker : public DOM::EventTarget {
     WEB_PLATFORM_OBJECT(ServiceWorker, DOM::EventTarget);
+    GC_DECLARE_ALLOCATOR(ServiceWorker);
 
 public:
     [[nodiscard]] static GC::Ref<ServiceWorker> create(JS::Realm& realm, ServiceWorkerRecord*);

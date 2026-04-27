@@ -3,18 +3,15 @@
  * Copyright (c) 2021-2022, Kenneth Myhra <kennethmyhra@serenityos.org>
  * Copyright (c) 2021-2024, Sam Atkins <atkinssj@serenityos.org>
  * Copyright (c) 2022, Matthias Zimmerman <matthias291999@gmail.com>
+ * Copyright (c) 2026, Gregory Bertilson <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/ByteString.h>
-#include <AK/FixedArray.h>
 #include <AK/ScopeGuard.h>
-#include <AK/ScopedValueRollback.h>
 #include <AK/StdLibExtras.h>
-#include <AK/String.h>
 #include <AK/Vector.h>
-#include <LibCore/Environment.h>
 #include <LibCore/System.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -34,6 +31,10 @@ static int memfd_create(char const* name, unsigned int flags)
 {
     return syscall(SYS_memfd_create, name, flags);
 }
+#endif
+
+#if defined(AK_OS_LINUX)
+#    include <sys/sendfile.h>
 #endif
 
 #if defined(AK_OS_MACOS) || defined(AK_OS_IOS)
@@ -148,34 +149,31 @@ ErrorOr<int> anon_create([[maybe_unused]] size_t size, [[maybe_unused]] int opti
     // FIXME: Support more options on Linux.
     auto linux_options = ((options & O_CLOEXEC) > 0) ? MFD_CLOEXEC : 0;
     fd = memfd_create("", linux_options);
-    if (fd < 0)
-        return Error::from_errno(errno);
-    if (::ftruncate(fd, size) < 0) {
-        auto saved_errno = errno;
-        TRY(close(fd));
-        return Error::from_errno(saved_errno);
-    }
 #elif defined(SHM_ANON)
     fd = shm_open(SHM_ANON, O_RDWR | O_CREAT | options, 0600);
-    if (fd < 0)
-        return Error::from_errno(errno);
-    if (::ftruncate(fd, size) < 0) {
-        auto saved_errno = errno;
-        TRY(close(fd));
-        return Error::from_errno(saved_errno);
-    }
 #elif defined(AK_OS_BSD_GENERIC) || defined(AK_OS_HAIKU)
     static size_t shared_memory_id = 0;
 
     auto name = ByteString::formatted("/shm-{}-{}", getpid(), shared_memory_id++);
-    fd = shm_open(name.characters(), O_RDWR | O_CREAT | options, 0600);
+    // Passing O_CLOEXEC to shm_open in the oflag argument isn't POSIX-compliant and is known to be rejected
+    // in macOS 26.4+. So we filter it out here, and instead set FD_CLOEXEC via fcntl after opening.
+    fd = shm_open(name.characters(), O_RDWR | O_CREAT | (options & ~O_CLOEXEC), 0600);
 
     if (shm_unlink(name.characters()) == -1) {
         auto saved_errno = errno;
-        TRY(close(fd));
+        if (fd >= 0)
+            TRY(close(fd));
         return Error::from_errno(saved_errno);
     }
 
+    if (fd >= 0 && (options & O_CLOEXEC)) {
+        if (::fcntl(fd, F_SETFD, FD_CLOEXEC) == -1) {
+            auto saved_errno = errno;
+            TRY(close(fd));
+            return Error::from_errno(saved_errno);
+        }
+    }
+#endif
     if (fd < 0)
         return Error::from_errno(errno);
 
@@ -185,15 +183,6 @@ ErrorOr<int> anon_create([[maybe_unused]] size_t size, [[maybe_unused]] int opti
         return Error::from_errno(saved_errno);
     }
 
-    void* addr = ::mmap(NULL, size, PROT_WRITE, MAP_SHARED, fd, 0);
-    if (addr == MAP_FAILED) {
-        auto saved_errno = errno;
-        TRY(close(fd));
-        return Error::from_errno(saved_errno);
-    }
-#endif
-    if (fd < 0)
-        return Error::from_errno(errno);
     return fd;
 }
 
@@ -309,11 +298,7 @@ ErrorOr<void> ioctl(int fd, unsigned request, ...)
 {
     va_list ap;
     va_start(ap, request);
-#ifdef AK_OS_HAIKU
     void* arg = va_arg(ap, void*);
-#else
-    FlatPtr arg = va_arg(ap, FlatPtr);
-#endif
     va_end(ap);
     if (::ioctl(fd, request, arg) < 0)
         return Error::from_syscall("ioctl"sv, errno);
@@ -434,8 +419,6 @@ ErrorOr<void> symlink(StringView target, StringView link_path)
 
 ErrorOr<void> mkdir(StringView path, mode_t mode)
 {
-    if (path.is_null())
-        return Error::from_errno(EFAULT);
     ByteString path_string = path;
     if (::mkdir(path_string.characters(), mode) < 0)
         return Error::from_syscall("mkdir"sv, errno);
@@ -444,9 +427,6 @@ ErrorOr<void> mkdir(StringView path, mode_t mode)
 
 ErrorOr<void> chdir(StringView path)
 {
-    if (path.is_null())
-        return Error::from_errno(EFAULT);
-
     ByteString path_string = path;
     if (::chdir(path_string.characters()) < 0)
         return Error::from_syscall("chdir"sv, errno);
@@ -455,9 +435,6 @@ ErrorOr<void> chdir(StringView path)
 
 ErrorOr<void> rmdir(StringView path)
 {
-    if (path.is_null())
-        return Error::from_errno(EFAULT);
-
     ByteString path_string = path;
     if (::rmdir(path_string.characters()) < 0)
         return Error::from_syscall("rmdir"sv, errno);
@@ -472,21 +449,8 @@ ErrorOr<int> mkstemp(Span<char> pattern)
     return fd;
 }
 
-ErrorOr<String> mkdtemp(Span<char> pattern)
-{
-    auto* path = ::mkdtemp(pattern.data());
-    if (path == nullptr) {
-        return Error::from_errno(errno);
-    }
-
-    return String::from_utf8(StringView { path, strlen(path) });
-}
-
 ErrorOr<void> rename(StringView old_path, StringView new_path)
 {
-    if (old_path.is_null() || new_path.is_null())
-        return Error::from_errno(EFAULT);
-
     ByteString old_path_string = old_path;
     ByteString new_path_string = new_path;
     if (::rename(old_path_string.characters(), new_path_string.characters()) < 0)
@@ -496,9 +460,6 @@ ErrorOr<void> rename(StringView old_path, StringView new_path)
 
 ErrorOr<void> unlink(StringView path)
 {
-    if (path.is_null())
-        return Error::from_errno(EFAULT);
-
     ByteString path_string = path;
     if (::unlink(path_string.characters()) < 0)
         return Error::from_syscall("unlink"sv, errno);
@@ -507,15 +468,8 @@ ErrorOr<void> unlink(StringView path)
 
 ErrorOr<void> utimensat(int fd, StringView path, struct timespec const times[2], int flag)
 {
-    if (path.is_null())
-        return Error::from_errno(EFAULT);
-
-    StringBuilder builder;
-    TRY(builder.try_append(path));
-    TRY(builder.try_append('\0'));
-
-    // Note the explicit null terminators above.
-    if (::utimensat(fd, builder.string_view().characters_without_null_termination(), times, flag) < 0)
+    ByteString path_string = path;
+    if (::utimensat(fd, path_string.characters(), times, flag) < 0)
         return Error::from_syscall("utimensat"sv, errno);
     return {};
 }
@@ -696,9 +650,6 @@ ErrorOr<Array<int, 2>> pipe2(int flags)
 
 ErrorOr<void> access(StringView pathname, int mode, int flags)
 {
-    if (pathname.is_null())
-        return Error::from_syscall("access"sv, EFAULT);
-
     ByteString path_string = pathname;
     (void)flags;
 
@@ -860,13 +811,23 @@ ErrorOr<void> set_close_on_exec(int fd, bool enabled)
     return {};
 }
 
-ErrorOr<size_t> transfer_file_through_pipe(int source_fd, int target_fd, size_t source_offset, size_t source_length)
+ErrorOr<size_t> transfer_file_through_socket(int source_fd, int target_fd, size_t source_offset, size_t source_length)
 {
 #if defined(AK_OS_LINUX)
-    auto sent = ::splice(source_fd, reinterpret_cast<off_t*>(&source_offset), target_fd, nullptr, source_length, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+    auto sent = ::sendfile(target_fd, source_fd, reinterpret_cast<off_t*>(&source_offset), source_length);
     if (sent < 0)
-        return Error::from_syscall("send_file_to_pipe"sv, errno);
+        return Error::from_syscall("sendfile"sv, errno);
     return sent;
+#elif defined(AK_OS_MACOS)
+    auto sent_length = static_cast<off_t>(source_length);
+    if (sent_length == 0)
+        return 0;
+    auto result = ::sendfile(source_fd, target_fd, static_cast<off_t>(source_offset), &sent_length, nullptr, 0);
+    if (result != 0) {
+        if ((errno != EAGAIN && errno != EINTR) || sent_length == 0)
+            return Error::from_syscall("sendfile"sv, errno);
+    }
+    return sent_length;
 #else
     static auto page_size = PAGE_SIZE;
 

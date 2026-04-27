@@ -9,7 +9,6 @@
 
 #pragma once
 
-#include <AK/CharacterTypes.h>
 #include <AK/GenericLexer.h>
 #include <LibIDL/Types.h>
 
@@ -17,10 +16,7 @@ namespace IDL {
 
 class Parser {
 public:
-    Parser(ByteString filename, StringView contents, Vector<ByteString> import_base_paths);
-    Interface& parse();
-
-    Vector<ByteString> imported_files() const;
+    static Module parse(ByteString filename, StringView contents, Context& context);
 
 private:
     // https://webidl.spec.whatwg.org/#dfn-special-operation
@@ -35,12 +31,12 @@ private:
         Yes,
     };
 
-    Parser(Parser* parent, ByteString filename, StringView contents, Vector<ByteString> import_base_path);
+    Parser(ByteString filename, StringView contents, Context& context);
 
+    Module& parse();
     void assert_specific(char ch);
     void assert_string(StringView expected);
     void consume_whitespace();
-    Optional<Interface&> resolve_import(auto path);
 
     HashMap<ByteString, ByteString> parse_extended_attributes();
     void parse_attribute(HashMap<ByteString, ByteString>& extended_attributes, Interface&, IsStatic is_static = IsStatic::No);
@@ -51,7 +47,9 @@ private:
     void parse_non_interface_entities(bool allow_interface, Interface&);
     void parse_enumeration(HashMap<ByteString, ByteString>, Interface&);
     void parse_typedef(Interface&);
+    void parse_callback_interface(HashMap<ByteString, ByteString> extended_attributes, Interface&);
     void parse_interface_mixin(Interface&);
+    void parse_partial_interface_mixin(Interface&);
     void parse_dictionary(HashMap<ByteString, ByteString> extended_attributes, Interface&);
     void parse_callback_function(HashMap<ByteString, ByteString>& extended_attributes, Interface&);
     void parse_constructor(HashMap<ByteString, ByteString>& extended_attributes, Interface&);
@@ -62,6 +60,7 @@ private:
     void parse_iterable(Interface&);
     void parse_async_iterable(Interface&);
     void parse_setlike(Interface&, bool is_readonly);
+    void parse_maplike(Interface&, bool is_readonly);
     Function parse_function(HashMap<ByteString, ByteString>& extended_attributes, Interface&, IsStatic is_static = IsStatic::No, IsSpecialOperation is_special_operation = IsSpecialOperation::No);
     Vector<Parameter> parse_parameters();
     NonnullRefPtr<Type const> parse_type();
@@ -71,17 +70,10 @@ private:
     ByteString parse_identifier_ending_with_space();
     ByteString parse_identifier_ending_with_space_or(auto... possible_terminating_characters);
 
-    Vector<ByteString> import_base_paths;
     ByteString filename;
     StringView input;
     LineTrackingLexer lexer;
-
-    HashTable<NonnullOwnPtr<Interface>>& top_level_interfaces();
-    HashTable<NonnullOwnPtr<Interface>> interfaces;
-    HashMap<ByteString, Interface*>& top_level_resolved_imports();
-    HashMap<ByteString, Interface*> resolved_imports;
-    Parser* top_level_parser();
-    Parser* parent = nullptr;
+    Context& context;
 };
 
 }

@@ -6,10 +6,11 @@
 
 #include "StylePropertyMapReadOnly.h"
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/StylePropertyMapReadOnlyPrototype.h>
+#include <LibWeb/Bindings/StylePropertyMapReadOnly.h>
 #include <LibWeb/CSS/CSSStyleDeclaration.h>
 #include <LibWeb/CSS/CSSStyleValue.h>
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/CustomPropertyData.h>
 #include <LibWeb/CSS/PropertyNameAndID.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -123,7 +124,7 @@ WebIDL::ExceptionOr<bool> StylePropertyMapReadOnly::has(String property_name)
             if (property->is_custom_property()) {
                 if (element.get_custom_property(property->name()))
                     return true;
-                return element.document().registered_custom_properties().contains(property->name());
+                return element.document().get_registered_custom_property(property->name()).has_value();
             }
             return true;
         },
@@ -150,9 +151,12 @@ WebIDL::UnsignedLong StylePropertyMapReadOnly::size() const
             // Some custom properties set on the element might also be in the registered custom properties set, so we
             // want the size of the union of the two sets.
             HashTable<FlyString> custom_properties;
-            for (auto const& key : element.custom_properties().keys())
-                custom_properties.set(key);
-            for (auto const& [key, _] : element.document().registered_custom_properties())
+            if (auto data = element.custom_property_data()) {
+                data->for_each_property([&](FlyString const& name, CSS::StyleProperty const&) {
+                    custom_properties.set(name);
+                });
+            }
+            for (auto const& [key, _] : element.document().registered_property_set())
                 custom_properties.set(key);
 
             return number_of_longhand_properties + custom_properties.size();
@@ -173,8 +177,8 @@ RefPtr<StyleValue const> StylePropertyMapReadOnly::get_style_value(Source& sourc
             if (property.is_custom_property()) {
                 if (auto custom_property = element.get_custom_property(property.name()))
                     return custom_property;
-                if (auto registered_custom_property = element.document().registered_custom_properties().get(property.name()); registered_custom_property.has_value())
-                    return registered_custom_property.value()->initial_style_value();
+                if (auto registered_custom_property = element.document().get_registered_custom_property(property.name()); registered_custom_property.has_value())
+                    return registered_custom_property->initial_value;
                 return nullptr;
             }
 

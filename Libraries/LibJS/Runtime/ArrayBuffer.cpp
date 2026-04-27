@@ -8,6 +8,7 @@
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/ArrayBufferConstructor.h>
 #include <LibJS/Runtime/GlobalObject.h>
+#include <LibJS/Runtime/TypedArray.h>
 
 namespace JS {
 
@@ -250,6 +251,36 @@ ThrowCompletionOr<ArrayBuffer*> array_buffer_copy_and_detach(VM& vm, ArrayBuffer
     return new_buffer;
 }
 
+void ArrayBuffer::detach_buffer()
+{
+    for (auto& view : m_cached_views) {
+        if (view.viewed_array_buffer() == this)
+            view.set_cached_data_ptr(nullptr);
+    }
+    m_cached_views.clear();
+    m_data_block.byte_buffer = Empty {};
+}
+
+ThrowCompletionOr<ByteBuffer> ArrayBuffer::detach_and_take_bytes(VM& vm)
+{
+    VERIFY(!is_shared_array_buffer());
+
+    if (!same_value(detach_key(), js_undefined()))
+        return vm.throw_completion<TypeError>(ErrorType::DetachKeyMismatch, js_undefined(), detach_key());
+
+    auto bytes = m_data_block.byte_buffer.visit(
+        [](Empty) -> ByteBuffer { VERIFY_NOT_REACHED(); },
+        [](ByteBuffer& value) -> ByteBuffer { return move(value); },
+        [](DataBlock::UnownedFixedLengthByteBuffer& value) -> ByteBuffer { return MUST(ByteBuffer::copy(value.buffer->span())); });
+    detach_buffer();
+    return bytes;
+}
+
+void ArrayBuffer::register_cached_typed_array_view(TypedArrayBase& view)
+{
+    m_cached_views.set(view);
+}
+
 // 25.1.3.5 DetachArrayBuffer ( arrayBuffer [ , key ] ), https://tc39.es/ecma262/#sec-detacharraybuffer
 ThrowCompletionOr<void> detach_array_buffer(VM& vm, ArrayBuffer& array_buffer, Optional<Value> key)
 {
@@ -315,19 +346,56 @@ ThrowCompletionOr<Optional<size_t>> get_array_buffer_max_byte_length_option(VM& 
 }
 
 // 25.2.2.1 AllocateSharedArrayBuffer ( constructor, byteLength [ , maxByteLength ] ), https://tc39.es/ecma262/#sec-allocatesharedarraybuffer
-ThrowCompletionOr<GC::Ref<ArrayBuffer>> allocate_shared_array_buffer(VM& vm, FunctionObject& constructor, size_t byte_length)
+ThrowCompletionOr<GC::Ref<ArrayBuffer>> allocate_shared_array_buffer(VM& vm, FunctionObject& constructor, size_t byte_length, Optional<size_t> const& max_byte_length)
 {
-    // 1. Let obj be ? OrdinaryCreateFromConstructor(constructor, "%SharedArrayBuffer.prototype%", « [[ArrayBufferData]], [[ArrayBufferByteLength]] »).
+    // 1. Let slots be « [[ArrayBufferData]] ».
+
+    // 2. If maxByteLength is present and maxByteLength is not empty, let allocatingGrowableBuffer be true; otherwise let allocatingGrowableBuffer be false.
+    auto allocating_growable_buffer = max_byte_length.has_value();
+
+    // 3. If allocatingGrowableBuffer is true, then
+    if (allocating_growable_buffer) {
+        // a. If byteLength > maxByteLength, throw a RangeError exception.
+        if (byte_length > *max_byte_length)
+            return vm.throw_completion<RangeError>(ErrorType::ByteLengthExceedsMaxByteLength, byte_length, *max_byte_length);
+
+        // b. Append [[ArrayBufferByteLengthData]] and [[ArrayBufferMaxByteLength]] to slots.
+    }
+
+    // 4. Else,
+    //        a. Append [[ArrayBufferByteLength]] to slots.
+
+    // 5. Let obj be ? OrdinaryCreateFromConstructor(constructor, "%SharedArrayBuffer.prototype%", slots).
     auto obj = TRY(ordinary_create_from_constructor<ArrayBuffer>(vm, constructor, &Intrinsics::shared_array_buffer_prototype, nullptr, DataBlock::Shared::Yes));
 
-    // 2. Let block be ? CreateSharedByteDataBlock(byteLength).
-    auto block = TRY(create_shared_byte_data_block(vm, byte_length));
+    // 6. If allocatingGrowableBuffer is true, let allocLength be maxByteLength; otherwise let allocLength be byteLength.
+    auto alloc_length = allocating_growable_buffer ? *max_byte_length : byte_length;
 
-    // 3. Set obj.[[ArrayBufferData]] to block.
-    // 4. Set obj.[[ArrayBufferByteLength]] to byteLength.
+    // 7. Let block be ? CreateSharedByteDataBlock(allocLength).
+    // AD-HOC: We track [[ArrayBufferByteLength(Data)]] via the length of the Data Block, so shrink it down to byteLength.
+    auto block = TRY(create_shared_byte_data_block(vm, alloc_length));
+    block.buffer().set_size(byte_length);
+
+    // 8. Set obj.[[ArrayBufferData]] to block.
     obj->set_data_block(move(block));
 
-    // 5. Return obj.
+    // 9. If allocatingGrowableBuffer is true, then
+    if (allocating_growable_buffer) {
+        // a. Assert: byteLength ≤ maxByteLength.
+        VERIFY(byte_length <= *max_byte_length);
+
+        // FIXME: b. Let byteLengthBlock be ? CreateSharedByteDataBlock(8).
+        // FIXME: c. Perform SetValueInBuffer(byteLengthBlock, 0, biguint64, ℤ(byteLength), true, seq-cst).
+        // FIXME: d. Set obj.[[ArrayBufferByteLengthData]] to byteLengthBlock.
+
+        // e. Set obj.[[ArrayBufferMaxByteLength]] to maxByteLength.
+        obj->set_max_byte_length(*max_byte_length);
+    }
+
+    // 10. Else,
+    //         a. Set obj.[[ArrayBufferByteLength]] to byteLength.
+
+    // 11. Return obj.
     return obj;
 }
 

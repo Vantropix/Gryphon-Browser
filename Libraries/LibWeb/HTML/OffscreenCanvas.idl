@@ -1,8 +1,3 @@
-#import <DOM/EventTarget.idl>
-#import <HTML/OffscreenCanvasRenderingContext2D.idl>
-#import <HTML/Canvas/OffscreenCanvasBase.idl>
-
-
 // FIXME: This should be in OffscreenCanvasBase.idl but then it is not exported
 // https://html.spec.whatwg.org/multipage/canvas.html#imageencodeoptions
 dictionary ImageEncodeOptions {
@@ -16,7 +11,7 @@ enum OffscreenRenderingContextId { "2d", "bitmaprenderer", "webgl", "webgl2", "w
 
 
 // https://html.spec.whatwg.org/multipage/canvas.html#offscreencanvas
-[Exposed=(Window,Worker), Transferable]
+[Exposed=(Window,Worker), Transferable, Experimental]
 interface OffscreenCanvas : EventTarget {
     constructor([EnforceRange] unsigned long long width, [EnforceRange] unsigned long long height);
 

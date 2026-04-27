@@ -337,16 +337,11 @@ public:
 
     [[nodiscard]] ALWAYS_INLINE constexpr bool has_value() const { return m_has_value; }
 
-    [[nodiscard]] ALWAYS_INLINE constexpr T& value() &
+    template<typename Self>
+    [[nodiscard]] ALWAYS_INLINE constexpr auto& value(this Self& self)
     {
-        VERIFY(m_has_value);
-        return m_storage;
-    }
-
-    [[nodiscard]] ALWAYS_INLINE constexpr T const& value() const&
-    {
-        VERIFY(m_has_value);
-        return m_storage;
+        VERIFY(self.m_has_value);
+        return self.m_storage;
     }
 
     [[nodiscard]] ALWAYS_INLINE constexpr T value() &&
@@ -363,23 +358,31 @@ public:
         return released_value;
     }
 
-private:
-    ALWAYS_INLINE constexpr void construct_null_if_necessary(bool should_construct = is_constant_evaluated())
+    template<typename Self>
+    [[nodiscard]] ALWAYS_INLINE constexpr auto& unchecked_value(this Self& self)
     {
-        // OPTIMIZATION: Only construct the `m_null` member when we are constant-evaluating.
-        // Otherwise, this generates an unnecessary zero-fill.
+        ASSERT(self.m_has_value);
+        return self.m_storage;
+    }
+
+private:
+    ALWAYS_INLINE constexpr void construct_null_if_necessary()
+    {
+        // OPTIMIZATION: Only construct the `m_null` member when we are constant-evaluating. Otherwise, this generates
+        //               an unnecessary zero-fill.
 #if defined(AK_COMPILER_GCC)
-        // NOTE: GCCs -Wuninitialized warning ends up checking this as well.
-        should_construct = true;
-#endif
-        if (should_construct)
+        // GCC's -Wuninitialized warning ends up checking this as well.
+        construct_at(&m_null);
+#else
+        if consteval {
             construct_at(&m_null);
+        }
+#endif
     }
 
     union {
-        // FIXME: GCC seems to have an issue with uninitialized unions and non trivial types,
-        //        which forces us to have an equally sized trivial null member in the union
-        //        to pseudo-initialize the union.
+        // FIXME: GCC seems to have an issue with uninitialized unions and non trivial types, which forces us to have an
+        //        equally sized trivial null member in the union to pseudo-initialize the union.
         struct {
             u8 _[sizeof(T)];
         } m_null;
@@ -608,31 +611,16 @@ public:
         return *m_pointer;
     }
 
-    template<typename F, typename MappedType = decltype(declval<F>()(declval<T&>())), auto IsErrorOr = IsSpecializationOf<MappedType, ErrorOr>, typename OptionalType = Optional<ConditionallyResultType<IsErrorOr, MappedType>>>
-    ALWAYS_INLINE constexpr Conditional<IsErrorOr, ErrorOr<OptionalType>, OptionalType> map(F&& mapper)
+    template<typename Self, typename F, typename MappedType = decltype(declval<F>()(declval<T&>())), auto IsErrorOr = IsSpecializationOf<MappedType, ErrorOr>, typename OptionalType = Optional<ConditionallyResultType<IsErrorOr, MappedType>>>
+    ALWAYS_INLINE constexpr Conditional<IsErrorOr, ErrorOr<OptionalType>, OptionalType> map(this Self&& self, F&& mapper)
     {
         if constexpr (IsErrorOr) {
-            if (m_pointer != nullptr)
-                return OptionalType { TRY(mapper(value())) };
+            if (self.m_pointer != nullptr)
+                return OptionalType { TRY(mapper(forward<Self>(self).value())) };
             return OptionalType {};
         } else {
-            if (m_pointer != nullptr)
-                return OptionalType { mapper(value()) };
-
-            return OptionalType {};
-        }
-    }
-
-    template<typename F, typename MappedType = decltype(declval<F>()(declval<T&>())), auto IsErrorOr = IsSpecializationOf<MappedType, ErrorOr>, typename OptionalType = Optional<ConditionallyResultType<IsErrorOr, MappedType>>>
-    ALWAYS_INLINE constexpr Conditional<IsErrorOr, ErrorOr<OptionalType>, OptionalType> map(F&& mapper) const
-    {
-        if constexpr (IsErrorOr) {
-            if (m_pointer != nullptr)
-                return OptionalType { TRY(mapper(value())) };
-            return OptionalType {};
-        } else {
-            if (m_pointer != nullptr)
-                return OptionalType { mapper(value()) };
+            if (self.m_pointer != nullptr)
+                return OptionalType { mapper(forward<Self>(self).value()) };
 
             return OptionalType {};
         }
@@ -673,9 +661,77 @@ struct Traits<Optional<T>> : public DefaultTraits<Optional<T>> {
     }
 };
 
+template<typename T>
+struct SentinelOptionalTraits;
+
+template<typename T, typename Traits = SentinelOptionalTraits<T>>
+class SentinelOptional : public OptionalBase<T> {
+public:
+    SentinelOptional() = default;
+
+    template<SameAs<OptionalNone> V>
+    constexpr SentinelOptional(V) { }
+
+    template<typename U = T>
+    requires(!IsSame<OptionalNone, RemoveCVReference<U>>)
+    explicit(!IsConvertible<U&&, T>) constexpr SentinelOptional(U&& value)
+    requires(!IsSame<RemoveCVReference<U>, SentinelOptional> && !IsSame<RemoveCVReference<U>, Optional<T>> && IsConstructible<T, U &&>)
+        : m_value(forward<U>(value))
+    {
+    }
+
+    template<typename U = T>
+    requires(!IsOneOfIgnoringCVReference<U, SentinelOptional, Optional<T>, OptionalNone> && IsConstructible<T, U &&>)
+    constexpr SentinelOptional& operator=(U&& value)
+    {
+        m_value = T(forward<U>(value));
+        return *this;
+    }
+
+    constexpr void clear()
+    {
+        m_value = Traits::sentinel_value();
+    }
+
+    [[nodiscard]] constexpr bool has_value() const
+    {
+        return !Traits::is_sentinel(m_value);
+    }
+
+    template<typename Self>
+    [[nodiscard]] constexpr auto& value(this Self& self)
+    {
+        VERIFY(self.has_value());
+        return self.m_value;
+    }
+
+    [[nodiscard]] constexpr T value() &&
+    {
+        return release_value();
+    }
+
+    template<typename Self>
+    [[nodiscard]] constexpr auto& unchecked_value(this Self& self)
+    {
+        ASSERT(self.has_value());
+        return self.m_value;
+    }
+
+    [[nodiscard]] constexpr T release_value()
+    {
+        VERIFY(has_value());
+        return exchange(m_value, Traits::sentinel_value());
+    }
+
+private:
+    T m_value { Traits::sentinel_value() };
+};
+
 }
 
 #if USING_AK_GLOBALLY
 using AK::Optional;
 using AK::OptionalNone;
+using AK::SentinelOptional;
+using AK::SentinelOptionalTraits;
 #endif

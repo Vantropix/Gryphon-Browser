@@ -1,9 +1,10 @@
 /*
- * Copyright (c) 2023-2025, Gregory Bertilson <gregory@ladybird.org>
+ * Copyright (c) 2023-2026, Gregory Bertilson <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibCore/EventLoop.h>
 #include <LibCore/ThreadedPromise.h>
 #include <LibThreading/Thread.h>
 
@@ -11,56 +12,75 @@
 
 namespace Audio {
 
-#define TRY_OR_EXIT_THREAD(expression)                                                                       \
-    ({                                                                                                       \
-        auto&& __temporary_result = (expression);                                                            \
-        if (__temporary_result.is_error()) [[unlikely]] {                                                    \
-            warnln("Failure in PulseAudio control thread: {}", __temporary_result.error().string_literal()); \
-            internal_state->exit();                                                                          \
-            return 1;                                                                                        \
-        }                                                                                                    \
-        __temporary_result.release_value();                                                                  \
+#define TRY_OR_REJECT_AND_EXIT(expression)                                                                              \
+    ({                                                                                                                  \
+        auto&& __temporary_result = (expression);                                                                       \
+        if (__temporary_result.is_error()) [[unlikely]] {                                                               \
+            warnln("Failure in PulseAudio control thread: {}", __temporary_result.error().string_literal());            \
+            auto event_loop = main_thread_event_loop->take();                                                           \
+            if (!event_loop)                                                                                            \
+                return 1;                                                                                               \
+            event_loop->deferred_invoke([promise = move(promise), error = __temporary_result.release_error()] mutable { \
+                promise->reject(move(error));                                                                           \
+            });                                                                                                         \
+            internal_state->exit();                                                                                     \
+            return 1;                                                                                                   \
+        }                                                                                                               \
+        __temporary_result.release_value();                                                                             \
     })
 
-ErrorOr<NonnullRefPtr<PlaybackStream>> PlaybackStream::create(OutputState initial_output_state, u32 target_latency_ms, SampleSpecificationCallback&& sample_specification_selected_callback, AudioDataRequestCallback&& data_request_callback)
+NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStream::create(OutputState initial_output_state, u32 target_latency_ms, AudioDataRequestCallback&& data_request_callback)
 {
-    return PlaybackStreamPulseAudio::create(initial_output_state, target_latency_ms, move(sample_specification_selected_callback), move(data_request_callback));
+    return PlaybackStreamPulseAudio::create(initial_output_state, target_latency_ms, move(data_request_callback));
 }
 
-ErrorOr<NonnullRefPtr<PlaybackStream>> PlaybackStreamPulseAudio::create(OutputState initial_state, u32 target_latency_ms, SampleSpecificationCallback&& sample_specification_selected_callback, AudioDataRequestCallback&& data_request_callback)
+NonnullRefPtr<PlaybackStream::CreatePromise> PlaybackStreamPulseAudio::create(OutputState initial_state, u32 target_latency_ms, AudioDataRequestCallback&& data_request_callback)
 {
     VERIFY(data_request_callback);
 
+    auto promise = CreatePromise::construct();
+
     // Create an internal state for the control thread to hold on to.
-    auto internal_state = TRY(adopt_nonnull_ref_or_enomem(new (nothrow) InternalState()));
-    auto playback_stream = TRY(adopt_nonnull_ref_or_enomem(new (nothrow) PlaybackStreamPulseAudio(internal_state)));
+    auto internal_state = MUST(adopt_nonnull_ref_or_enomem(new (nothrow) InternalState()));
+    auto playback_stream = MUST(adopt_nonnull_ref_or_enomem(new (nothrow) PlaybackStreamPulseAudio(internal_state)));
 
     // Create the control thread and start it.
-    auto thread = TRY(Threading::Thread::try_create([=, sample_specification_selected_callback = move(sample_specification_selected_callback), data_request_callback = move(data_request_callback)]() mutable {
-        auto context = TRY_OR_EXIT_THREAD(PulseAudioContext::the());
-        internal_state->set_stream(TRY_OR_EXIT_THREAD(context->create_stream(initial_state, target_latency_ms, [data_request_callback = move(data_request_callback)](PulseAudioStream&, Span<float> buffer) {
+    auto thread = MUST(Threading::Thread::try_create("Audio Control"sv, [=, main_thread_event_loop = Core::EventLoop::current_weak(), data_request_callback = move(data_request_callback)]() mutable {
+        auto context = TRY_OR_REJECT_AND_EXIT(PulseAudioContext::the());
+        internal_state->set_stream(TRY_OR_REJECT_AND_EXIT(context->create_stream(initial_state, target_latency_ms, [data_request_callback = move(data_request_callback)](PulseAudioStream&, Span<float> buffer) {
             return data_request_callback(buffer);
         })));
 
-        sample_specification_selected_callback(internal_state->stream()->sample_specification());
-
         // PulseAudio retains the last volume it sets for an application. We want to consistently
         // start at 100% volume instead.
-        TRY_OR_EXIT_THREAD(internal_state->stream()->set_volume(1.0));
+        TRY_OR_REJECT_AND_EXIT(internal_state->stream()->set_volume(1.0));
+
+        {
+            auto event_loop = main_thread_event_loop->take();
+            if (!event_loop)
+                return 1;
+            event_loop->deferred_invoke([promise = move(promise), playback_stream = move(playback_stream)] mutable {
+                promise->resolve(move(playback_stream));
+            });
+        }
 
         internal_state->thread_loop();
         return 0;
-    },
-        "Audio::PlaybackStream"sv));
+    }));
 
     thread->start();
     thread->detach();
-    return playback_stream;
+    return promise;
 }
 
 PlaybackStreamPulseAudio::PlaybackStreamPulseAudio(NonnullRefPtr<InternalState> state)
     : m_state(move(state))
 {
+}
+
+SampleSpecification PlaybackStreamPulseAudio::sample_specification() const
+{
+    return m_state->stream()->sample_specification();
 }
 
 PlaybackStreamPulseAudio::~PlaybackStreamPulseAudio()
@@ -80,8 +100,8 @@ PlaybackStreamPulseAudio::~PlaybackStreamPulseAudio()
 
 void PlaybackStreamPulseAudio::set_underrun_callback(Function<void()> callback)
 {
-    m_state->enqueue([this, callback = move(callback)]() mutable {
-        m_state->stream()->set_underrun_callback(move(callback));
+    m_state->enqueue([&state = *m_state, callback = move(callback)]() mutable {
+        state.stream()->set_underrun_callback(move(callback));
     });
 }
 
@@ -89,9 +109,9 @@ NonnullRefPtr<Core::ThreadedPromise<AK::Duration>> PlaybackStreamPulseAudio::res
 {
     auto promise = Core::ThreadedPromise<AK::Duration>::create();
     TRY_OR_REJECT(m_state->check_is_running(), promise);
-    m_state->enqueue([this, promise]() {
-        TRY_OR_REJECT(m_state->stream()->resume());
-        promise->resolve(m_state->stream()->total_time_played());
+    m_state->enqueue([&state = *m_state, promise]() {
+        TRY_OR_REJECT(state.stream()->resume());
+        promise->resolve(state.stream()->total_time_played());
     });
     return promise;
 }
@@ -100,8 +120,8 @@ NonnullRefPtr<Core::ThreadedPromise<void>> PlaybackStreamPulseAudio::drain_buffe
 {
     auto promise = Core::ThreadedPromise<void>::create();
     TRY_OR_REJECT(m_state->check_is_running(), promise);
-    m_state->enqueue([this, promise]() {
-        TRY_OR_REJECT(m_state->stream()->drain_and_suspend());
+    m_state->enqueue([&state = *m_state, promise]() {
+        TRY_OR_REJECT(state.stream()->drain_and_suspend());
         promise->resolve();
     });
     return promise;
@@ -111,8 +131,8 @@ NonnullRefPtr<Core::ThreadedPromise<void>> PlaybackStreamPulseAudio::discard_buf
 {
     auto promise = Core::ThreadedPromise<void>::create();
     TRY_OR_REJECT(m_state->check_is_running(), promise);
-    m_state->enqueue([this, promise]() {
-        TRY_OR_REJECT(m_state->stream()->flush_and_suspend());
+    m_state->enqueue([&state = *m_state, promise]() {
+        TRY_OR_REJECT(state.stream()->flush_and_suspend());
         promise->resolve();
     });
     return promise;
@@ -129,8 +149,8 @@ NonnullRefPtr<Core::ThreadedPromise<void>> PlaybackStreamPulseAudio::set_volume(
 {
     auto promise = Core::ThreadedPromise<void>::create();
     TRY_OR_REJECT(m_state->check_is_running(), promise);
-    m_state->enqueue([this, promise, volume]() {
-        TRY_OR_REJECT(m_state->stream()->set_volume(volume));
+    m_state->enqueue([&state = *m_state, promise, volume]() {
+        TRY_OR_REJECT(state.stream()->set_volume(volume));
         promise->resolve();
     });
     return promise;
@@ -145,10 +165,10 @@ ErrorOr<void> PlaybackStreamPulseAudio::InternalState::check_is_running()
 
 void PlaybackStreamPulseAudio::InternalState::set_stream(NonnullRefPtr<PulseAudioStream>&& stream)
 {
-    m_stream = stream;
+    m_stream = move(stream);
 }
 
-RefPtr<PulseAudioStream> PlaybackStreamPulseAudio::InternalState::stream()
+RefPtr<PulseAudioStream> const& PlaybackStreamPulseAudio::InternalState::stream()
 {
     return m_stream;
 }

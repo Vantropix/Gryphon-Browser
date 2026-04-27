@@ -6,7 +6,7 @@
  */
 
 #include <LibUnicode/Segmenter.h>
-#include <LibWeb/Bindings/CharacterDataPrototype.h>
+#include <LibWeb/Bindings/CharacterData.h>
 #include <LibWeb/DOM/CharacterData.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/MutationType.h>
@@ -121,14 +121,17 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
     }
 
     // 12. If node’s parent is non-null, then run the children changed steps for node’s parent.
-    if (parent())
-        parent()->children_changed(nullptr);
+    if (auto* parent = this->parent()) {
+        ChildrenChangedMetadata metadata { ChildrenChangedMetadata::Type::Mutation, *this };
+        parent->children_changed(metadata);
+    }
 
     // OPTIMIZATION: If the characters are the same, we can skip the remainder of this function.
     if (m_data == old_data)
         return {};
 
-    if (auto* text_node = as_if<Layout::TextNode>(layout_node())) {
+    // NB: Called during DOM text mutation, layout is stale.
+    if (auto* text_node = as_if<Layout::TextNode>(unsafe_layout_node())) {
         // NOTE: Since the text node's data has changed, we need to invalidate the text for rendering.
         //       This ensures that the new text is reflected in layout, even if we don't end up
         //       doing a full layout tree rebuild.
@@ -142,8 +145,28 @@ WebIDL::ExceptionOr<void> CharacterData::replace_data(size_t offset, size_t coun
 
     if (m_grapheme_segmenter)
         m_grapheme_segmenter->set_segmented_text(m_data);
+    if (m_line_segmenter)
+        m_line_segmenter->set_segmented_text(m_data);
     if (m_word_segmenter)
         m_word_segmenter->set_segmented_text(m_data);
+
+    // dir=auto resolves an element's effective directionality from its text content, so any ancestor with dir=auto
+    // can flip its :dir() match when this text changes. Recompute style on each such ancestor's subtree and propagate
+    // :has(:dir(...)) invalidation up its ancestor chain.
+    for (auto ancestor = parent_element(); ancestor; ancestor = ancestor->parent_element()) {
+        if (ancestor->dir() != Element::Dir::Auto)
+            continue;
+        ancestor->for_each_shadow_including_inclusive_descendant([](auto& node) {
+            if (auto* element = as_if<Element>(node))
+                element->set_needs_style_update(true);
+            return TraversalDecision::Continue;
+        });
+        // Walk every reachable scope and schedule the :has() ancestors walk, so :has(:dir(...)) on outer subjects can
+        // re-evaluate.
+        ancestor->for_each_style_scope_which_may_observe_the_node([ancestor](CSS::StyleScope& scope) {
+            scope.schedule_ancestors_style_invalidation_due_to_presence_of_has(*ancestor);
+        });
+    }
 
     return {};
 }
@@ -177,6 +200,16 @@ Unicode::Segmenter& CharacterData::grapheme_segmenter() const
     }
 
     return *m_grapheme_segmenter;
+}
+
+Unicode::Segmenter& CharacterData::line_segmenter() const
+{
+    if (!m_line_segmenter) {
+        m_line_segmenter = document().line_segmenter().clone();
+        m_line_segmenter->set_segmented_text(m_data);
+    }
+
+    return *m_line_segmenter;
 }
 
 Unicode::Segmenter& CharacterData::word_segmenter() const

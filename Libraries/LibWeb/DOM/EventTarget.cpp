@@ -9,14 +9,14 @@
  */
 
 #include <AK/StringBuilder.h>
-#include <LibJS/Parser.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/ECMAScriptFunctionObject.h>
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/NativeFunction.h>
 #include <LibJS/Runtime/ObjectEnvironment.h>
 #include <LibJS/Runtime/VM.h>
-#include <LibWeb/Bindings/EventTargetPrototype.h>
+#include <LibJS/RustIntegration.h>
+#include <LibWeb/Bindings/EventTarget.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
@@ -64,9 +64,9 @@ WebIDL::ExceptionOr<GC::Ref<EventTarget>> EventTarget::construct_impl(JS::Realm&
 
 void EventTarget::initialize(JS::Realm& realm)
 {
-    // FIXME: We can't do this for HTML::Window or HTML::WorkerGlobalScope, as this will run when creating the initial global object.
+    // FIXME: We can't do this for UniversalGlobalScopeMixin classes, as this will run when creating the initial global object.
     //        During this time, the ESO is not setup, so it will cause a nullptr dereference in host_defined_intrinsics.
-    if (!is_window_or_worker_global_scope_mixin())
+    if (!is_universal_global_scope_mixin())
         WEB_SET_PROTOTYPE_FOR_INTERFACE(EventTarget);
 
     Base::initialize(realm);
@@ -428,65 +428,43 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(FlyString 
         // 6. Let settings object be the relevant settings object of document.
         auto& settings_object = document->relevant_settings_object();
 
-        // NOTE: ECMAScriptFunctionObject::create expects a parsed body as input, so we must do the spec's sourceText steps here.
-        StringBuilder builder(StringBuilder::Mode::UTF16);
+        // Build source text and parameter strings for the event handler function.
+        StringBuilder source_builder;
+        StringView parameters_string;
 
-        // sourceText
+        // sourceText / ParameterList
         if (name == HTML::EventNames::error && is<HTML::Window>(this)) {
             //  -> If name is onerror and eventTarget is a Window object
-            //      The string formed by concatenating "function ", name, "(event, source, lineno, colno, error) {", U+000A LF, body, U+000A LF, and "}".
-            builder.appendff("function {}(event, source, lineno, colno, error) {{\n{}\n}}", name, body);
+            //      Let the function have five arguments, named event, source, lineno, colno, and error.
+            source_builder.appendff("function {}(event, source, lineno, colno, error) {{\n{}\n}}", name, body);
+            parameters_string = "event, source, lineno, colno, error"sv;
         } else {
             //  -> Otherwise
-            //      The string formed by concatenating "function ", name, "(event) {", U+000A LF, body, U+000A LF, and "}".
-            builder.appendff("function {}(event) {{\n{}\n}}", name, body);
+            //      Let the function have a single argument called event.
+            source_builder.appendff("function {}(event) {{\n{}\n}}", name, body);
+            parameters_string = "event"sv;
         }
 
-        auto source_text = builder.to_utf16_string();
+        auto source_text = source_builder.to_byte_string();
 
-        auto parser = JS::Parser(JS::Lexer(JS::SourceCode::create({}, source_text)));
+        auto& vm = Bindings::main_thread_vm();
 
-        // FIXME: This should only be parsing the `body` instead of `source_text` and therefore use `JS::FunctionBody` instead of `JS::FunctionExpression`.
-        //        However, JS::ECMAScriptFunctionObject::create wants parameters and length and JS::FunctionBody does not inherit JS::FunctionNode.
-        auto program = parser.parse_function_node<JS::FunctionExpression>();
+        auto rust_compilation = JS::RustIntegration::compile_dynamic_function(
+            vm, source_text, parameters_string, body, JS::FunctionKind::Normal);
 
         // 7. If body is not parsable as FunctionBody or if parsing detects an early error, then follow these substeps:
-        if (parser.has_errors()) {
+        if (!rust_compilation.has_value() || rust_compilation->is_error()) {
             // 1. Set eventHandler's value to null.
-            //    Note: This does not deactivate the event handler, which additionally removes the event handler's listener (if present).
             handler_map.remove(event_handler_iterator);
 
             // FIXME: 2. Report the error for the appropriate script and with the appropriate position (line number and column number) given by location, using settings object's global object.
-            //           If the error is still not handled after this, then the error may be reported to a developer console.
 
             // 3. Return null.
             return nullptr;
         }
 
-        auto& vm = Bindings::main_thread_vm();
-
         // 8. Push settings object's realm execution context onto the JavaScript execution context stack; it is now the running JavaScript execution context.
         vm.push_execution_context(settings_object.realm_execution_context());
-
-        // 9. Let function be the result of calling OrdinaryFunctionCreate, with arguments:
-        // functionPrototype
-        //  %Function.prototype% (This is enforced by using JS::ECMAScriptFunctionObject)
-
-        // sourceText was handled above.
-
-        // ParameterList
-        //  If name is onerror and eventTarget is a Window object
-        //    Let the function have five arguments, named event, source, lineno, colno, and error.
-        //  Otherwise
-        //    Let the function have a single argument called event.
-        // (This was handled above for us by the parser using sourceText)
-
-        // body
-        //  The result of parsing body above. (This is given by program->body())
-
-        // thisMode
-        //  non-lexical-this (For JS::ECMAScriptFunctionObject, this means passing is_arrow_function as false)
-        constexpr bool is_arrow_function = false;
 
         // scope
         //  1. Let realm be settings object's Realm.
@@ -508,14 +486,16 @@ WebIDL::CallbackType* EventTarget::get_current_value_of_event_handler(FlyString 
         if (element)
             scope = JS::new_object_environment(*element, true, scope);
 
-        //  6. Return scope. (NOTE: Not necessary)
-
-        auto function = JS::ECMAScriptFunctionObject::create(realm, Utf16FlyString::from_utf8(name), move(source_text), program->body(), program->parameters(), program->function_length(), program->local_variables_names(), scope, nullptr, JS::FunctionKind::Normal, program->is_strict_mode(),
-            program->parsing_insights(), is_arrow_function);
+        // 9. Let function be the result of calling OrdinaryFunctionCreate.
+        auto function = JS::ECMAScriptFunctionObject::create_from_function_data(
+            realm,
+            rust_compilation->value(),
+            scope,
+            nullptr);
 
         // 10. Remove settings object's realm execution context from the JavaScript execution context stack.
-        VERIFY(vm.execution_context_stack().last() == &settings_object.realm_execution_context());
-        vm.pop_execution_context();
+        auto* popped_execution_context = vm.pop_execution_context();
+        VERIFY(popped_execution_context == &settings_object.realm_execution_context());
 
         // 11. Set function.[[ScriptOrModule]] to null.
         function->set_script_or_module({});
@@ -604,9 +584,7 @@ void EventTarget::activate_event_handler(FlyString const& name, HTML::EventHandl
             VERIFY(vm.argument_count() == 1);
 
             // The argument must be an object and it must be an Event.
-            auto event_wrapper_argument = vm.argument(0);
-            VERIFY(event_wrapper_argument.is_object());
-            auto& event = as<DOM::Event>(event_wrapper_argument.as_object());
+            auto& event = vm.argument(0).as<DOM::Event>();
 
             TRY(event_target->process_event_handler_for_event(name, event));
             return JS::js_undefined();
@@ -885,13 +863,7 @@ bool EventTarget::dispatch_event(Event& event)
 
 bool EventTarget::has_event_listener(FlyString const& type) const
 {
-    if (!m_data)
-        return false;
-    for (auto& listener : m_data->event_listener_list) {
-        if (listener->type == type)
-            return true;
-    }
-    return false;
+    return m_data && m_data->event_listener_list.contains([&type](auto listener) { return listener->type == type; });
 }
 
 bool EventTarget::has_event_listeners() const

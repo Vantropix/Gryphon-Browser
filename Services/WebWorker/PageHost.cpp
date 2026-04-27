@@ -57,6 +57,16 @@ Web::DevicePixelRect PageHost::screen_rect() const
     return {};
 }
 
+double PageHost::zoom_level() const
+{
+    return 1.0;
+}
+
+double PageHost::device_pixel_ratio() const
+{
+    return 1.0;
+}
+
 double PageHost::device_pixels_per_css_pixel() const
 {
     return 1.0;
@@ -77,14 +87,35 @@ Web::CSS::PreferredMotion PageHost::preferred_motion() const
     return Web::CSS::PreferredMotion::Auto;
 }
 
-String PageHost::page_did_request_cookie(URL::URL const& url, Web::Cookie::Source source)
+HTTP::Cookie::VersionedCookie PageHost::page_did_request_cookie(URL::URL const& url, HTTP::Cookie::Source source)
 {
     return m_client.did_request_cookie(url, source);
+}
+
+void PageHost::page_did_report_worker_exception(String const& message, String const& filename, u32 lineno, u32 colno)
+{
+    m_client.async_did_report_worker_exception(message, filename, lineno, colno);
+}
+
+void PageHost::page_did_post_broadcast_channel_message(Web::HTML::BroadcastChannelMessage const& message)
+{
+    m_client.async_did_post_broadcast_channel_message(message);
 }
 
 void PageHost::request_file(Web::FileRequest request)
 {
     m_client.request_file(move(request));
+}
+
+Web::PageClient::WorkerAgentResponse PageHost::request_worker_agent(Web::Bindings::AgentType worker_type)
+{
+    auto response = m_client.request_worker_agent(worker_type);
+    return { response.take_handle(), response.take_request_server_handle(), response.take_image_decoder_handle() };
+}
+
+void PageHost::did_fail_loading_worker_script()
+{
+    m_client.async_did_fail_loading_worker_script();
 }
 
 PageHost::PageHost(ConnectionFromClient& client)

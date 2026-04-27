@@ -1,33 +1,25 @@
 /*
- * Copyright (c) 2024-2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2024-2026, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/Array.h>
 #include <LibCore/Timer.h>
-#include <LibGfx/Bitmap.h>
 #include <LibGfx/PaintingSurface.h>
+#include <LibGfx/SharedImageBuffer.h>
+#include <LibGfx/SkiaBackendContext.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/Painting/BackingStoreManager.h>
 #include <WebContent/PageClient.h>
 
-#ifdef AK_OS_MACOS
-#    include <LibCore/IOSurface.h>
-#    include <LibCore/MachPort.h>
-#    include <LibCore/Platform/MachMessageTypes.h>
+#ifdef USE_VULKAN_DMABUF_IMAGES
+#    include <LibGfx/VulkanImage.h>
 #endif
 
 namespace Web::Painting {
 
 GC_DEFINE_ALLOCATOR(BackingStoreManager);
-
-#ifdef AK_OS_MACOS
-static Optional<Core::MachPort> s_browser_mach_port;
-void BackingStoreManager::set_browser_mach_port(Core::MachPort&& port)
-{
-    s_browser_mach_port = move(port);
-}
-#endif
 
 BackingStoreManager::BackingStoreManager(HTML::Navigable& navigable)
     : m_navigable(navigable)
@@ -48,107 +40,112 @@ void BackingStoreManager::restart_resize_timer()
     m_backing_store_shrink_timer->restart();
 }
 
-BackingStoreManager::BackingStore BackingStoreManager::acquire_store_for_next_frame()
+static void publish_backing_store_pair_if_needed(HTML::Navigable& navigable, i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store)
 {
-    BackingStore backing_store;
-    backing_store.bitmap_id = m_back_bitmap_id;
-    backing_store.store = m_back_store;
-    swap_back_and_front();
-    return backing_store;
+    if (!navigable.is_top_level_traversable())
+        return;
+
+    auto& page_client = navigable.top_level_traversable()->page().client();
+    page_client.page_did_allocate_backing_stores(front_bitmap_id, move(front_backing_store), back_bitmap_id, move(back_backing_store));
 }
+
+struct BackingStorePair {
+    RefPtr<Gfx::PaintingSurface> front;
+    RefPtr<Gfx::PaintingSurface> back;
+};
+
+#ifdef USE_VULKAN
+static NonnullRefPtr<Gfx::PaintingSurface> create_gpu_painting_surface_with_bitmap_flush(Gfx::IntSize size, Gfx::SharedImageBuffer& buffer)
+{
+    auto surface = Gfx::PaintingSurface::create_with_size(size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied);
+    auto bitmap = buffer.bitmap();
+    surface->on_flush = [bitmap = move(bitmap)](auto& surface) {
+        surface.read_into_bitmap(*bitmap);
+    };
+    return surface;
+}
+#endif
+
+static BackingStorePair create_shareable_bitmap_backing_stores(HTML::Navigable& navigable, Gfx::IntSize size, i32 front_bitmap_id, i32 back_bitmap_id, RefPtr<Gfx::SkiaBackendContext> const& skia_backend_context)
+{
+    auto front_buffer = Gfx::SharedImageBuffer::create(size);
+    auto back_buffer = Gfx::SharedImageBuffer::create(size);
+    publish_backing_store_pair_if_needed(navigable, front_bitmap_id, front_buffer.export_shared_image(), back_bitmap_id, back_buffer.export_shared_image());
+
+#ifdef AK_OS_MACOS
+    if (skia_backend_context) {
+        return {
+            .front = Gfx::PaintingSurface::create_from_shared_image_buffer(front_buffer, *skia_backend_context),
+            .back = Gfx::PaintingSurface::create_from_shared_image_buffer(back_buffer, *skia_backend_context),
+        };
+    }
+#else
+#    ifdef USE_VULKAN
+    if (skia_backend_context) {
+        return {
+            .front = create_gpu_painting_surface_with_bitmap_flush(size, front_buffer),
+            .back = create_gpu_painting_surface_with_bitmap_flush(size, back_buffer),
+        };
+    }
+#    else
+    (void)skia_backend_context;
+#    endif
+#endif
+
+    return {
+        .front = Gfx::PaintingSurface::wrap_bitmap(*front_buffer.bitmap()),
+        .back = Gfx::PaintingSurface::wrap_bitmap(*back_buffer.bitmap()),
+    };
+}
+
+#ifdef USE_VULKAN_DMABUF_IMAGES
+static ErrorOr<BackingStorePair> create_linear_dmabuf_backing_stores(HTML::Navigable& navigable, Gfx::IntSize size, i32 front_bitmap_id, i32 back_bitmap_id, Gfx::SkiaBackendContext& skia_backend_context)
+{
+    VERIFY(navigable.is_top_level_traversable());
+
+    auto const& vulkan_context = skia_backend_context.vulkan_context();
+    static constexpr Array<uint64_t, 1> linear_modifiers = { DRM_FORMAT_MOD_LINEAR };
+    auto front_image_value = TRY(Gfx::create_shared_vulkan_image(vulkan_context, size.width(), size.height(), VK_FORMAT_B8G8R8A8_UNORM, linear_modifiers.span()));
+    auto back_image_value = TRY(Gfx::create_shared_vulkan_image(vulkan_context, size.width(), size.height(), VK_FORMAT_B8G8R8A8_UNORM, linear_modifiers.span()));
+    publish_backing_store_pair_if_needed(navigable, front_bitmap_id, Gfx::duplicate_shared_image(*front_image_value), back_bitmap_id, Gfx::duplicate_shared_image(*back_image_value));
+
+    return BackingStorePair {
+        .front = Gfx::PaintingSurface::create_from_vkimage(skia_backend_context, move(front_image_value), Gfx::PaintingSurface::Origin::TopLeft),
+        .back = Gfx::PaintingSurface::create_from_vkimage(skia_backend_context, move(back_image_value), Gfx::PaintingSurface::Origin::TopLeft),
+    };
+}
+#endif
 
 void BackingStoreManager::reallocate_backing_stores(Gfx::IntSize size)
 {
-    auto skia_backend_context = m_navigable->skia_backend_context();
-
-    m_front_store = nullptr;
-    m_back_store = nullptr;
-
-#ifdef AK_OS_MACOS
-    if (skia_backend_context && s_browser_mach_port.has_value()) {
-        auto back_iosurface = Core::IOSurfaceHandle::create(size.width(), size.height());
-        auto back_iosurface_port = back_iosurface.create_mach_port();
-
-        auto front_iosurface = Core::IOSurfaceHandle::create(size.width(), size.height());
-        auto front_iosurface_port = front_iosurface.create_mach_port();
-
-        m_front_bitmap_id = m_next_bitmap_id++;
-        m_back_bitmap_id = m_next_bitmap_id++;
-
-        auto& page_client = m_navigable->top_level_traversable()->page().client();
-
-        Core::Platform::BackingStoreMetadata metadata;
-        metadata.page_id = page_client.id();
-        metadata.front_backing_store_id = m_front_bitmap_id;
-        metadata.back_backing_store_id = m_back_bitmap_id;
-
-        Core::Platform::MessageWithBackingStores message;
-
-        message.header.msgh_remote_port = s_browser_mach_port->port();
-        message.header.msgh_local_port = MACH_PORT_NULL;
-        message.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0) | MACH_MSGH_BITS_COMPLEX;
-        message.header.msgh_size = sizeof(message);
-        message.header.msgh_id = Core::Platform::BACKING_STORE_IOSURFACES_MESSAGE_ID;
-
-        message.body.msgh_descriptor_count = 2;
-
-        message.front_descriptor.name = front_iosurface_port.release();
-        message.front_descriptor.disposition = MACH_MSG_TYPE_MOVE_SEND;
-        message.front_descriptor.type = MACH_MSG_PORT_DESCRIPTOR;
-
-        message.back_descriptor.name = back_iosurface_port.release();
-        message.back_descriptor.disposition = MACH_MSG_TYPE_MOVE_SEND;
-        message.back_descriptor.type = MACH_MSG_PORT_DESCRIPTOR;
-
-        message.metadata = metadata;
-
-        mach_msg_timeout_t const timeout = 100; // milliseconds
-        auto const send_result = mach_msg(&message.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, message.header.msgh_size, 0, MACH_PORT_NULL, timeout, MACH_PORT_NULL);
-        if (send_result != KERN_SUCCESS) {
-            dbgln("Failed to send message to server: {}", mach_error_string(send_result));
-            VERIFY_NOT_REACHED();
-        }
-
-        m_front_store = Gfx::PaintingSurface::create_from_iosurface(move(front_iosurface), *skia_backend_context);
-        m_back_store = Gfx::PaintingSurface::create_from_iosurface(move(back_iosurface), *skia_backend_context);
-
-        return;
-    }
-#endif
+    auto skia_backend_context = Gfx::SkiaBackendContext::the();
 
     m_front_bitmap_id = m_next_bitmap_id++;
     m_back_bitmap_id = m_next_bitmap_id++;
 
-    auto front_bitmap = Gfx::Bitmap::create_shareable(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, size).release_value();
-    auto back_bitmap = Gfx::Bitmap::create_shareable(Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied, size).release_value();
+    auto update_backing_stores = [&](RefPtr<Gfx::PaintingSurface> front_store, RefPtr<Gfx::PaintingSurface> back_store) {
+        m_allocated_size = size;
+        m_navigable->rendering_thread().update_backing_stores(move(front_store), move(back_store), m_front_bitmap_id, m_back_bitmap_id);
+    };
 
-#ifdef USE_VULKAN
-    if (skia_backend_context) {
-        m_front_store = Gfx::PaintingSurface::create_with_size(skia_backend_context, size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied);
-        m_front_store->on_flush = [front_bitmap](auto& surface) {
-            surface.read_into_bitmap(*front_bitmap);
-        };
-        m_back_store = Gfx::PaintingSurface::create_with_size(skia_backend_context, size, Gfx::BitmapFormat::BGRA8888, Gfx::AlphaType::Premultiplied);
-        m_back_store->on_flush = [back_bitmap](auto& surface) {
-            surface.read_into_bitmap(*back_bitmap);
-        };
+#ifdef USE_VULKAN_DMABUF_IMAGES
+    if (skia_backend_context && m_navigable->is_top_level_traversable()) {
+        auto backing_stores = create_linear_dmabuf_backing_stores(*m_navigable, size, m_front_bitmap_id, m_back_bitmap_id, *skia_backend_context);
+        if (!backing_stores.is_error()) {
+            auto backing_store_pair = backing_stores.release_value();
+            update_backing_stores(move(backing_store_pair.front), move(backing_store_pair.back));
+            return;
+        }
     }
 #endif
 
-    if (!m_front_store)
-        m_front_store = Gfx::PaintingSurface::wrap_bitmap(*front_bitmap);
-    if (!m_back_store)
-        m_back_store = Gfx::PaintingSurface::wrap_bitmap(*back_bitmap);
-
-    if (m_navigable->is_top_level_traversable()) {
-        auto& page_client = m_navigable->top_level_traversable()->page().client();
-        page_client.page_did_allocate_backing_stores(m_front_bitmap_id, front_bitmap->to_shareable_bitmap(), m_back_bitmap_id, back_bitmap->to_shareable_bitmap());
-    }
+    auto backing_stores = create_shareable_bitmap_backing_stores(*m_navigable, size, m_front_bitmap_id, m_back_bitmap_id, skia_backend_context);
+    update_backing_stores(move(backing_stores.front), move(backing_stores.back));
 }
 
 void BackingStoreManager::resize_backing_stores_if_needed(WindowResizingInProgress window_resize_in_progress)
 {
-    if (!m_navigable->is_top_level_traversable() || m_navigable->is_svg_page())
+    if (m_navigable->is_svg_page())
         return;
 
     auto viewport_size = m_navigable->page().css_to_device_rect(m_navigable->viewport_rect()).size();
@@ -156,25 +153,19 @@ void BackingStoreManager::resize_backing_stores_if_needed(WindowResizingInProgre
         return;
 
     Web::DevicePixelSize minimum_needed_size;
-    if (window_resize_in_progress == WindowResizingInProgress::Yes) {
+    bool force_reallocate = false;
+    if (window_resize_in_progress == WindowResizingInProgress::Yes && m_navigable->is_top_level_traversable()) {
         // Pad the minimum needed size so that we don't have to keep reallocating backing stores while the window is being resized.
         minimum_needed_size = { viewport_size.width() + 256, viewport_size.height() + 256 };
     } else {
         // If we're not in the middle of a resize, we can shrink the backing store size to match the viewport size.
         minimum_needed_size = viewport_size;
-        m_front_store.clear();
-        m_back_store.clear();
+        force_reallocate = m_allocated_size != minimum_needed_size.to_type<int>();
     }
 
-    if (!m_front_store || !m_back_store || !m_front_store->size().contains(minimum_needed_size.to_type<int>())) {
+    if (force_reallocate || m_allocated_size.is_empty() || !m_allocated_size.contains(minimum_needed_size.to_type<int>())) {
         reallocate_backing_stores(minimum_needed_size.to_type<int>());
     }
-}
-
-void BackingStoreManager::swap_back_and_front()
-{
-    swap(m_front_store, m_back_store);
-    swap(m_front_bitmap_id, m_back_bitmap_id);
 }
 
 }

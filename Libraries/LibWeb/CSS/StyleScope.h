@@ -11,8 +11,10 @@
 #include <AK/Optional.h>
 #include <AK/Vector.h>
 #include <LibGC/Ptr.h>
+#include <LibGC/WeakHashSet.h>
 #include <LibWeb/Animations/KeyframeEffect.h>
 #include <LibWeb/CSS/CascadeOrigin.h>
+#include <LibWeb/CSS/CounterStyle.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleInvalidationData.h>
 #include <LibWeb/Forward.h>
@@ -38,6 +40,8 @@ struct MatchingRule {
     CSSStyleProperties const& declaration() const;
     SelectorList const& absolutized_selectors() const;
     FlyString const& qualified_layer_name() const;
+
+    void visit_edges(GC::Cell::Visitor&);
 };
 
 struct RuleCache {
@@ -55,15 +59,20 @@ struct RuleCache {
 
     void add_rule(MatchingRule const&, Optional<PseudoElement>, bool contains_root_pseudo_class);
     void for_each_matching_rules(DOM::AbstractElement, Function<IterationDecision(Vector<MatchingRule> const&)> callback) const;
+
+    void visit_edges(GC::Cell::Visitor&);
 };
 
 struct RuleCaches {
     RuleCache main;
     HashMap<FlyString, NonnullOwnPtr<RuleCache>> by_layer;
+
+    void visit_edges(GC::Cell::Visitor&);
 };
 
 struct SelectorInsights {
     bool has_has_selectors { false };
+    bool has_has_selectors_with_relative_selector_that_has_sibling_combinator { false };
 };
 
 class StyleScope {
@@ -82,8 +91,8 @@ public:
 
     [[nodiscard]] RuleCache const& get_pseudo_class_rule_cache(PseudoClass) const;
 
-    template<typename Callback>
-    void for_each_stylesheet(CascadeOrigin, Callback) const;
+    void for_each_stylesheet(CascadeOrigin, Function<void(CSS::CSSStyleSheet&)> const&) const;
+    void build_user_style_sheet_if_needed();
 
     void make_rule_cache_for_cascade_origin(CascadeOrigin, SelectorInsights&);
 
@@ -96,12 +105,21 @@ public:
 
     [[nodiscard]] bool may_have_has_selectors() const;
     [[nodiscard]] bool have_has_selectors() const;
+    [[nodiscard]] bool may_have_has_selectors_with_relative_selector_that_has_sibling_combinator() const;
+    [[nodiscard]] bool have_has_selectors_with_relative_selector_that_has_sibling_combinator() const;
 
-    void for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)>&& callback) const;
+    void for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)> const& callback) const;
 
     void invalidate_style_of_elements_affected_by_has();
 
-    void schedule_ancestors_style_invalidation_due_to_presence_of_has(DOM::Node& node) { m_pending_nodes_for_style_invalidation_due_to_presence_of_has.set(node); }
+    void invalidate_counter_style_cache();
+    void build_counter_style_cache();
+    RefPtr<CSS::CounterStyle const> get_registered_counter_style(FlyString const& name) const;
+
+    void schedule_ancestors_style_invalidation_due_to_presence_of_has(DOM::Node& node);
+
+    template<typename T>
+    Optional<T> dereference_global_tree_scoped_reference(Function<Optional<T>(StyleScope const&)> const& callback) const;
 
     void visit_edges(GC::Cell::Visitor&);
 
@@ -115,7 +133,11 @@ public:
 
     GC::Ptr<CSSStyleSheet> m_user_style_sheet;
 
-    HashTable<GC::Weak<DOM::Node>> m_pending_nodes_for_style_invalidation_due_to_presence_of_has;
+    GC::WeakHashSet<DOM::Node> m_pending_nodes_for_style_invalidation_due_to_presence_of_has;
+
+    bool m_needs_counter_style_cache_update : 1 { true };
+    bool m_is_doing_counter_style_cache_update : 1 { false };
+    HashMap<FlyString, NonnullRefPtr<CSS::CounterStyle const>> m_registered_counter_styles;
 
     GC::Ref<DOM::Node> m_node;
 };

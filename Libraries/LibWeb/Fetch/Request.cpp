@@ -7,7 +7,7 @@
 #include <LibHTTP/Method.h>
 #include <LibJS/Runtime/Completion.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/RequestPrototype.h>
+#include <LibWeb/Bindings/Request.h>
 #include <LibWeb/DOM/AbortSignal.h>
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/Fetch/Enums.h>
@@ -348,7 +348,7 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
         request->set_cache_mode(from_bindings_enum(*init.cache));
 
     // 21. If request’s cache mode is "only-if-cached" and request’s mode is not "same-origin", then throw a TypeError.
-    if (request->cache_mode() == Infrastructure::Request::CacheMode::OnlyIfCached && request->mode() != Infrastructure::Request::Mode::SameOrigin)
+    if (request->cache_mode() == HTTP::CacheMode::OnlyIfCached && request->mode() != Infrastructure::Request::Mode::SameOrigin)
         return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Mode must be 'same-origin' when cache mode is 'only-if-cached'"sv };
 
     // 22. If init["redirect"] exists, then set request’s redirect mode to it.
@@ -449,16 +449,16 @@ WebIDL::ExceptionOr<GC::Ref<Request>> Request::construct_impl(JS::Realm& realm, 
         input_body = input.get<GC::Root<Request>>()->request()->body();
 
     // 35. If either init["body"] exists and is non-null or inputBody is non-null, and request’s method is `GET` or `HEAD`, then throw a TypeError.
-    if (((init.body.has_value() && (*init.body).has_value()) || (input_body.has_value() && !input_body.value().has<Empty>())) && request->method().is_one_of("GET"sv, "HEAD"sv))
+    if (((init.body.has_value() && !init.body->has<Empty>()) || (input_body.has_value() && !input_body.value().has<Empty>())) && request->method().is_one_of("GET"sv, "HEAD"sv))
         return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Method must not be GET or HEAD when body is provided"sv };
 
     // 36. Let initBody be null.
     Optional<Infrastructure::Request::BodyType> init_body;
 
     // 37. If init["body"] exists and is non-null, then:
-    if (init.body.has_value() && (*init.body).has_value()) {
-        // 1. Let bodyWithType be the result of extracting init["body"], with keepalive set to request’s keepalive.
-        auto body_with_type = TRY(extract_body(realm, (*init.body).value(), request->keepalive()));
+    if (init.body.has_value() && !init.body->has<Empty>()) {
+        // 1. Let bodyWithType be the result of extracting init["body"], with keepalive set to request's keepalive.
+        auto body_with_type = TRY(extract_body(realm, init.body->downcast<GC::Root<Streams::ReadableStream>, GC::Root<FileAPI::Blob>, GC::Root<WebIDL::BufferSource>, GC::Root<XHR::FormData>, GC::Root<DOMURL::URLSearchParams>, String>(), request->keepalive()));
 
         // 2. Set initBody to bodyWithType’s body.
         init_body = body_with_type.body;

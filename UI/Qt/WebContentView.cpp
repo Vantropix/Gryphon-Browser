@@ -418,6 +418,19 @@ void WebContentView::mouseMoveEvent(QMouseEvent* event)
 
 void WebContentView::mousePressEvent(QMouseEvent* event)
 {
+    auto elapsed = event->timestamp() - m_last_click_timestamp;
+    auto distance = (event->position() - m_last_click_position).manhattanLength();
+
+    if (elapsed < static_cast<u64>(QApplication::doubleClickInterval()) && distance < QApplication::startDragDistance()) {
+        ++m_click_count;
+        if (m_click_count < 1)
+            m_click_count = 1;
+    } else {
+        m_click_count = 1;
+    }
+    m_last_click_timestamp = event->timestamp();
+    m_last_click_position = event->position();
+
     enqueue_native_event(Web::MouseEvent::Type::MouseDown, *event);
 }
 
@@ -443,7 +456,9 @@ void WebContentView::wheelEvent(QWheelEvent* event)
 
 void WebContentView::mouseDoubleClickEvent(QMouseEvent* event)
 {
-    enqueue_native_event(Web::MouseEvent::Type::DoubleClick, *event);
+    // NOTE: Qt calls this instead of mousePressEvent on the 2nd click. Forward to mousePressEvent so our click
+    //       counting logic handles double and triple clicks uniformly.
+    mousePressEvent(event);
 }
 
 void WebContentView::dragEnterEvent(QDragEnterEvent* event)
@@ -495,11 +510,11 @@ void WebContentView::paintEvent(QPaintEvent*)
     Gfx::IntSize bitmap_size;
 
     if (m_client_state.has_usable_bitmap) {
-        bitmap = m_client_state.front_bitmap.bitmap.ptr();
+        VERIFY(m_client_state.front_bitmap.shared_image_buffer);
+        bitmap = m_client_state.front_bitmap.shared_image_buffer->bitmap().ptr();
         bitmap_size = m_client_state.front_bitmap.last_painted_size.to_type<int>();
-
-    } else {
-        bitmap = m_backup_bitmap.ptr();
+    } else if (m_backup_shared_image_buffer) {
+        bitmap = m_backup_shared_image_buffer->bitmap().ptr();
         bitmap_size = m_backup_bitmap_size.to_type<int>();
     }
 
@@ -530,15 +545,21 @@ void WebContentView::resizeEvent(QResizeEvent* event)
 void WebContentView::set_viewport_rect(Gfx::IntRect rect)
 {
     m_viewport_size = rect.size();
-    client().async_set_viewport_size(m_client_state.page_index, rect.size().to_type<Web::DevicePixels>());
+    handle_resize();
 }
 
 void WebContentView::set_device_pixel_ratio(double device_pixel_ratio)
 {
     m_device_pixel_ratio = device_pixel_ratio;
-    client().async_set_device_pixels_per_css_pixel(m_client_state.page_index, m_device_pixel_ratio * m_zoom_level);
     update_viewport_size();
     handle_resize();
+}
+
+void WebContentView::set_zoom_level(double zoom_level)
+{
+    m_zoom_level = zoom_level;
+    client().async_set_zoom_level(m_client_state.page_index, m_zoom_level);
+    update_zoom();
 }
 
 void WebContentView::set_maximum_frames_per_second(double maximum_frames_per_second)
@@ -810,7 +831,7 @@ void WebContentView::enqueue_native_event(Web::MouseEvent::Type type, QSinglePoi
         }
     }
 
-    enqueue_input_event(Web::MouseEvent { type, position, screen_position.to_type<Web::DevicePixels>(), button, buttons, modifiers, wheel_delta_x, wheel_delta_y, nullptr });
+    enqueue_input_event(Web::MouseEvent { type, position, screen_position.to_type<Web::DevicePixels>(), button, buttons, modifiers, wheel_delta_x, wheel_delta_y, m_click_count, nullptr });
 }
 
 struct DragData : Web::BrowserInputData {

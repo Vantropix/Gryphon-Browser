@@ -7,6 +7,8 @@
 #pragma once
 
 #include <LibWeb/Animations/Animation.h>
+#include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/EasingFunction.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
 
 namespace Web::CSS {
@@ -25,6 +27,12 @@ public:
     virtual Animations::AnimationClass animation_class() const override;
     virtual int class_specific_composite_order(GC::Ref<Animations::Animation> other) const override;
 
+    void apply_css_properties(ComputedProperties::AnimationProperties const&);
+
+    EasingFunction const& default_easing() const { return m_default_easing; }
+
+    virtual void set_timeline_for_bindings(GC::Ptr<Animations::AnimationTimeline> timeline) override;
+
 private:
     explicit CSSAnimation(JS::Realm&);
 
@@ -34,6 +42,12 @@ private:
 
     // https://drafts.csswg.org/css-animations-2/#dom-cssanimation-animationname
     FlyString m_animation_name;
+
+    // https://drafts.csswg.org/css-animations-1/#animation-timing-function
+    // The default per-keyframe easing, from the animation-timing-function property on the element.
+    EasingFunction m_default_easing { EasingFunction::ease() };
+
+    HashTable<CSS::PropertyID> m_ignored_css_properties;
 };
 
 }

@@ -15,9 +15,8 @@
 
 namespace Web::CSS {
 
-String LinearGradientStyleValue::to_string(SerializationMode mode) const
+void LinearGradientStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    StringBuilder builder;
     auto side_or_corner_to_string = [](SideOrCorner value) {
         switch (value) {
         case SideOrCorner::Top:
@@ -43,7 +42,7 @@ String LinearGradientStyleValue::to_string(SerializationMode mode) const
 
     auto default_direction = m_properties.gradient_type == GradientType::WebKit ? SideOrCorner::Top : SideOrCorner::Bottom;
     bool has_direction = m_properties.direction != default_direction;
-    bool has_color_space = m_properties.interpolation_method.has_value() && m_properties.interpolation_method.value().color_space != InterpolationMethod::default_color_space(m_properties.color_syntax);
+    bool has_color_space = m_properties.color_interpolation_method && m_properties.color_interpolation_method->as_color_interpolation_method().color_interpolation_method() != ColorInterpolationMethodStyleValue::default_color_interpolation_method(m_properties.color_syntax);
 
     if (m_properties.gradient_type == GradientType::WebKit)
         builder.append("-webkit-"sv);
@@ -56,7 +55,7 @@ String LinearGradientStyleValue::to_string(SerializationMode mode) const
                 builder.appendff("{}{}", m_properties.gradient_type == GradientType::Standard ? "to "sv : ""sv, side_or_corner_to_string(side_or_corner));
             },
             [&](NonnullRefPtr<StyleValue const> const& angle) {
-                builder.append(angle->to_string(mode));
+                angle->serialize(builder, mode);
             });
 
         if (has_color_space)
@@ -64,14 +63,13 @@ String LinearGradientStyleValue::to_string(SerializationMode mode) const
     }
 
     if (has_color_space)
-        builder.append(m_properties.interpolation_method.value().to_string());
+        m_properties.color_interpolation_method->serialize(builder, mode);
 
     if (has_direction || has_color_space)
         builder.append(", "sv);
 
     serialize_color_stop_list(builder, m_properties.color_stop_list, mode);
     builder.append(")"sv);
-    return MUST(builder.to_string());
 }
 
 ValueComparingNonnullRefPtr<StyleValue const> LinearGradientStyleValue::absolutized(ComputationContext const& context) const
@@ -81,7 +79,10 @@ ValueComparingNonnullRefPtr<StyleValue const> LinearGradientStyleValue::absoluti
     for (auto const& color_stop : m_properties.color_stop_list) {
         absolutized_color_stops.unchecked_append(color_stop.absolutized(context));
     }
-    return create(m_properties.direction, move(absolutized_color_stops), m_properties.gradient_type, m_properties.repeating, m_properties.interpolation_method);
+
+    auto absolutized_color_interpolation_method = m_properties.color_interpolation_method ? ValueComparingRefPtr<StyleValue const> { m_properties.color_interpolation_method->absolutized(context) } : nullptr;
+
+    return create(m_properties.direction, move(absolutized_color_stops), m_properties.gradient_type, m_properties.repeating, move(absolutized_color_interpolation_method));
 }
 
 bool LinearGradientStyleValue::equals(StyleValue const& other_) const

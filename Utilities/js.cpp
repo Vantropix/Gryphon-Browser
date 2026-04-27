@@ -7,27 +7,29 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <AK/JsonValue.h>
 #include <AK/NeverDestroyed.h>
 #include <AK/Platform.h>
 #include <AK/StringBuilder.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/ConfigFile.h>
 #include <LibCore/StandardPaths.h>
-#include <LibJS/Bytecode/BasicBlock.h>
-#include <LibJS/Bytecode/Generator.h>
-#include <LibJS/Bytecode/Interpreter.h>
+#include <LibJS/Bytecode/Debug.h>
 #include <LibJS/Console.h>
 #include <LibJS/Contrib/Test262/GlobalObject.h>
-#include <LibJS/Parser.h>
 #include <LibJS/Print.h>
 #include <LibJS/Runtime/ConsoleObject.h>
 #include <LibJS/Runtime/DeclarativeEnvironment.h>
 #include <LibJS/Runtime/GlobalEnvironment.h>
 #include <LibJS/Runtime/JSONObject.h>
+#include <LibJS/Runtime/Reference.h>
 #include <LibJS/Runtime/StringPrototype.h>
+#include <LibJS/Runtime/VM.h>
 #include <LibJS/Runtime/ValueInlines.h>
+#include <LibJS/RustFFI.h>
+#include <LibJS/Script.h>
+#include <LibJS/SourceCode.h>
 #include <LibJS/SourceTextModule.h>
+#include <LibJS/Token.h>
 #include <LibMain/Main.h>
 #include <LibTextCodec/Decoder.h>
 #include <signal.h>
@@ -45,6 +47,7 @@ GC::Root<JS::Value> g_last_value = GC::make_root(JS::js_undefined());
 
 class ReplObject final : public JS::GlobalObject {
     JS_OBJECT(ReplObject, JS::GlobalObject);
+    GC_DECLARE_ALLOCATOR(ReplObject);
 
 public:
     ReplObject(JS::Realm& realm)
@@ -62,10 +65,14 @@ private:
     JS_DECLARE_NATIVE_FUNCTION(load_json);
     JS_DECLARE_NATIVE_FUNCTION(last_value_getter);
     JS_DECLARE_NATIVE_FUNCTION(print);
+    JS_DECLARE_NATIVE_FUNCTION(gc);
 };
+
+GC_DEFINE_ALLOCATOR(ReplObject);
 
 class ScriptObject final : public JS::GlobalObject {
     JS_OBJECT(ScriptObject, JS::GlobalObject);
+    GC_DECLARE_ALLOCATOR(ScriptObject);
 
 public:
     ScriptObject(JS::Realm& realm)
@@ -79,7 +86,10 @@ private:
     JS_DECLARE_NATIVE_FUNCTION(load_ini);
     JS_DECLARE_NATIVE_FUNCTION(load_json);
     JS_DECLARE_NATIVE_FUNCTION(print);
+    JS_DECLARE_NATIVE_FUNCTION(gc);
 };
+
+GC_DEFINE_ALLOCATOR(ScriptObject);
 
 static bool s_dump_ast = false;
 static bool s_as_module = false;
@@ -92,7 +102,7 @@ static RefPtr<Line::Editor> s_editor;
 #endif
 static String s_history_path = String {};
 [[maybe_unused]] static int s_repl_line_level = 0;
-static bool s_keep_running_repl = true;
+[[maybe_unused]] static bool s_keep_running_repl = true;
 static int s_exit_code = 0;
 
 static ErrorOr<void> print_inline(JS::Value value, Stream& stream)
@@ -189,13 +199,6 @@ static ErrorOr<bool> parse_and_run(JS::Realm& realm, StringView source, StringVi
 
     JS::ThrowCompletionOr<JS::Value> result { JS::js_undefined() };
 
-    auto run_script_or_module = [&](auto& script_or_module) {
-        if (s_dump_ast)
-            script_or_module->parse_node().dump(0);
-
-        result = vm.bytecode_interpreter().run(*script_or_module);
-    };
-
     if (!s_as_module) {
         auto script_or_error = JS::Script::parse(source, realm, source_name);
         if (script_or_error.is_error()) {
@@ -210,8 +213,10 @@ static ErrorOr<bool> parse_and_run(JS::Realm& realm, StringView source, StringVi
             outln("{}", error_string);
             result = vm.throw_completion<JS::SyntaxError>(move(error_string));
         } else {
+            auto script = script_or_error.release_value();
+
             if (!parse_only)
-                run_script_or_module(script_or_error.value());
+                result = vm.run(*script);
         }
     } else {
         auto module_or_error = JS::SourceTextModule::parse(source, realm, source_name);
@@ -227,8 +232,9 @@ static ErrorOr<bool> parse_and_run(JS::Realm& realm, StringView source, StringVi
             outln("{}", error_string);
             result = vm.throw_completion<JS::SyntaxError>(move(error_string));
         } else {
+            auto module = module_or_error.release_value();
             if (!parse_only)
-                run_script_or_module(module_or_error.value());
+                result = vm.run(*module);
         }
     }
 
@@ -236,9 +242,8 @@ static ErrorOr<bool> parse_and_run(JS::Realm& realm, StringView source, StringVi
         warnln("Uncaught exception: ");
         TRY(print(thrown_value, PrintTarget::StandardError));
 
-        if (!thrown_value.is_object() || !is<JS::Error>(thrown_value.as_object()))
-            return {};
-        warnln("{}", static_cast<JS::Error const&>(thrown_value.as_object()).stack_string(JS::CompactTraceback::Yes));
+        if (auto error = thrown_value.template as_if<JS::Error>())
+            warnln("{}", error->stack_string(JS::CompactTraceback::Yes));
         return {};
     };
 
@@ -290,11 +295,7 @@ static JS::ThrowCompletionOr<JS::Value> load_json_impl(JS::VM& vm)
     if (file_contents_or_error.is_error())
         return vm.throw_completion<JS::Error>(TRY_OR_THROW_OOM(vm, String::formatted("Failed to read '{}': {}", filename, file_contents_or_error.error())));
 
-    auto json = JsonValue::from_string(file_contents_or_error.value());
-    if (json.is_error())
-        return vm.throw_completion<JS::SyntaxError>(JS::ErrorType::JsonMalformed);
-
-    return JS::JSONObject::parse_json_value(vm, json.value());
+    return JS::JSONObject::parse_json(vm, file_contents_or_error.value());
 }
 
 void ReplObject::initialize(JS::Realm& realm)
@@ -309,6 +310,7 @@ void ReplObject::initialize(JS::Realm& realm)
     define_native_function(realm, "loadINI"_utf16_fly_string, load_ini, 1, attr);
     define_native_function(realm, "loadJSON"_utf16_fly_string, load_json, 1, attr);
     define_native_function(realm, "print"_utf16_fly_string, print, 1, attr);
+    define_native_function(realm, "gc"_utf16_fly_string, gc, 0, attr);
 
     define_native_accessor(
         realm,
@@ -382,6 +384,12 @@ JS_DEFINE_NATIVE_FUNCTION(ReplObject::print)
     return JS::js_undefined();
 }
 
+JS_DEFINE_NATIVE_FUNCTION(ReplObject::gc)
+{
+    vm.heap().collect_garbage();
+    return JS::js_undefined();
+}
+
 void ScriptObject::initialize(JS::Realm& realm)
 {
     Base::initialize(realm);
@@ -391,6 +399,7 @@ void ScriptObject::initialize(JS::Realm& realm)
     define_native_function(realm, "loadINI"_utf16_fly_string, load_ini, 1, attr);
     define_native_function(realm, "loadJSON"_utf16_fly_string, load_json, 1, attr);
     define_native_function(realm, "print"_utf16_fly_string, print, 1, attr);
+    define_native_function(realm, "gc"_utf16_fly_string, gc, 0, attr);
 }
 
 JS_DEFINE_NATIVE_FUNCTION(ScriptObject::load_ini)
@@ -409,6 +418,12 @@ JS_DEFINE_NATIVE_FUNCTION(ScriptObject::print)
     if (result.is_error())
         return g_vm->throw_completion<JS::InternalError>(TRY_OR_THROW_OOM(*g_vm, String::formatted("Failed to print value(s): {}", result.error())));
 
+    return JS::js_undefined();
+}
+
+JS_DEFINE_NATIVE_FUNCTION(ScriptObject::gc)
+{
+    vm.heap().collect_garbage();
     return JS::js_undefined();
 }
 
@@ -445,8 +460,8 @@ public:
             if (!trace.label.is_empty())
                 builder.appendff("{}\033[36;1m{}\033[0m\n", indent, trace.label);
 
-            for (auto& function_name : trace.stack)
-                builder.appendff("{}-> {}\n", indent, function_name);
+            for (auto& frame : trace.stack)
+                builder.appendff("{}-> {}\n", indent, frame.function_name);
 
             outln("{}", builder.string_view());
             return JS::js_undefined();
@@ -513,7 +528,8 @@ static ErrorOr<String> read_next_piece()
 
         piece.append(line);
         piece.append('\n');
-        auto lexer = JS::Lexer(JS::SourceCode::create({}, Utf16String::from_utf8(line)));
+
+        auto source_code = JS::SourceCode::create({}, Utf16String::from_utf8(line));
 
         enum {
             NotInLabelOrObjectKey,
@@ -521,38 +537,45 @@ static ErrorOr<String> read_next_piece()
             InLabelOrObjectKey
         } label_state { NotInLabelOrObjectKey };
 
-        for (JS::Token token = lexer.next(); token.type() != JS::TokenType::Eof; token = lexer.next()) {
-            switch (token.type()) {
-            case JS::TokenType::BracketOpen:
-            case JS::TokenType::CurlyOpen:
-            case JS::TokenType::ParenOpen:
-                label_state = NotInLabelOrObjectKey;
-                s_repl_line_level++;
-                break;
-            case JS::TokenType::BracketClose:
-            case JS::TokenType::CurlyClose:
-            case JS::TokenType::ParenClose:
-                label_state = NotInLabelOrObjectKey;
-                s_repl_line_level--;
-                break;
+        struct BracketState {
+            decltype(label_state)* label;
+            int* level;
+        } bracket_state { &label_state, &s_repl_line_level };
 
-            case JS::TokenType::Identifier:
-            case JS::TokenType::StringLiteral:
-                if (label_state == NotInLabelOrObjectKey)
-                    label_state = InLabelOrObjectKeyIdentifier;
-                else
-                    label_state = NotInLabelOrObjectKey;
-                break;
-            case JS::TokenType::Colon:
-                if (label_state == InLabelOrObjectKeyIdentifier)
-                    label_state = InLabelOrObjectKey;
-                else
-                    label_state = NotInLabelOrObjectKey;
-                break;
-            default:
-                break;
-            }
-        }
+        JS::FFI::rust_tokenize(source_code->utf16_data(), source_code->length_in_code_units(), &bracket_state,
+            [](void* ctx, JS::FFI::FFIToken const* tok) {
+                auto& state = *static_cast<BracketState*>(ctx);
+                auto type = static_cast<JS::TokenType>(tok->token_type);
+                switch (type) {
+                case JS::TokenType::BracketOpen:
+                case JS::TokenType::CurlyOpen:
+                case JS::TokenType::ParenOpen:
+                    *state.label = NotInLabelOrObjectKey;
+                    (*state.level)++;
+                    break;
+                case JS::TokenType::BracketClose:
+                case JS::TokenType::CurlyClose:
+                case JS::TokenType::ParenClose:
+                    *state.label = NotInLabelOrObjectKey;
+                    (*state.level)--;
+                    break;
+                case JS::TokenType::Identifier:
+                case JS::TokenType::StringLiteral:
+                    if (*state.label == NotInLabelOrObjectKey)
+                        *state.label = InLabelOrObjectKeyIdentifier;
+                    else
+                        *state.label = NotInLabelOrObjectKey;
+                    break;
+                case JS::TokenType::Colon:
+                    if (*state.label == InLabelOrObjectKeyIdentifier)
+                        *state.label = InLabelOrObjectKey;
+                    else
+                        *state.label = NotInLabelOrObjectKey;
+                    break;
+                default:
+                    break;
+                }
+            });
 
         if (label_state == InLabelOrObjectKey) {
             // If there's a label or object literal key at the end of this line,
@@ -622,63 +645,69 @@ static ErrorOr<int> run_repl(bool gc_on_every_allocation, bool syntax_highlight)
         size_t open_indents = s_repl_line_level;
 
         auto line = editor.line();
-        JS::Lexer lexer(JS::SourceCode::create({}, Utf16String::from_utf8(line)));
-        bool indenters_starting_line = true;
-        for (JS::Token token = lexer.next(); token.type() != JS::TokenType::Eof; token = lexer.next()) {
-            auto length = token.value().length_in_code_units();
-            auto start = token.offset();
-            auto end = start + length;
-            if (indenters_starting_line) {
-                if (token.type() != JS::TokenType::ParenClose && token.type() != JS::TokenType::BracketClose && token.type() != JS::TokenType::CurlyClose) {
-                    indenters_starting_line = false;
-                } else {
-                    --open_indents;
-                }
-            }
+        auto source_code = JS::SourceCode::create({}, Utf16String::from_utf8(line));
 
-            switch (token.category()) {
-            case JS::TokenCategory::Invalid:
-                stylize({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Red), Line::Style::Underline });
-                break;
-            case JS::TokenCategory::Number:
-                stylize({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Magenta) });
-                break;
-            case JS::TokenCategory::String:
-                stylize({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Green), Line::Style::Bold });
-                break;
-            case JS::TokenCategory::Punctuation:
-                break;
-            case JS::TokenCategory::Operator:
-                break;
-            case JS::TokenCategory::Keyword:
-                switch (token.type()) {
-                case JS::TokenType::BoolLiteral:
-                case JS::TokenType::NullLiteral:
-                    stylize({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Yellow), Line::Style::Bold });
+        struct HighlightState {
+            decltype(stylize)* stylize_fn;
+            size_t* open_indents;
+            bool indenters_starting_line { true };
+        } highlight_state { &stylize, &open_indents };
+
+        JS::FFI::rust_tokenize(source_code->utf16_data(), source_code->length_in_code_units(), &highlight_state,
+            [](void* ctx, JS::FFI::FFIToken const* tok) {
+                auto& state = *static_cast<HighlightState*>(ctx);
+                auto type = static_cast<JS::TokenType>(tok->token_type);
+                auto category = static_cast<JS::TokenCategory>(tok->category);
+                auto start = static_cast<size_t>(tok->offset);
+                auto end = start + tok->length;
+                if (type == JS::TokenType::Eof)
+                    return;
+
+                if (state.indenters_starting_line) {
+                    if (type != JS::TokenType::ParenClose && type != JS::TokenType::BracketClose && type != JS::TokenType::CurlyClose)
+                        state.indenters_starting_line = false;
+                    else
+                        --(*state.open_indents);
+                }
+
+                switch (category) {
+                case JS::TokenCategory::Invalid:
+                    (*state.stylize_fn)({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Red), Line::Style::Underline });
+                    break;
+                case JS::TokenCategory::Number:
+                    (*state.stylize_fn)({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Magenta) });
+                    break;
+                case JS::TokenCategory::String:
+                    (*state.stylize_fn)({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Green), Line::Style::Bold });
+                    break;
+                case JS::TokenCategory::Punctuation:
+                case JS::TokenCategory::Operator:
+                    break;
+                case JS::TokenCategory::Keyword:
+                    if (type == JS::TokenType::BoolLiteral || type == JS::TokenType::NullLiteral)
+                        (*state.stylize_fn)({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Yellow), Line::Style::Bold });
+                    else
+                        (*state.stylize_fn)({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Blue), Line::Style::Bold });
+                    break;
+                case JS::TokenCategory::ControlKeyword:
+                    (*state.stylize_fn)({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Cyan), Line::Style::Italic });
+                    break;
+                case JS::TokenCategory::Identifier:
+                    (*state.stylize_fn)({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::White), Line::Style::Bold });
                     break;
                 default:
-                    stylize({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Blue), Line::Style::Bold });
                     break;
                 }
-                break;
-            case JS::TokenCategory::ControlKeyword:
-                stylize({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::Cyan), Line::Style::Italic });
-                break;
-            case JS::TokenCategory::Identifier:
-                stylize({ start, end, Line::Span::CodepointOriented }, { Line::Style::Foreground(Line::Style::XtermColor::White), Line::Style::Bold });
-                break;
-            default:
-                break;
-            }
-        }
+            });
 
         editor.set_prompt(prompt_for_level(open_indents).release_value_but_fixme_should_propagate_errors().to_byte_string());
     };
 
     auto complete = [&realm, &global_environment](Line::Editor const& editor) -> Vector<Line::CompletionSuggestion> {
         auto line = editor.line(editor.cursor());
+        auto source_code = JS::SourceCode::create({}, Utf16String::from_utf8(line));
+        auto const& code_view = source_code->code_view();
 
-        JS::Lexer lexer(JS::SourceCode::create({}, Utf16String::from_utf8(line)));
         enum {
             Initial,
             CompleteVariable,
@@ -688,6 +717,15 @@ static ErrorOr<int> run_repl(bool gc_on_every_allocation, bool syntax_highlight)
 
         Utf16FlyString variable_name;
         Utf16FlyString property_name;
+        bool last_token_has_trivia = false;
+
+        struct CompleteState {
+            decltype(mode)* current_mode;
+            Utf16FlyString* variable_name;
+            Utf16FlyString* property_name;
+            bool* last_token_has_trivia;
+            Utf16View const* code_view;
+        } complete_state { &mode, &variable_name, &property_name, &last_token_has_trivia, &code_view };
 
         // we're only going to complete either
         //    - <N>
@@ -695,45 +733,48 @@ static ErrorOr<int> run_repl(bool gc_on_every_allocation, bool syntax_highlight)
         //    - <N>.<P>
         //        where N is the complete name of a variable and
         //        P is part of the name of one of its properties
-        auto js_token = lexer.next();
-        for (; js_token.type() != JS::TokenType::Eof; js_token = lexer.next()) {
-            switch (mode) {
-            case CompleteVariable:
-                switch (js_token.type()) {
-                case JS::TokenType::Period:
-                    // ...<name> <dot>
-                    mode = CompleteNullProperty;
-                    break;
-                default:
-                    // not a dot, reset back to initial
-                    mode = Initial;
-                    break;
+        JS::FFI::rust_tokenize(source_code->utf16_data(), source_code->length_in_code_units(), &complete_state,
+            [](void* ctx, JS::FFI::FFIToken const* tok) {
+                auto& s = *static_cast<CompleteState*>(ctx);
+                auto type = static_cast<JS::TokenType>(tok->token_type);
+                auto category = static_cast<JS::TokenCategory>(tok->category);
+                if (type == JS::TokenType::Eof) {
+                    *s.last_token_has_trivia = tok->trivia_length > 0;
+                    return;
                 }
-                break;
-            case CompleteNullProperty:
-                if (js_token.is_identifier_name()) {
-                    // ...<name> <dot> <name>
-                    mode = CompleteProperty;
-                    property_name = js_token.fly_string_value();
-                } else {
-                    mode = Initial;
-                }
-                break;
-            case CompleteProperty:
-                // something came after the property access, reset to initial
-            case Initial:
-                if (js_token.type() == JS::TokenType::Identifier) {
-                    // ...<name>...
-                    mode = CompleteVariable;
-                    variable_name = js_token.fly_string_value();
-                } else {
-                    mode = Initial;
-                }
-                break;
-            }
-        }
 
-        bool last_token_has_trivia = !js_token.trivia().is_empty();
+                auto token_value = [&]() {
+                    return Utf16FlyString::from_utf16(s.code_view->substring_view(tok->offset, tok->length));
+                };
+                bool is_identifier_name = type != JS::TokenType::PrivateIdentifier
+                    && (category == JS::TokenCategory::Identifier || category == JS::TokenCategory::Keyword || category == JS::TokenCategory::ControlKeyword);
+
+                switch (*s.current_mode) {
+                case CompleteVariable:
+                    if (type == JS::TokenType::Period)
+                        *s.current_mode = CompleteNullProperty;
+                    else
+                        *s.current_mode = Initial;
+                    break;
+                case CompleteNullProperty:
+                    if (is_identifier_name) {
+                        *s.current_mode = CompleteProperty;
+                        *s.property_name = token_value();
+                    } else {
+                        *s.current_mode = Initial;
+                    }
+                    break;
+                case CompleteProperty:
+                case Initial:
+                    if (type == JS::TokenType::Identifier) {
+                        *s.current_mode = CompleteVariable;
+                        *s.variable_name = token_value();
+                    } else {
+                        *s.current_mode = Initial;
+                    }
+                    break;
+                }
+            });
 
         if (mode == CompleteNullProperty) {
             mode = CompleteProperty;
@@ -777,12 +818,10 @@ static ErrorOr<int> run_repl(bool gc_on_every_allocation, bool syntax_highlight)
             auto variable = value_or_error.value();
             VERIFY(!variable.is_special_empty_value());
 
-            if (!variable.is_object())
-                break;
-
-            auto const object = MUST(variable.to_object(*g_vm));
-            auto const& shape = object->shape();
-            list_all_properties(shape, property_name);
+            if (auto object = variable.template as_if<JS::Object>()) {
+                auto const& shape = object->shape();
+                list_all_properties(shape, property_name);
+            }
             break;
         }
         case CompleteVariable: {
@@ -841,6 +880,9 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     args_parser.parse(arguments);
 
     [[maybe_unused]] bool syntax_highlight = !disable_syntax_highlight;
+
+    JS::g_dump_ast = s_dump_ast;
+    JS::g_dump_ast_use_color = !s_strip_ansi;
 
     AK::set_debug_enabled(!disable_debug_printing);
     s_history_path = TRY(String::formatted("{}/.js-history", Core::StandardPaths::home_directory()));

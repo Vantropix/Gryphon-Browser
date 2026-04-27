@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/IDBCursorPrototype.h>
+#include <LibWeb/Bindings/IDBCursor.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/EventNames.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
@@ -55,8 +55,7 @@ void IDBCursor::visit_edges(Visitor& visitor)
     visitor.visit(m_range);
     visitor.visit(m_request);
 
-    if (m_value.has_value())
-        visitor.visit(*m_value);
+    visitor.visit(m_value);
 
     m_source_handle.visit([&](auto& source) {
         visitor.visit(source);
@@ -81,6 +80,17 @@ void IDBCursorWithValue::initialize(JS::Realm& realm)
 void IDBCursorWithValue::visit_edges(Visitor& visitor)
 {
     Base::visit_edges(visitor);
+}
+
+bool IDBCursor::is_source_or_object_store_deleted() const
+{
+    return m_source_handle.visit(
+        [](GC::Ref<IDBObjectStore> object_store) {
+            return object_store->store()->is_deleted();
+        },
+        [](GC::Ref<IDBIndex> index) {
+            return index->index()->is_deleted() || index->index()->object_store()->is_deleted();
+        });
 }
 
 // https://w3c.github.io/IndexedDB/#cursor-transaction
@@ -123,7 +133,9 @@ WebIDL::ExceptionOr<void> IDBCursor::continue_(JS::Value key)
     if (!transaction->is_active())
         return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while continuing cursor"_utf16);
 
-    // FIXME: 3. If this's source or effective object store has been deleted, throw an "InvalidStateError" DOMException
+    // 3. If this’s source or effective object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (is_source_or_object_store_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Source or its object store has been deleted"_utf16);
 
     // 4. If this's got value flag is false, indicating that the cursor is being iterated or has iterated past its end, throw an "InvalidStateError" DOMException.
     if (!m_got_value)
@@ -214,7 +226,9 @@ WebIDL::ExceptionOr<void> IDBCursor::advance(WebIDL::UnsignedLong count)
     if (!transaction->is_active())
         return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while advancing cursor"_utf16);
 
-    // FIXME: 4. If this’s source or effective object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 4. If this’s source or effective object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (is_source_or_object_store_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Source or its object store has been deleted"_utf16);
 
     // 5. If this’s got value flag is false, indicating that the cursor is being iterated or has iterated past its end, throw an "InvalidStateError" DOMException.
     if (!m_got_value)
@@ -256,7 +270,9 @@ WebIDL::ExceptionOr<void> IDBCursor::continue_primary_key(JS::Value key_param, J
     if (!transaction->is_active())
         return WebIDL::TransactionInactiveError::create(realm, "Transaction is not active while continuing cursor"_utf16);
 
-    // FIXME: 3. If this’s source or effective object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 3. If this’s source or effective object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (is_source_or_object_store_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Source or its object store has been deleted"_utf16);
 
     // 4. If this’s source is not an index throw an "InvalidAccessError" DOMException.
     if (!m_source_handle.has<GC::Ref<IDBIndex>>())
@@ -360,7 +376,9 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBCursor::update(JS::Value value)
     if (transaction->is_readonly())
         return WebIDL::ReadOnlyError::create(realm, "Transaction is read-only while updating cursor"_utf16);
 
-    // FIXME:  4. If this’s source or effective object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 4. If this’s source or effective object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (is_source_or_object_store_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Source or its object store has been deleted"_utf16);
 
     // 5. If this’s got value flag is false, indicating that the cursor is being iterated or has iterated past its end, throw an "InvalidStateError" DOMException.
     if (!m_got_value)
@@ -427,7 +445,9 @@ WebIDL::ExceptionOr<GC::Ref<IDBRequest>> IDBCursor::delete_()
     if (transaction->is_readonly())
         return WebIDL::ReadOnlyError::create(realm, "Transaction is read-only while deleting cursor"_utf16);
 
-    // FIXME: 4. If this’s source or effective object store has been deleted, throw an "InvalidStateError" DOMException.
+    // 4. If this’s source or effective object store has been deleted, throw an "InvalidStateError" DOMException.
+    if (is_source_or_object_store_deleted())
+        return WebIDL::InvalidStateError::create(realm, "Source or its object store has been deleted"_utf16);
 
     // 5. If this’s got value flag is false, indicating that the cursor is being iterated or has iterated past its end, throw an "InvalidStateError" DOMException.
     if (!m_got_value)

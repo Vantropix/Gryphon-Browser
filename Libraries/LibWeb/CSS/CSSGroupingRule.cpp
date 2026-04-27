@@ -5,11 +5,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/CSSGroupingRulePrototype.h>
+#include <LibWeb/Bindings/CSSGroupingRule.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/CSS/CSSGroupingRule.h>
 #include <LibWeb/CSS/CSSRuleList.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/HTML/Window.h>
 
 namespace Web::CSS {

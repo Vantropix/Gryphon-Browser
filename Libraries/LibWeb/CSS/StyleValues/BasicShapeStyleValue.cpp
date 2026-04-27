@@ -8,9 +8,12 @@
 #include "BasicShapeStyleValue.h"
 #include <LibGfx/Path.h>
 #include <LibWeb/CSS/Serialize.h>
+#include <LibWeb/CSS/StyleValues/BorderRadiusRectStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RadialSizeStyleValue.h>
 #include <LibWeb/CSS/ValueType.h>
+#include <LibWeb/Painting/BorderRadiiData.h>
+#include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/SVG/Path.h>
 
 namespace Web::CSS {
@@ -26,6 +29,7 @@ static Gfx::Path path_from_resolved_rect(float top, float right, float bottom, f
     return path;
 }
 
+// https://drafts.csswg.org/css-shapes/#funcdef-basic-shape-inset
 Gfx::Path Inset::to_path(CSSPixelRect reference_box, Layout::Node const& node) const
 {
     auto resolved_top = LengthPercentageOrAuto::from_style_value(top).to_px_or_zero(node, reference_box.height()).to_float();
@@ -54,22 +58,120 @@ Gfx::Path Inset::to_path(CSSPixelRect reference_box, Layout::Node const& node) c
         resolved_left *= f;
     }
 
-    return path_from_resolved_rect(resolved_top, reference_box.width().to_float() - resolved_right, reference_box.height().to_float() - resolved_bottom, resolved_left);
+    float left_edge = resolved_left;
+    float top_edge = resolved_top;
+    float right_edge = reference_box.width().to_float() - resolved_right;
+    float bottom_edge = reference_box.height().to_float() - resolved_bottom;
+
+    CSSPixelRect inset_rect {
+        CSSPixels(left_edge), CSSPixels(top_edge),
+        CSSPixels(right_edge - left_edge), CSSPixels(bottom_edge - top_edge)
+    };
+
+    auto const& border_radius_rect = border_radius->as_border_radius_rect();
+
+    auto to_border_radius_data = [](StyleValue const& corner) -> CSS::BorderRadiusData {
+        auto const& br = corner.as_border_radius();
+        return CSS::BorderRadiusData {
+            LengthPercentage::from_style_value(br.horizontal_radius()),
+            LengthPercentage::from_style_value(br.vertical_radius())
+        };
+    };
+
+    auto radii = Painting::normalize_border_radii_data(
+        node,
+        inset_rect,
+        reference_box,
+        to_border_radius_data(*border_radius_rect.top_left()),
+        to_border_radius_data(*border_radius_rect.top_right()),
+        to_border_radius_data(*border_radius_rect.bottom_right()),
+        to_border_radius_data(*border_radius_rect.bottom_left()));
+
+    if (!radii.has_any_radius())
+        return path_from_resolved_rect(top_edge, right_edge, bottom_edge, left_edge);
+
+    auto top_left_horizontal_radius = radii.top_left.horizontal_radius.to_float();
+    auto top_left_vertical_radius = radii.top_left.vertical_radius.to_float();
+
+    auto top_right_horizontal_radius = radii.top_right.horizontal_radius.to_float();
+    auto top_right_vertical_radius = radii.top_right.vertical_radius.to_float();
+
+    auto bottom_right_horizontal_radius = radii.bottom_right.horizontal_radius.to_float();
+    auto bottom_right_vertical_radius = radii.bottom_right.vertical_radius.to_float();
+
+    auto bottom_left_horizontal_radius = radii.bottom_left.horizontal_radius.to_float();
+    auto bottom_left_vertical_radius = radii.bottom_left.vertical_radius.to_float();
+
+    Gfx::Path path;
+    path.move_to({ left_edge + top_left_horizontal_radius, top_edge });
+    path.line_to({ right_edge - top_right_horizontal_radius, top_edge });
+
+    if (top_right_horizontal_radius > 0 && top_right_vertical_radius > 0)
+        path.elliptical_arc_to({ right_edge, top_edge + top_right_vertical_radius }, { top_right_horizontal_radius, top_right_vertical_radius }, 0, false, true);
+
+    path.line_to({ right_edge, bottom_edge - bottom_right_vertical_radius });
+    if (bottom_right_horizontal_radius > 0 && bottom_right_vertical_radius > 0)
+        path.elliptical_arc_to({ right_edge - bottom_right_horizontal_radius, bottom_edge }, { bottom_right_horizontal_radius, bottom_right_vertical_radius }, 0, false, true);
+
+    path.line_to({ left_edge + bottom_left_horizontal_radius, bottom_edge });
+    if (bottom_left_horizontal_radius > 0 && bottom_left_vertical_radius > 0)
+        path.elliptical_arc_to({ left_edge, bottom_edge - bottom_left_vertical_radius }, { bottom_left_horizontal_radius, bottom_left_vertical_radius }, 0, false, true);
+
+    path.line_to({ left_edge, top_edge + top_left_vertical_radius });
+    if (top_left_horizontal_radius > 0 && top_left_vertical_radius > 0)
+        path.elliptical_arc_to({ left_edge + top_left_horizontal_radius, top_edge }, { top_left_horizontal_radius, top_left_vertical_radius }, 0, false, true);
+
+    path.close();
+    return path;
 }
 
-String Inset::to_string(SerializationMode mode) const
+void Inset::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    return MUST(String::formatted("inset({} {} {} {})", top->to_string(mode), right->to_string(mode), bottom->to_string(mode), left->to_string(mode)));
+    builder.append("inset("sv);
+    builder.append(serialize_a_positional_value_list({ top, right, bottom, left }, mode));
+
+    auto serialized_border_radius = border_radius->to_string(mode);
+
+    if (serialized_border_radius != "0px"sv)
+        builder.appendff(" round {}", serialized_border_radius);
+
+    builder.append(')');
 }
 
-String Xywh::to_string(SerializationMode mode) const
+void Xywh::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    return MUST(String::formatted("xywh({} {} {} {})", x->to_string(mode), y->to_string(mode), width->to_string(mode), height->to_string(mode)));
+    builder.append("xywh("sv);
+    x->serialize(builder, mode);
+    builder.append(' ');
+    y->serialize(builder, mode);
+    builder.append(' ');
+    width->serialize(builder, mode);
+    builder.append(' ');
+    height->serialize(builder, mode);
+
+    auto serialized_border_radius = border_radius->to_string(mode);
+    if (serialized_border_radius != "0px"sv)
+        builder.appendff(" round {}", serialized_border_radius);
+
+    builder.append(')');
 }
 
-String Rect::to_string(SerializationMode mode) const
+void Rect::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    return MUST(String::formatted("rect({} {} {} {})", top->to_string(mode), right->to_string(mode), bottom->to_string(mode), left->to_string(mode)));
+    builder.append("rect("sv);
+    top->serialize(builder, mode);
+    builder.append(' ');
+    right->serialize(builder, mode);
+    builder.append(' ');
+    bottom->serialize(builder, mode);
+    builder.append(' ');
+    left->serialize(builder, mode);
+
+    auto serialized_border_radius = border_radius->to_string(mode);
+    if (serialized_border_radius != "0px"sv)
+        builder.appendff(" round {}", serialized_border_radius);
+
+    builder.append(')');
 }
 
 Gfx::Path Circle::to_path(CSSPixelRect reference_box, Layout::Node const& node) const
@@ -94,21 +196,23 @@ Gfx::Path Circle::to_path(CSSPixelRect reference_box, Layout::Node const& node) 
     return path;
 }
 
-String Circle::to_string(SerializationMode mode) const
+void Circle::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    StringBuilder arguments_builder;
+    builder.append("circle("sv);
     auto serialized_radius = radius->to_string(mode);
 
-    if (serialized_radius != "closest-side"sv)
-        arguments_builder.append(serialized_radius);
+    bool has_radius = serialized_radius != "closest-side"sv;
+    if (has_radius)
+        builder.append(serialized_radius);
 
     if (position) {
-        if (!arguments_builder.is_empty())
-            arguments_builder.append(' ');
-        arguments_builder.appendff("at {}", position->to_string(mode));
+        if (has_radius)
+            builder.append(' ');
+        builder.append("at "sv);
+        position->serialize(builder, mode);
     }
 
-    return MUST(String::formatted("circle({})", arguments_builder.to_string_without_validation()));
+    builder.append(')');
 }
 
 Gfx::Path Ellipse::to_path(CSSPixelRect reference_box, Layout::Node const& node) const
@@ -132,21 +236,23 @@ Gfx::Path Ellipse::to_path(CSSPixelRect reference_box, Layout::Node const& node)
     return path;
 }
 
-String Ellipse::to_string(SerializationMode mode) const
+void Ellipse::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    StringBuilder arguments_builder;
+    builder.append("ellipse("sv);
     auto serialized_radius = radius->to_string(mode);
 
-    if (serialized_radius != "closest-side closest-side"sv)
-        arguments_builder.append(serialized_radius);
+    bool has_radius = serialized_radius != "closest-side closest-side"sv;
+    if (has_radius)
+        builder.append(serialized_radius);
 
     if (position) {
-        if (!arguments_builder.is_empty())
-            arguments_builder.append(' ');
-        arguments_builder.appendff("at {}", position->to_string(mode));
+        if (has_radius)
+            builder.append(' ');
+        builder.append("at "sv);
+        position->serialize(builder, mode);
     }
 
-    return MUST(String::formatted("ellipse({})", arguments_builder.to_string_without_validation()));
+    builder.append(')');
 }
 
 Gfx::Path Polygon::to_path(CSSPixelRect reference_box, Layout::Node const& node) const
@@ -169,22 +275,26 @@ Gfx::Path Polygon::to_path(CSSPixelRect reference_box, Layout::Node const& node)
     return path;
 }
 
-String Polygon::to_string(SerializationMode mode) const
+void Polygon::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    StringBuilder builder;
     builder.append("polygon("sv);
+    bool first = true;
     switch (fill_rule) {
     case Gfx::WindingRule::Nonzero:
-        builder.append("nonzero"sv);
         break;
     case Gfx::WindingRule::EvenOdd:
+        first = false;
         builder.append("evenodd"sv);
     }
     for (auto const& point : points) {
-        builder.appendff(", {} {}", point.x->to_string(mode), point.y->to_string(mode));
+        if (!first)
+            builder.append(", "sv);
+        first = false;
+        point.x->serialize(builder, mode);
+        builder.append(' ');
+        point.y->serialize(builder, mode);
     }
     builder.append(')');
-    return MUST(builder.to_string());
 }
 
 Gfx::Path Path::to_path(CSSPixelRect, Layout::Node const&) const
@@ -195,9 +305,8 @@ Gfx::Path Path::to_path(CSSPixelRect, Layout::Node const&) const
 }
 
 // https://drafts.csswg.org/css-shapes/#basic-shape-serialization
-String Path::to_string(SerializationMode mode) const
+void Path::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    StringBuilder builder;
     builder.append("path("sv);
 
     // For serializing computed values, component values are computed, and omitted when possible without changing the meaning.
@@ -215,8 +324,6 @@ String Path::to_string(SerializationMode mode) const
     serialize_a_string(builder, path_instructions.serialize());
 
     builder.append(')');
-
-    return builder.to_string_without_validation();
 }
 
 BasicShapeStyleValue::~BasicShapeStyleValue() = default;
@@ -234,10 +341,10 @@ Gfx::Path BasicShapeStyleValue::to_path(CSSPixelRect reference_box, Layout::Node
     });
 }
 
-String BasicShapeStyleValue::to_string(SerializationMode mode) const
+void BasicShapeStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    return m_basic_shape.visit([mode](auto const& shape) {
-        return shape.to_string(mode);
+    m_basic_shape.visit([&](auto const& shape) {
+        shape.serialize(builder, mode);
     });
 }
 
@@ -274,10 +381,12 @@ ValueComparingNonnullRefPtr<StyleValue const> BasicShapeStyleValue::absolutized(
             auto absolutized_bottom = shape.bottom->absolutized(computation_context);
             auto absolutized_left = shape.left->absolutized(computation_context);
 
-            if (absolutized_top == shape.top && absolutized_right == shape.right && absolutized_bottom == shape.bottom && absolutized_left == shape.left)
+            auto absolutized_border_radius = shape.border_radius->absolutized(computation_context);
+
+            if (absolutized_top == shape.top && absolutized_right == shape.right && absolutized_bottom == shape.bottom && absolutized_left == shape.left && absolutized_border_radius == shape.border_radius)
                 return shape;
 
-            return Inset { absolutized_top, absolutized_right, absolutized_bottom, absolutized_left };
+            return Inset { absolutized_top, absolutized_right, absolutized_bottom, absolutized_left, absolutized_border_radius };
         },
         [&](Xywh const& shape) -> BasicShape {
             // Note: Given xywh(x y w h), the equivalent function is inset(y calc(100% - x - w) calc(100% - y - h) x).
@@ -285,8 +394,9 @@ ValueComparingNonnullRefPtr<StyleValue const> BasicShapeStyleValue::absolutized(
             auto absolutized_right = one_hundred_percent_minus({ shape.x, shape.width }, calculation_context)->absolutized(computation_context);
             auto absolutized_bottom = one_hundred_percent_minus({ shape.y, shape.height }, calculation_context)->absolutized(computation_context);
             auto absolutized_left = shape.x->absolutized(computation_context);
+            auto absolutized_border_radius = shape.border_radius->absolutized(computation_context);
 
-            return Inset { *absolutized_top, *absolutized_right, *absolutized_bottom, *absolutized_left };
+            return Inset { *absolutized_top, *absolutized_right, *absolutized_bottom, *absolutized_left, absolutized_border_radius };
         },
         [&](Rect const& shape) -> BasicShape {
             // Note: Given rect(t r b l), the equivalent function is inset(t calc(100% - r) calc(100% - b) l).
@@ -307,8 +417,9 @@ ValueComparingNonnullRefPtr<StyleValue const> BasicShapeStyleValue::absolutized(
             auto absolutized_right = one_hundred_percent_minus({ resolve_auto(shape.right, Percentage { 100 }) }, calculation_context)->absolutized(computation_context);
             auto absolutized_bottom = one_hundred_percent_minus({ resolve_auto(shape.bottom, Percentage { 100 }) }, calculation_context)->absolutized(computation_context);
             auto absolutized_left = resolve_auto(shape.left, Percentage { 0 })->absolutized(computation_context);
+            auto absolutized_border_radius = shape.border_radius->absolutized(computation_context);
 
-            return Inset { *absolutized_top, *absolutized_right, *absolutized_bottom, *absolutized_left };
+            return Inset { *absolutized_top, *absolutized_right, *absolutized_bottom, *absolutized_left, absolutized_border_radius };
         },
         [&](Circle const& shape) -> BasicShape {
             auto absolutized_radius = shape.radius->absolutized(computation_context);

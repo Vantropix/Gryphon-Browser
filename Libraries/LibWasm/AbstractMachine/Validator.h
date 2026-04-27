@@ -22,8 +22,11 @@ struct Context {
         RedBlackTree<size_t, FunctionIndex> tree;
     };
 
-    COWVector<FunctionType> types;
+    COWVector<TypeSection::Type> types;
     COWVector<FunctionType> functions;
+    COWVector<Optional<TypeIndex>> function_type_indices;
+    COWVector<StructType> structs;
+    COWVector<ArrayType> arrays;
     COWVector<TableType> tables;
     COWVector<MemoryType> memories;
     COWVector<GlobalType> globals;
@@ -34,6 +37,7 @@ struct Context {
     Optional<u32> data_count;
     RefPtr<RefRBTree> references { make_ref_counted<RefRBTree>() };
     size_t imported_function_count { 0 };
+    size_t current_function_parameter_count { 0 };
 };
 
 struct ValidationError : public Error {
@@ -72,7 +76,7 @@ public:
     ErrorOr<void, ValidationError> validate(TagSection const&);
     ErrorOr<void, ValidationError> validate(FunctionSection const&) { return {}; }
     ErrorOr<void, ValidationError> validate(DataCountSection const&) { return {}; }
-    ErrorOr<void, ValidationError> validate(TypeSection const&) { return {}; }
+    ErrorOr<void, ValidationError> validate(TypeSection const&);
     ErrorOr<void, ValidationError> validate(CustomSection const&) { return {}; }
 
     ErrorOr<void, ValidationError> validate(TypeIndex index) const
@@ -124,10 +128,10 @@ public:
         return Errors::invalid("LabelIndex"sv);
     }
 
-    ErrorOr<void, ValidationError> validate(LocalIndex index) const
+    ErrorOr<LocalIndex, ValidationError> validate(LocalIndex index) const
     {
         if (index.value() < m_context.locals.size())
-            return {};
+            return index;
         return Errors::invalid("LocalIndex"sv);
     }
 
@@ -191,18 +195,35 @@ public:
         bool is_numeric() const { return !is_known || concrete_type.is_numeric(); }
         bool is_reference() const { return !is_known || concrete_type.is_reference(); }
 
+        static bool is_subtype_of(ValueType const& concrete, ValueType const& expected)
+        {
+            if (concrete == expected)
+                return true;
+            // A typed function reference (ref [$null] $t) is a subtype of (ref [$null] func) when nullability is compatible.
+            if (expected.kind() == ValueType::FunctionReference && concrete.is_typeuse()
+                && (expected.is_nullable() || !concrete.is_nullable()))
+                return true;
+            // A non-nullable reference is a subtype of its nullable counterpart.
+            if (expected.is_nullable() && !concrete.is_nullable()) {
+                auto nullable_concrete = concrete;
+                nullable_concrete.set_nullable(true);
+                return nullable_concrete == expected;
+            }
+            return false;
+        }
+
         bool operator==(ValueType const& other) const
         {
-            if (is_known)
-                return concrete_type == other;
-            return true;
+            if (!is_known)
+                return true;
+            return is_subtype_of(concrete_type, other);
         }
 
         bool operator==(StackEntry const& other) const
         {
-            if (is_known && other.is_known)
-                return other.concrete_type == concrete_type;
-            return true;
+            if (!is_known || !other.is_known)
+                return true;
+            return is_subtype_of(concrete_type, other.concrete_type);
         }
 
         ValueType concrete_type;
@@ -299,11 +320,15 @@ public:
     // Types
     ErrorOr<void, ValidationError> validate(Limits const&, Optional<u64> bound); // n <= bound && m? <= bound
     ErrorOr<FunctionType, ValidationError> validate(BlockType const&);
-    ErrorOr<void, ValidationError> validate(FunctionType const&) { return {}; }
+    ErrorOr<void, ValidationError> validate(FunctionType const&);
+    ErrorOr<void, ValidationError> validate(StructType const&);
+    ErrorOr<void, ValidationError> validate(ArrayType const&);
     ErrorOr<void, ValidationError> validate(TableType const&);
     ErrorOr<void, ValidationError> validate(MemoryType const&);
-    ErrorOr<void, ValidationError> validate(GlobalType const&) { return {}; }
+    ErrorOr<void, ValidationError> validate(GlobalType const&);
     ErrorOr<void, ValidationError> validate(TagType const&);
+    ErrorOr<void, ValidationError> validate(ValueType const&);
+    ErrorOr<void, ValidationError> validate(TypeSection::Type const&);
 
     // Proposal 'memory64'
     ErrorOr<void, ValidationError> take_memory_address(Stack& stack, MemoryType const& memory, Instruction::MemoryArgument const& arg)
@@ -404,7 +429,7 @@ struct AK::Formatter<Wasm::Validator::StackEntry> : public AK::Formatter<StringV
     ErrorOr<void> format(FormatBuilder& builder, Wasm::Validator::StackEntry const& value)
     {
         if (value.is_known)
-            return Formatter<StringView>::format(builder, Wasm::ValueType::kind_name(value.concrete_type.kind()));
+            return Formatter<StringView>::format(builder, value.concrete_type.kind_name());
 
         return Formatter<StringView>::format(builder, "<unknown>"sv);
     }
@@ -422,7 +447,7 @@ template<>
 struct AK::Formatter<Wasm::ValueType> : public AK::Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Wasm::ValueType const& value)
     {
-        return Formatter<StringView>::format(builder, Wasm::ValueType::kind_name(value.kind()));
+        return Formatter<StringView>::format(builder, value.kind_name());
     }
 };
 
@@ -431,5 +456,13 @@ struct AK::Formatter<Wasm::ValidationError> : public AK::Formatter<StringView> {
     ErrorOr<void> format(FormatBuilder& builder, Wasm::ValidationError const& error)
     {
         return Formatter<StringView>::format(builder, error.error_string);
+    }
+};
+
+template<>
+struct AK::Formatter<Wasm::TypeSection::Type> : public AK::Formatter<StringView> {
+    ErrorOr<void> format(FormatBuilder& builder, Wasm::TypeSection::Type const& type)
+    {
+        return Formatter<StringView>::format(builder, type.name());
     }
 };

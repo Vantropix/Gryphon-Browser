@@ -9,6 +9,7 @@
 #include <LibGfx/BitmapExportResult.h>
 #include <LibJS/Runtime/DataView.h>
 #include <LibJS/Runtime/TypedArray.h>
+#include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/WebGL/Types.h>
 #include <LibWeb/WebIDL/Buffers.h>
@@ -29,27 +30,44 @@ namespace Web::WebGL {
 static constexpr int COMPRESSED_TEXTURE_FORMATS = 0x86A3;
 static constexpr int UNPACK_FLIP_Y_WEBGL = 0x9240;
 static constexpr int UNPACK_PREMULTIPLY_ALPHA_WEBGL = 0x9241;
+static constexpr int UNPACK_COLORSPACE_CONVERSION_WEBGL = 0x9243;
+static constexpr int BROWSER_DEFAULT_WEBGL = 0x9244;
 static constexpr int MAX_CLIENT_WAIT_TIMEOUT_WEBGL = 0x9247;
 
 // NOTE: This is the Variant created by the IDL wrapper generator, and needs to be updated accordingly.
 using TexImageSource = Variant<GC::Root<HTML::ImageBitmap>, GC::Root<HTML::ImageData>, GC::Root<HTML::HTMLImageElement>, GC::Root<HTML::HTMLCanvasElement>, GC::Root<HTML::OffscreenCanvas>, GC::Root<HTML::HTMLVideoElement>>;
 
-// FIXME: This object should inherit from Bindings::PlatformObject and implement the WebGLRenderingContextBase IDL interface.
-//        We should make WebGL code generator to produce implementation for this interface.
-class WebGLRenderingContextBase {
+class WebGLRenderingContextBase : public Bindings::PlatformObject {
+    WEB_NON_IDL_PLATFORM_OBJECT(WebGLRenderingContextBase, Bindings::PlatformObject);
+
 public:
     using Float32List = Variant<GC::Root<JS::Float32Array>, Vector<float>>;
     using Int32List = Variant<GC::Root<JS::Int32Array>, Vector<WebIDL::Long>>;
     using Uint32List = Variant<GC::Root<JS::Uint32Array>, Vector<WebIDL::UnsignedLong>>;
 
-    virtual GC::Cell const* gc_cell() const = 0;
-    virtual void visit_edges(JS::Cell::Visitor&) = 0;
     virtual OpenGLContext& context() = 0;
-    virtual bool ext_texture_filter_anisotropic_extension_enabled() const = 0;
-    virtual bool angle_instanced_arrays_extension_enabled() const = 0;
-    virtual bool oes_standard_derivatives_extension_enabled() const = 0;
-    virtual bool webgl_draw_buffers_extension_enabled() const = 0;
-    virtual ReadonlySpan<WebIDL::UnsignedLong> enabled_compressed_texture_formats() const = 0;
+
+    bool is_context_lost() const;
+
+    bool xr_compatible() const { return m_xr_compatible; }
+    void set_xr_compatible(bool xr_compatible) { m_xr_compatible = xr_compatible; }
+
+    // https://immersive-web.github.io/webxr/#dom-webglrenderingcontextbase-makexrcompatible
+    GC::Ref<WebIDL::Promise> make_xr_compatible();
+
+    Optional<Vector<String>> get_supported_extensions();
+    JS::Object* get_extension(String const& name);
+
+    void enable_compressed_texture_format(WebIDL::UnsignedLong format);
+
+protected:
+    WebGLRenderingContextBase(JS::Realm&);
+
+    virtual void visit_edges(Cell::Visitor&) override;
+
+    // FIXME: Make this and any another instance of extension names a FlyString, similarly to HTML::TagNames
+    bool extension_enabled(StringView extension) const;
+    ReadonlySpan<WebIDL::UnsignedLong> enabled_compressed_texture_formats() const;
 
     template<typename T>
     static ErrorOr<Span<T>> get_offset_span(Span<T> src_span, WebIDL::UnsignedLongLong src_offset, WebIDL::UnsignedLong src_length_override = 0)
@@ -125,7 +143,6 @@ public:
 
     Optional<Gfx::BitmapExportResult> read_and_pixel_convert_texture_image_source(TexImageSource const& source, WebIDL::UnsignedLong format, WebIDL::UnsignedLong type, Optional<int> destination_width = OptionalNone {}, Optional<int> destination_height = OptionalNone {});
 
-protected:
     static Vector<GLchar> null_terminated_string(StringView string)
     {
         Vector<GLchar> result;
@@ -151,8 +168,30 @@ protected:
     //      Any non-zero value is interpreted as true.
     bool m_unpack_premultiply_alpha { false };
 
+    // UNPACK_COLORSPACE_CONVERSION_WEBGL of type unsigned long
+    //      If set to BROWSER_DEFAULT_WEBGL, then the browser's default colorspace conversion (e.g. converting a display-p3
+    //      image to srgb) is applied during subsequent texture data upload calls (e.g. texImage2D and texSubImage2D) that
+    //      take an argument of TexImageSource. The precise conversions may be specific to both the browser and file type.
+    //      If set to NONE, no colorspace conversion is applied, other than conversion to RGBA. (For example, a rec709 YUV
+    //      video is still converted to rec709 RGB data, but not then converted to e.g. srgb RGB data) The initial value is
+    //      BROWSER_DEFAULT_WEBGL.
+    GLenum m_unpack_colorspace_conversion { BROWSER_DEFAULT_WEBGL };
+
 private:
     GLenum m_error { 0 };
+
+    // https://registry.khronos.org/webgl/specs/latest/2.0/#webgl-context-lost-flag
+    // Each WebGLRenderingContext and WebGL2RenderingContext has a webgl context lost flag, which is initially unset.
+    bool m_context_lost { false };
+
+    // https://immersive-web.github.io/webxr/#xr-compatible
+    bool m_xr_compatible { false };
+
+    Vector<WebIDL::UnsignedLong> m_enabled_compressed_texture_formats;
+
+    // Extensions
+    // "Multiple calls to getExtension with the same extension string, taking into account case-insensitive comparison, must return the same object as long as the extension is enabled."
+    HashMap<String, GC::Ref<JS::Object>, AK::ASCIICaseInsensitiveStringTraits> m_enabled_extensions;
 };
 
 }

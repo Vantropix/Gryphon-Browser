@@ -5,7 +5,7 @@
  */
 
 #include "CSSSkewY.h"
-#include <LibWeb/Bindings/CSSSkewYPrototype.h>
+#include <LibWeb/Bindings/CSSSkewY.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSNumericValue.h>
 #include <LibWeb/CSS/CSSUnitValue.h>
@@ -64,7 +64,7 @@ WebIDL::ExceptionOr<Utf16String> CSSSkewY::to_string() const
     builder.append("skewY("sv);
 
     // 2. Serialize this’s ay internal slot, and append it to s.
-    builder.append(TRY(m_ay->to_string()));
+    m_ay->serialize(builder, {});
 
     // 3. Append ")" to s, and return s.
     builder.append(")"sv);

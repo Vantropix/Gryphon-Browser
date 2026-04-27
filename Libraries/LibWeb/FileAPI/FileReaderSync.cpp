@@ -7,7 +7,7 @@
 #include <LibJS/Runtime/ArrayBuffer.h>
 #include <LibJS/Runtime/Realm.h>
 #include <LibJS/Runtime/TypedArray.h>
-#include <LibWeb/Bindings/FileReaderSyncPrototype.h>
+#include <LibWeb/Bindings/FileReaderSync.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/FileAPI/Blob.h>
 #include <LibWeb/FileAPI/FileReaderSync.h>
@@ -44,9 +44,9 @@ GC::Ref<FileReaderSync> FileReaderSync::construct_impl(JS::Realm& realm)
 }
 
 // https://w3c.github.io/FileAPI/#dfn-readAsArrayBufferSync
-WebIDL::ExceptionOr<GC::Root<JS::ArrayBuffer>> FileReaderSync::read_as_array_buffer(Blob& blob)
+WebIDL::ExceptionOr<GC::Ref<JS::ArrayBuffer>> FileReaderSync::read_as_array_buffer(Blob& blob)
 {
-    return read_as<GC::Root<JS::ArrayBuffer>>(blob, FileReader::Type::ArrayBuffer);
+    return read_as<GC::Ref<JS::ArrayBuffer>>(blob, FileReader::Type::ArrayBuffer);
 }
 
 // https://w3c.github.io/FileAPI/#dfn-readAsBinaryStringSync

@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <LibWeb/Bindings/CSSMathValuePrototype.h>
+#include <LibWeb/Bindings/CSSMathValue.h>
 #include <LibWeb/CSS/CSSNumericValue.h>
 #include <LibWeb/Forward.h>
 
@@ -30,7 +30,7 @@ public:
         With,
         Without,
     };
-    virtual String serialize_math_value(Nested, Parens) const = 0;
+    virtual void serialize_math_value(StringBuilder&, Nested, Parens) const = 0;
 
     virtual WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> create_an_internal_representation(PropertyNameAndID const&, PerformTypeCheck) const final override;
 

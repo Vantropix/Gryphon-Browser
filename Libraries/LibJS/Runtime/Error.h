@@ -12,24 +12,14 @@
 #include <AK/Utf16String.h>
 #include <LibJS/Export.h>
 #include <LibJS/Runtime/Completion.h>
+#include <LibJS/Runtime/ErrorData.h>
 #include <LibJS/Runtime/Object.h>
-#include <LibJS/SourceRange.h>
 
 namespace JS {
 
-struct JS_API TracebackFrame {
-    Utf16String function_name;
-    [[nodiscard]] SourceRange const& source_range() const;
-
-    GC::Ptr<CachedSourceRange> cached_source_range;
-};
-
-enum CompactTraceback {
-    No,
-    Yes,
-};
-
-class JS_API Error : public Object {
+class JS_API Error
+    : public Object
+    , public ErrorData {
     JS_OBJECT(Error, Object);
     GC_DECLARE_ALLOCATOR(Error);
 
@@ -40,13 +30,11 @@ public:
 
     virtual ~Error() override = default;
 
-    [[nodiscard]] String stack_string(CompactTraceback compact = CompactTraceback::No) const;
+    [[nodiscard]] Utf16String stack_string(CompactTraceback compact = CompactTraceback::No) const;
 
     ThrowCompletionOr<void> install_error_cause(Value options);
 
     void set_message(Utf16String);
-
-    Vector<TracebackFrame, 32> const& traceback() const { return m_traceback; }
 
 protected:
     explicit Error(Object& prototype);
@@ -55,9 +43,8 @@ protected:
 
 private:
     virtual bool is_error_object() const final { return true; }
-
-    void populate_stack();
-    Vector<TracebackFrame, 32> m_traceback;
+    virtual ErrorData* error_data() final { return this; }
+    virtual ErrorData const* error_data() const final { return this; }
 };
 
 template<>

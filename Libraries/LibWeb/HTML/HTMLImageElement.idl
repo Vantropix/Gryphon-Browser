@@ -1,7 +1,3 @@
-#import <Fetch/Request.idl>
-#import <HTML/HTMLElement.idl>
-#import <HTML/Scripting/Fetching.idl>
-
 // https://html.spec.whatwg.org/multipage/images.html#image-decoding-hint
 [MissingValueDefault=auto, InvalidValueDefault=auto]
 enum Decoding {
@@ -47,7 +43,7 @@ interface HTMLImageElement : HTMLElement {
     [CEReactions, LegacyNullToEmptyString, Reflect] attribute DOMString border;
 
     // https://drafts.csswg.org/cssom-view/#extensions-to-the-htmlimageelement-interface
-    [FIXME] readonly attribute long x;
-    [FIXME] readonly attribute long y;
+    readonly attribute long x;
+    readonly attribute long y;
 
 };

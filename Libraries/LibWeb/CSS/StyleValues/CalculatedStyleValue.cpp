@@ -20,6 +20,7 @@
 #include <LibWeb/CSS/CSSMathSum.h>
 #include <LibWeb/CSS/CSSNumericArray.h>
 #include <LibWeb/CSS/CSSUnitValue.h>
+#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/Percentage.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/PropertyNameAndID.h>
@@ -43,7 +44,7 @@ CalculationContext CalculationContext::for_property(PropertyNameAndID const& pro
     return {
         .percentages_resolve_as = property_resolves_percentages_relative_to(property.id()),
         .resolve_numbers_as_integers = property_accepts_type(property.id(), ValueType::Integer),
-        .accepted_type_ranges = property_accepted_type_ranges(property.id()),
+        .accepted_ranges_by_type = property_accepted_ranges_by_value_type(property.id()),
     };
 }
 
@@ -157,18 +158,18 @@ static CalculationNode::NumericValue clamp_and_censor_numeric_value(NumericCalcu
 {
     auto value = node.value();
 
-    Optional<AcceptedTypeRange> accepted_range = value.visit(
-        [&](Number const&) { return context.resolve_numbers_as_integers ? context.accepted_type_ranges.get(ValueType::Integer) : context.accepted_type_ranges.get(ValueType::Number); },
-        [&](Angle const&) { return context.accepted_type_ranges.get(ValueType::Angle); },
-        [&](Flex const&) { return context.accepted_type_ranges.get(ValueType::Flex); },
-        [&](Frequency const&) { return context.accepted_type_ranges.get(ValueType::Frequency); },
-        [&](Length const&) { return context.accepted_type_ranges.get(ValueType::Length); },
-        [&](Percentage const&) { return context.accepted_type_ranges.get(ValueType::Percentage); },
-        [&](Resolution const&) { return context.accepted_type_ranges.get(ValueType::Resolution); },
-        [&](Time const&) { return context.accepted_type_ranges.get(ValueType::Time); });
+    Optional<NumericRange> accepted_range = value.visit(
+        [&](Number const&) { return context.resolve_numbers_as_integers ? context.accepted_ranges_by_type.get(ValueType::Integer) : context.accepted_ranges_by_type.get(ValueType::Number); },
+        [&](Angle const&) { return context.accepted_ranges_by_type.get(ValueType::Angle); },
+        [&](Flex const&) { return context.accepted_ranges_by_type.get(ValueType::Flex); },
+        [&](Frequency const&) { return context.accepted_ranges_by_type.get(ValueType::Frequency); },
+        [&](Length const&) { return context.accepted_ranges_by_type.get(ValueType::Length); },
+        [&](Percentage const&) { return context.accepted_ranges_by_type.get(ValueType::Percentage); },
+        [&](Resolution const&) { return context.accepted_ranges_by_type.get(ValueType::Resolution); },
+        [&](Time const&) { return context.accepted_ranges_by_type.get(ValueType::Time); });
 
     if (!accepted_range.has_value()) {
-        dbgln_if(LIBWEB_CSS_DEBUG, "FIXME: Calculation context missing accepted type range {}", node.numeric_type());
+        dbgln_if(LIBWEB_CSS_DEBUG, "FIXME: Calculation context missing accepted range {}", node.numeric_type());
         // FIXME: Min and max values for Integer should be based on i32 rather than float
         accepted_range = { AK::NumericLimits<float>::lowest(), AK::NumericLimits<float>::max() };
     }
@@ -225,10 +226,15 @@ static GC::Ptr<CSSNumericArray> reify_children(JS::Realm& realm, ReadonlySpan<No
     return CSSNumericArray::create(realm, move(reified_children));
 }
 
-static String serialize_a_calculation_tree(CalculationNode const&, CalculationContext const&, SerializationMode);
+enum class EmitOuterParentheses {
+    No,
+    Yes,
+};
+
+static void serialize_a_calculation_tree(StringBuilder&, CalculationNode const&, CalculationContext const&, SerializationMode, EmitOuterParentheses = EmitOuterParentheses::Yes);
 
 // https://drafts.csswg.org/css-values-4/#serialize-a-math-function
-static String serialize_a_math_function(CalculationNode const& fn, CalculationContext const& context, SerializationMode serialization_mode)
+static void serialize_a_math_function(StringBuilder& builder, CalculationNode const& fn, CalculationContext const& context, SerializationMode serialization_mode)
 {
     // To serialize a math function fn:
 
@@ -237,8 +243,8 @@ static String serialize_a_math_function(CalculationNode const& fn, CalculationCo
     //    for its context (if necessary), then serialize the value as normal and return the result.
     if (fn.type() == CalculationNode::Type::Numeric && serialization_mode == SerializationMode::ResolvedValue) {
         auto clamped_value = clamp_and_censor_numeric_value(static_cast<NumericCalculationNode const&>(fn), context);
-
-        return clamped_value.visit([&](auto const& value) { return value.to_string(serialization_mode); });
+        clamped_value.visit([&](auto const& value) { value.serialize(builder, serialization_mode); });
+        return;
     }
 
     // 2. If fn represents an infinite or NaN value:
@@ -246,7 +252,6 @@ static String serialize_a_math_function(CalculationNode const& fn, CalculationCo
         auto const& numeric_node = static_cast<NumericCalculationNode const&>(fn);
         if (auto infinite_or_nan = numeric_node.infinite_or_nan_value(); infinite_or_nan.has_value()) {
             // 1. Let s be the string "calc(".
-            StringBuilder builder;
             builder.append("calc("sv);
 
             // 2. Serialize the keyword infinity, -infinity, or NaN, as appropriate to represent the value, and append it to s.
@@ -281,20 +286,21 @@ static String serialize_a_math_function(CalculationNode const& fn, CalculationCo
 
             // 4. Append ")" to s, then return it.
             builder.append(')');
-            return builder.to_string_without_validation();
+            return;
         }
     }
 
     // AD-HOC: We serialize random() directly since it has abnormal children (e.g. m_random_value_sharing which is not a
     //         calculation node and m_step which is nullable).
-    if (fn.type() == CalculationNode::Type::Random)
-        return as<RandomCalculationNode>(fn).to_string(context, serialization_mode);
+    if (fn.type() == CalculationNode::Type::Random) {
+        as<RandomCalculationNode>(fn).serialize(builder, context, serialization_mode);
+        return;
+    }
 
     // 3. If the calculation tree’s root node is a numeric value, or a calc-operator node, let s be a string initially
     //    containing "calc(".
     //    Otherwise, let s be a string initially containing the name of the root node, lowercased (such as "sin" or
     //    "max"), followed by a "(" (open parenthesis).
-    StringBuilder builder;
     if (fn.type() == CalculationNode::Type::Numeric || fn.is_calc_operator_node()) {
         builder.append("calc("sv);
     } else {
@@ -306,39 +312,33 @@ static String serialize_a_math_function(CalculationNode const& fn, CalculationCo
     //    remove those characters from the result.
     //    Concatenate all of the results using ", " (comma followed by space), then append the result to s.
 
-    auto serialized_tree_without_parentheses = [&](CalculationNode const& tree) {
-        auto tree_serialized = serialize_a_calculation_tree(tree, context, serialization_mode);
-        if (tree_serialized.starts_with('(') && tree_serialized.ends_with(')')) {
-            tree_serialized = MUST(tree_serialized.substring_from_byte_offset_with_shared_superstring(1, tree_serialized.byte_count() - 2));
-        }
-        return tree_serialized;
-    };
-
     // Spec issue: https://github.com/w3c/csswg-drafts/issues/11783
     //             The three AD-HOCs in this step are mentioned there.
     // AD-HOC: Numeric nodes have no children and should serialize directly.
     // AD-HOC: calc-operator nodes should also serialize directly, instead of separating their children by commas.#
     if (fn.type() == CalculationNode::Type::Numeric || fn.is_calc_operator_node()) {
-        builder.append(serialized_tree_without_parentheses(fn));
+        serialize_a_calculation_tree(builder, fn, context, serialization_mode, EmitOuterParentheses::No);
     } else {
-        Vector<String> serialized_children;
+        bool first = true;
         // AD-HOC: For `clamp()`, the first child is a <rounding-strategy>, which is incompatible with "serialize a calculation tree".
         //         So, we serialize it directly first, and hope for the best.
         if (fn.type() == CalculationNode::Type::Round) {
             auto rounding_strategy = static_cast<RoundCalculationNode const&>(fn).rounding_strategy();
-            serialized_children.append(MUST(String::from_utf8(CSS::to_string(rounding_strategy))));
+            builder.append(CSS::to_string(rounding_strategy));
+            first = false;
         }
         for (auto const& child : fn.children()) {
-            serialized_children.append(serialized_tree_without_parentheses(child));
+            if (!first)
+                builder.append(", "sv);
+            first = false;
+            serialize_a_calculation_tree(builder, child, context, serialization_mode, EmitOuterParentheses::No);
         }
-        builder.join(", "sv, serialized_children);
     }
 
     // 5. Append ")" (close parenthesis) to s.
     builder.append(')');
 
     // 6. Return s.
-    return builder.to_string_without_validation();
 }
 
 // https://drafts.csswg.org/css-values-4/#sort-a-calculations-children
@@ -412,60 +412,69 @@ static Vector<NonnullRefPtr<CalculationNode const>> sort_a_calculations_children
 }
 
 // https://drafts.csswg.org/css-values-4/#serialize-a-calculation-tree
-static String serialize_a_calculation_tree(CalculationNode const& root, CalculationContext const& context, SerializationMode serialization_mode)
+static void serialize_a_calculation_tree(StringBuilder& builder, CalculationNode const& root, CalculationContext const& context, SerializationMode serialization_mode, EmitOuterParentheses emit_outer_parentheses)
 {
     // 1. Let root be the root node of the calculation tree.
     // NOTE: Already the case.
 
     // 2. If root is a numeric value, or a non-math function, serialize root per the normal rules for it and return the result.
-    if (root.type() == CalculationNode::Type::Numeric)
-        return static_cast<NumericCalculationNode const&>(root).value_to_string();
+    if (root.type() == CalculationNode::Type::Numeric) {
+        static_cast<NumericCalculationNode const&>(root).serialize_value(builder);
+        return;
+    }
 
-    if (root.type() == CalculationNode::Type::NonMathFunction)
-        return as<NonMathFunctionCalculationNode>(root).function()->to_string(serialization_mode);
+    if (root.type() == CalculationNode::Type::NonMathFunction) {
+        as<NonMathFunctionCalculationNode>(root).function()->serialize(builder, serialization_mode);
+        return;
+    }
 
     // 3. If root is anything but a Sum, Negate, Product, or Invert node, serialize a math function for the function
     //    corresponding to the node type, treating the node’s children as the function’s comma-separated calculation
     //    arguments, and return the result.
     if (!first_is_one_of(root.type(), CalculationNode::Type::Sum, CalculationNode::Type::Product, CalculationNode::Type::Negate, CalculationNode::Type::Invert)) {
-        return serialize_a_math_function(root, context, serialization_mode);
+        serialize_a_math_function(builder, root, context, serialization_mode);
+        return;
     }
 
     // 4. If root is a Negate node, let s be a string initially containing "(-1 * ".
     if (root.type() == CalculationNode::Type::Negate) {
-        StringBuilder builder;
-        builder.append("(-1 * "sv);
+        if (emit_outer_parentheses == EmitOuterParentheses::Yes)
+            builder.append('(');
+        builder.append("-1 * "sv);
 
         // Serialize root’s child, and append it to s.
-        builder.append(serialize_a_calculation_tree(root.children().first(), context, serialization_mode));
+        serialize_a_calculation_tree(builder, root.children().first(), context, serialization_mode);
 
         // Append ")" to s, then return it.
-        builder.append(')');
-        return builder.to_string_without_validation();
+        if (emit_outer_parentheses == EmitOuterParentheses::Yes)
+            builder.append(')');
+        return;
     }
 
     // 5. If root is an Invert node, let s be a string initially containing "(1 / ".
     if (root.type() == CalculationNode::Type::Invert) {
-        StringBuilder builder;
-        builder.append("(1 / "sv);
+        if (emit_outer_parentheses == EmitOuterParentheses::Yes)
+            builder.append('(');
+        builder.append("1 / "sv);
 
         // Serialize root’s child, and append it to s.
-        builder.append(serialize_a_calculation_tree(root.children().first(), context, serialization_mode));
+        serialize_a_calculation_tree(builder, root.children().first(), context, serialization_mode);
 
         // Append ")" to s, then return it.
-        builder.append(')');
-        return builder.to_string_without_validation();
+        if (emit_outer_parentheses == EmitOuterParentheses::Yes)
+            builder.append(')');
+        return;
     }
 
     // 6. If root is a Sum node, let s be a string initially containing "(".
     if (root.type() == CalculationNode::Type::Sum) {
-        StringBuilder builder;
-        builder.append('(');
+        if (emit_outer_parentheses == EmitOuterParentheses::Yes)
+            builder.append('(');
 
         auto sorted_children = sort_a_calculations_children(root.children());
 
         // Serialize root’s first child, and append it to s.
-        builder.append(serialize_a_calculation_tree(sorted_children.first(), context, serialization_mode));
+        serialize_a_calculation_tree(builder, *sorted_children.first(), context, serialization_mode);
 
         // For each child of root beyond the first:
         for (auto i = 1u; i < sorted_children.size(); ++i) {
@@ -475,7 +484,7 @@ static String serialize_a_calculation_tree(CalculationNode const& root, Calculat
             //    result to s.
             if (child.type() == CalculationNode::Type::Negate) {
                 builder.append(" - "sv);
-                builder.append(serialize_a_calculation_tree(static_cast<NegateCalculationNode const&>(child).child(), context, serialization_mode));
+                serialize_a_calculation_tree(builder, static_cast<NegateCalculationNode const&>(child).child(), context, serialization_mode);
             }
 
             // 2. If child is a negative numeric value, append " - " to s, then serialize the negation of child as
@@ -483,30 +492,31 @@ static String serialize_a_calculation_tree(CalculationNode const& root, Calculat
             else if (child.type() == CalculationNode::Type::Numeric && static_cast<NumericCalculationNode const&>(child).is_negative()) {
                 auto const& numeric_node = static_cast<NumericCalculationNode const&>(child);
                 builder.append(" - "sv);
-                builder.append(serialize_a_calculation_tree(numeric_node.negated(context), context, serialization_mode));
+                serialize_a_calculation_tree(builder, *numeric_node.negated(context), context, serialization_mode);
             }
 
             // 3. Otherwise, append " + " to s, then serialize child and append the result to s.
             else {
                 builder.append(" + "sv);
-                builder.append(serialize_a_calculation_tree(child, context, serialization_mode));
+                serialize_a_calculation_tree(builder, child, context, serialization_mode);
             }
         }
 
         // Finally, append ")" to s and return it.
-        builder.append(')');
-        return builder.to_string_without_validation();
+        if (emit_outer_parentheses == EmitOuterParentheses::Yes)
+            builder.append(')');
+        return;
     }
 
     // 7. If root is a Product node, let s be a string initially containing "(".
     if (root.type() == CalculationNode::Type::Product) {
-        StringBuilder builder;
-        builder.append('(');
+        if (emit_outer_parentheses == EmitOuterParentheses::Yes)
+            builder.append('(');
 
         auto sorted_children = sort_a_calculations_children(root.children());
 
         // Serialize root’s first child, and append it to s.
-        builder.append(serialize_a_calculation_tree(sorted_children.first(), context, serialization_mode));
+        serialize_a_calculation_tree(builder, *sorted_children.first(), context, serialization_mode);
 
         // For each child of root beyond the first:
         for (auto i = 1u; i < sorted_children.size(); ++i) {
@@ -515,19 +525,20 @@ static String serialize_a_calculation_tree(CalculationNode const& root, Calculat
             // 1. If child is an Invert node, append " / " to s, then serialize the Invert’s child and append the result to s.
             if (child.type() == CalculationNode::Type::Invert) {
                 builder.append(" / "sv);
-                builder.append(serialize_a_calculation_tree(static_cast<InvertCalculationNode const&>(child).child(), context, serialization_mode));
+                serialize_a_calculation_tree(builder, static_cast<InvertCalculationNode const&>(child).child(), context, serialization_mode);
             }
 
             // 2. Otherwise, append " * " to s, then serialize child and append the result to s.
             else {
                 builder.append(" * "sv);
-                builder.append(serialize_a_calculation_tree(child, context, serialization_mode));
+                serialize_a_calculation_tree(builder, child, context, serialization_mode);
             }
         }
 
         // Finally, append ")" to s and return it.
-        builder.append(')');
-        return builder.to_string_without_validation();
+        if (emit_outer_parentheses == EmitOuterParentheses::Yes)
+            builder.append(')');
+        return;
     }
 
     VERIFY_NOT_REACHED();
@@ -723,9 +734,16 @@ NumericCalculationNode::NumericCalculationNode(NumericValue value, NumericType n
 
 NumericCalculationNode::~NumericCalculationNode() = default;
 
+void NumericCalculationNode::serialize_value(StringBuilder& builder) const
+{
+    m_value.visit([&](auto& value) { value.serialize(builder); });
+}
+
 String NumericCalculationNode::value_to_string() const
 {
-    return m_value.visit([](auto& value) { return value.to_string(); });
+    StringBuilder builder;
+    serialize_value(builder);
+    return builder.to_string_without_validation();
 }
 
 bool NumericCalculationNode::contains_percentage() const
@@ -829,6 +847,13 @@ bool NumericCalculationNode::equals(CalculationNode const& other) const
     return m_value == static_cast<NumericCalculationNode const&>(other).m_value;
 }
 
+bool NumericCalculationNode::is_computationally_independent() const
+{
+    return m_value.visit(
+        [](Length const& length) { return length.is_computationally_independent(); },
+        [](auto const&) { return true; });
+}
+
 GC::Ptr<CSSNumericValue> NumericCalculationNode::reify(JS::Realm& realm) const
 {
     return m_value.visit(
@@ -890,6 +915,11 @@ bool SumCalculationNode::equals(CalculationNode const& other) const
             return false;
     }
     return true;
+}
+
+bool SumCalculationNode::is_computationally_independent() const
+{
+    return all_of(m_values, [](NonnullRefPtr<CalculationNode const> const& value) { return value->is_computationally_independent(); });
 }
 
 GC::Ptr<CSSNumericValue> SumCalculationNode::reify(JS::Realm& realm) const
@@ -954,6 +984,11 @@ bool ProductCalculationNode::equals(CalculationNode const& other) const
     return true;
 }
 
+bool ProductCalculationNode::is_computationally_independent() const
+{
+    return all_of(m_values, [](NonnullRefPtr<CalculationNode const> const& value) { return value->is_computationally_independent(); });
+}
+
 GC::Ptr<CSSNumericValue> ProductCalculationNode::reify(JS::Realm& realm) const
 {
     auto reified_children = reify_children(realm, m_values);
@@ -999,6 +1034,11 @@ bool NegateCalculationNode::equals(CalculationNode const& other) const
     if (type() != other.type())
         return false;
     return m_value->equals(*static_cast<NegateCalculationNode const&>(other).m_value);
+}
+
+bool NegateCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
 }
 
 GC::Ptr<CSSNumericValue> NegateCalculationNode::reify(JS::Realm& realm) const
@@ -1052,6 +1092,11 @@ bool InvertCalculationNode::equals(CalculationNode const& other) const
     if (type() != other.type())
         return false;
     return m_value->equals(*static_cast<InvertCalculationNode const&>(other).m_value);
+}
+
+bool InvertCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
 }
 
 GC::Ptr<CSSNumericValue> InvertCalculationNode::reify(JS::Realm& realm) const
@@ -1168,6 +1213,11 @@ bool MinCalculationNode::equals(CalculationNode const& other) const
     return true;
 }
 
+bool MinCalculationNode::is_computationally_independent() const
+{
+    return all_of(m_values, [](NonnullRefPtr<CalculationNode const> const& value) { return value->is_computationally_independent(); });
+}
+
 GC::Ptr<CSSNumericValue> MinCalculationNode::reify(JS::Realm& realm) const
 {
     auto reified_children = reify_children(realm, m_values);
@@ -1233,6 +1283,11 @@ bool MaxCalculationNode::equals(CalculationNode const& other) const
             return false;
     }
     return true;
+}
+
+bool MaxCalculationNode::is_computationally_independent() const
+{
+    return all_of(m_values, [](NonnullRefPtr<CalculationNode const> const& value) { return value->is_computationally_independent(); });
 }
 
 GC::Ptr<CSSNumericValue> MaxCalculationNode::reify(JS::Realm& realm) const
@@ -1335,6 +1390,13 @@ bool ClampCalculationNode::equals(CalculationNode const& other) const
         && m_max_value->equals(*static_cast<ClampCalculationNode const&>(other).m_max_value);
 }
 
+bool ClampCalculationNode::is_computationally_independent() const
+{
+    return m_min_value->is_computationally_independent()
+        && m_center_value->is_computationally_independent()
+        && m_max_value->is_computationally_independent();
+}
+
 GC::Ptr<CSSNumericValue> ClampCalculationNode::reify(JS::Realm& realm) const
 {
     auto lower = m_min_value->reify(realm);
@@ -1395,6 +1457,11 @@ bool AbsCalculationNode::equals(CalculationNode const& other) const
     if (type() != other.type())
         return false;
     return m_value->equals(*static_cast<AbsCalculationNode const&>(other).m_value);
+}
+
+bool AbsCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
 }
 
 NonnullRefPtr<SignCalculationNode const> SignCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
@@ -1470,6 +1537,11 @@ bool SignCalculationNode::equals(CalculationNode const& other) const
     if (type() != other.type())
         return false;
     return m_value->equals(*static_cast<SignCalculationNode const&>(other).m_value);
+}
+
+bool SignCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
 }
 
 NonnullRefPtr<SinCalculationNode const> SinCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
@@ -1556,6 +1628,11 @@ bool SinCalculationNode::equals(CalculationNode const& other) const
     return m_value->equals(*static_cast<SinCalculationNode const&>(other).m_value);
 }
 
+bool SinCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
+}
+
 NonnullRefPtr<CosCalculationNode const> CosCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
 {
     return adopt_ref(*new (nothrow) CosCalculationNode(move(value)));
@@ -1602,6 +1679,11 @@ bool CosCalculationNode::equals(CalculationNode const& other) const
     return m_value->equals(*static_cast<CosCalculationNode const&>(other).m_value);
 }
 
+bool CosCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
+}
+
 NonnullRefPtr<TanCalculationNode const> TanCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
 {
     return adopt_ref(*new (nothrow) TanCalculationNode(move(value)));
@@ -1646,6 +1728,11 @@ bool TanCalculationNode::equals(CalculationNode const& other) const
     if (type() != other.type())
         return false;
     return m_value->equals(*static_cast<TanCalculationNode const&>(other).m_value);
+}
+
+bool TanCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
 }
 
 NonnullRefPtr<AsinCalculationNode const> AsinCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
@@ -1738,6 +1825,11 @@ bool AsinCalculationNode::equals(CalculationNode const& other) const
     return m_value->equals(*static_cast<AsinCalculationNode const&>(other).m_value);
 }
 
+bool AsinCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
+}
+
 NonnullRefPtr<AcosCalculationNode const> AcosCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
 {
     return adopt_ref(*new (nothrow) AcosCalculationNode(move(value)));
@@ -1784,6 +1876,11 @@ bool AcosCalculationNode::equals(CalculationNode const& other) const
     return m_value->equals(*static_cast<AcosCalculationNode const&>(other).m_value);
 }
 
+bool AcosCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
+}
+
 NonnullRefPtr<AtanCalculationNode const> AtanCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
 {
     return adopt_ref(*new (nothrow) AtanCalculationNode(move(value)));
@@ -1828,6 +1925,11 @@ bool AtanCalculationNode::equals(CalculationNode const& other) const
     if (type() != other.type())
         return false;
     return m_value->equals(*static_cast<AtanCalculationNode const&>(other).m_value);
+}
+
+bool AtanCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
 }
 
 NonnullRefPtr<Atan2CalculationNode const> Atan2CalculationNode::create(NonnullRefPtr<CalculationNode const> y, NonnullRefPtr<CalculationNode const> x)
@@ -1901,6 +2003,11 @@ bool Atan2CalculationNode::equals(CalculationNode const& other) const
         && m_y->equals(*static_cast<Atan2CalculationNode const&>(other).m_y);
 }
 
+bool Atan2CalculationNode::is_computationally_independent() const
+{
+    return m_x->is_computationally_independent() && m_y->is_computationally_independent();
+}
+
 NonnullRefPtr<PowCalculationNode const> PowCalculationNode::create(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y)
 {
     return adopt_ref(*new (nothrow) PowCalculationNode(move(x), move(y)));
@@ -1957,6 +2064,11 @@ bool PowCalculationNode::equals(CalculationNode const& other) const
         && m_y->equals(*static_cast<PowCalculationNode const&>(other).m_y);
 }
 
+bool PowCalculationNode::is_computationally_independent() const
+{
+    return m_x->is_computationally_independent() && m_y->is_computationally_independent();
+}
+
 NonnullRefPtr<SqrtCalculationNode const> SqrtCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
 {
     return adopt_ref(*new (nothrow) SqrtCalculationNode(move(value)));
@@ -2008,6 +2120,11 @@ bool SqrtCalculationNode::equals(CalculationNode const& other) const
     if (type() != other.type())
         return false;
     return m_value->equals(*static_cast<SqrtCalculationNode const&>(other).m_value);
+}
+
+bool SqrtCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
 }
 
 NonnullRefPtr<HypotCalculationNode const> HypotCalculationNode::create(Vector<NonnullRefPtr<CalculationNode const>> values)
@@ -2095,6 +2212,11 @@ bool HypotCalculationNode::equals(CalculationNode const& other) const
     return true;
 }
 
+bool HypotCalculationNode::is_computationally_independent() const
+{
+    return all_of(m_values, [](NonnullRefPtr<CalculationNode const> const& value) { return value->is_computationally_independent(); });
+}
+
 NonnullRefPtr<LogCalculationNode const> LogCalculationNode::create(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y)
 {
     return adopt_ref(*new (nothrow) LogCalculationNode(move(x), move(y)));
@@ -2152,6 +2274,11 @@ bool LogCalculationNode::equals(CalculationNode const& other) const
         && m_y->equals(*static_cast<LogCalculationNode const&>(other).m_y);
 }
 
+bool LogCalculationNode::is_computationally_independent() const
+{
+    return m_x->is_computationally_independent() && m_y->is_computationally_independent();
+}
+
 NonnullRefPtr<ExpCalculationNode const> ExpCalculationNode::create(NonnullRefPtr<CalculationNode const> value)
 {
     return adopt_ref(*new (nothrow) ExpCalculationNode(move(value)));
@@ -2202,6 +2329,11 @@ bool ExpCalculationNode::equals(CalculationNode const& other) const
     if (type() != other.type())
         return false;
     return m_value->equals(*static_cast<ExpCalculationNode const&>(other).m_value);
+}
+
+bool ExpCalculationNode::is_computationally_independent() const
+{
+    return m_value->is_computationally_independent();
 }
 
 NonnullRefPtr<RoundCalculationNode const> RoundCalculationNode::create(RoundingStrategy strategy, NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y)
@@ -2376,6 +2508,11 @@ bool RoundCalculationNode::equals(CalculationNode const& other) const
         && m_y->equals(*static_cast<RoundCalculationNode const&>(other).m_y);
 }
 
+bool RoundCalculationNode::is_computationally_independent() const
+{
+    return m_x->is_computationally_independent() && m_y->is_computationally_independent();
+}
+
 NonnullRefPtr<ModCalculationNode const> ModCalculationNode::create(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y)
 {
     // https://www.w3.org/TR/css-values-4/#determine-the-type-of-a-calculation
@@ -2464,6 +2601,11 @@ bool ModCalculationNode::equals(CalculationNode const& other) const
         return false;
     return m_x->equals(*static_cast<ModCalculationNode const&>(other).m_x)
         && m_y->equals(*static_cast<ModCalculationNode const&>(other).m_y);
+}
+
+bool ModCalculationNode::is_computationally_independent() const
+{
+    return m_x->is_computationally_independent() && m_y->is_computationally_independent();
 }
 
 NonnullRefPtr<RandomCalculationNode const> RandomCalculationNode::create(NonnullRefPtr<RandomValueSharingStyleValue const> random_value_sharing, NonnullRefPtr<CalculationNode const> minimum, NonnullRefPtr<CalculationNode const> maximum, RefPtr<CalculationNode const> step)
@@ -2614,20 +2756,27 @@ Optional<CalculatedStyleValue::CalculationResult> RandomCalculationNode::run_ope
     return CalculatedStyleValue::CalculationResult { value, numeric_type() };
 }
 
+void RandomCalculationNode::serialize(StringBuilder& builder, CalculationContext const& context, SerializationMode serialization_mode) const
+{
+    builder.append("random("sv);
+    auto start_length = builder.length();
+    m_random_value_sharing->serialize(builder, serialization_mode);
+    if (builder.length() > start_length)
+        builder.append(", "sv);
+    serialize_a_calculation_tree(builder, *m_minimum, context, serialization_mode);
+    builder.append(", "sv);
+    serialize_a_calculation_tree(builder, *m_maximum, context, serialization_mode);
+    if (m_step) {
+        builder.append(", "sv);
+        serialize_a_calculation_tree(builder, *m_step, context, serialization_mode);
+    }
+    builder.append(')');
+}
+
 String RandomCalculationNode::to_string(CalculationContext const& context, SerializationMode serialization_mode) const
 {
     StringBuilder builder;
-
-    builder.append("random("sv);
-    auto random_value_sharing_stringified = m_random_value_sharing->to_string(serialization_mode);
-    if (!random_value_sharing_stringified.is_empty())
-        builder.appendff("{}, ", random_value_sharing_stringified);
-    builder.appendff("{}, ", serialize_a_calculation_tree(m_minimum, context, serialization_mode));
-    builder.append(serialize_a_calculation_tree(m_maximum, context, serialization_mode));
-    if (m_step)
-        builder.appendff(", {}", serialize_a_calculation_tree(*m_step, context, serialization_mode));
-    builder.append(')');
-
+    serialize(builder, context, serialization_mode);
     return builder.to_string_without_validation();
 }
 
@@ -2655,6 +2804,14 @@ bool RandomCalculationNode::equals(CalculationNode const& other) const
         && m_minimum == other_random.m_minimum
         && m_maximum == other_random.m_maximum
         && m_step == other_random.m_step;
+}
+
+bool RandomCalculationNode::is_computationally_independent() const
+{
+    return m_random_value_sharing->is_computationally_independent()
+        && m_minimum->is_computationally_independent()
+        && m_maximum->is_computationally_independent()
+        && (!m_step || m_step->is_computationally_independent());
 }
 
 NonnullRefPtr<RemCalculationNode const> RemCalculationNode::create(NonnullRefPtr<CalculationNode const> x, NonnullRefPtr<CalculationNode const> y)
@@ -2707,6 +2864,11 @@ bool RemCalculationNode::equals(CalculationNode const& other) const
         && m_y->equals(*static_cast<RemCalculationNode const&>(other).m_y);
 }
 
+bool RemCalculationNode::is_computationally_independent() const
+{
+    return m_x->is_computationally_independent() && m_y->is_computationally_independent();
+}
+
 NonnullRefPtr<NonMathFunctionCalculationNode const> NonMathFunctionCalculationNode::create(AbstractNonMathCalcFunctionStyleValue const& function, NumericType numeric_type)
 {
     return adopt_ref(*new (nothrow) NonMathFunctionCalculationNode(move(function), move(numeric_type)));
@@ -2734,6 +2896,11 @@ bool NonMathFunctionCalculationNode::equals(CalculationNode const& other) const
         return false;
 
     return static_cast<NonMathFunctionCalculationNode const&>(other).function() == m_function;
+}
+
+bool NonMathFunctionCalculationNode::is_computationally_independent() const
+{
+    return m_function->is_computationally_independent();
 }
 
 CalculatedStyleValue::CalculationResult CalculatedStyleValue::CalculationResult::from_value(Value const& value, CalculationResolutionContext const& context, Optional<NumericType> numeric_type)
@@ -2802,9 +2969,9 @@ void CalculatedStyleValue::CalculationResult::invert()
         m_type = m_type->inverted();
 }
 
-String CalculatedStyleValue::to_string(SerializationMode serialization_mode) const
+void CalculatedStyleValue::serialize(StringBuilder& builder, SerializationMode mode) const
 {
-    return serialize_a_math_function(m_calculation, m_context, serialization_mode);
+    serialize_a_math_function(builder, *m_calculation, m_context, mode);
 }
 
 ValueComparingNonnullRefPtr<StyleValue const> CalculatedStyleValue::absolutized(ComputationContext const& computation_context) const
@@ -2859,8 +3026,13 @@ bool CalculatedStyleValue::equals(StyleValue const& other) const
     return m_calculation->equals(*other.as_calculated().m_calculation);
 }
 
+bool CalculatedStyleValue::is_computationally_independent() const
+{
+    return m_calculation->is_computationally_independent();
+}
+
 // https://drafts.csswg.org/css-values-4/#calc-computed-value
-Optional<CalculatedStyleValue::ResolvedValue> CalculatedStyleValue::resolve_value(CalculationResolutionContext const& resolution_context) const
+Optional<CalculatedStyleValue::ResolvedValue> CalculatedStyleValue::resolve_value(CalculationResolutionContext const& resolution_context, bool apply_censoring_and_clamping) const
 {
     // The calculation tree is again simplified at used value time; with used value time information.
     // NOTE: Any nodes which rely on dynamic state should have been simplified away in absolutized so we can pass a nullptr here
@@ -2875,41 +3047,43 @@ Optional<CalculatedStyleValue::ResolvedValue> CalculatedStyleValue::resolve_valu
 
     auto raw_value = value->value();
 
-    // https://drafts.csswg.org/css-values/#calc-ieee
-    // NaN does not escape a top-level calculation; it’s censored into a zero value.
-    if (isnan(raw_value))
-        raw_value = 0;
+    if (apply_censoring_and_clamping) {
+        // https://drafts.csswg.org/css-values/#calc-ieee
+        // NaN does not escape a top-level calculation; it’s censored into a zero value.
+        if (isnan(raw_value))
+            raw_value = 0;
 
-    // https://drafts.csswg.org/css-values/#calc-range
-    // the value resulting from a top-level calculation must be clamped to the range allowed in the target context.
-    // Clamping is performed on computed values to the extent possible, and also on used values if computation was
-    // unable to sufficiently simplify the expression to allow range-checking.
-    Optional<AcceptedTypeRange> accepted_range;
+        // https://drafts.csswg.org/css-values/#calc-range
+        // the value resulting from a top-level calculation must be clamped to the range allowed in the target context.
+        // Clamping is performed on computed values to the extent possible, and also on used values if computation was
+        // unable to sufficiently simplify the expression to allow range-checking.
+        Optional<NumericRange> accepted_range;
 
-    if (value->type()->matches_number(m_context.percentages_resolve_as))
-        accepted_range = m_context.resolve_numbers_as_integers ? m_context.accepted_type_ranges.get(ValueType::Integer) : m_context.accepted_type_ranges.get(ValueType::Number);
-    else if (value->type()->matches_angle(m_context.percentages_resolve_as))
-        accepted_range = m_context.accepted_type_ranges.get(ValueType::Angle);
-    else if (value->type()->matches_flex(m_context.percentages_resolve_as))
-        accepted_range = m_context.accepted_type_ranges.get(ValueType::Flex);
-    else if (value->type()->matches_frequency(m_context.percentages_resolve_as))
-        accepted_range = m_context.accepted_type_ranges.get(ValueType::Frequency);
-    else if (value->type()->matches_length(m_context.percentages_resolve_as))
-        accepted_range = m_context.accepted_type_ranges.get(ValueType::Length);
-    else if (value->type()->matches_percentage())
-        accepted_range = m_context.accepted_type_ranges.get(ValueType::Percentage);
-    else if (value->type()->matches_resolution(m_context.percentages_resolve_as))
-        accepted_range = m_context.accepted_type_ranges.get(ValueType::Resolution);
-    else if (value->type()->matches_time(m_context.percentages_resolve_as))
-        accepted_range = m_context.accepted_type_ranges.get(ValueType::Time);
+        if (value->type()->matches_number(m_context.percentages_resolve_as))
+            accepted_range = m_context.resolve_numbers_as_integers ? m_context.accepted_ranges_by_type.get(ValueType::Integer) : m_context.accepted_ranges_by_type.get(ValueType::Number);
+        else if (value->type()->matches_angle(m_context.percentages_resolve_as))
+            accepted_range = m_context.accepted_ranges_by_type.get(ValueType::Angle);
+        else if (value->type()->matches_flex(m_context.percentages_resolve_as))
+            accepted_range = m_context.accepted_ranges_by_type.get(ValueType::Flex);
+        else if (value->type()->matches_frequency(m_context.percentages_resolve_as))
+            accepted_range = m_context.accepted_ranges_by_type.get(ValueType::Frequency);
+        else if (value->type()->matches_length(m_context.percentages_resolve_as))
+            accepted_range = m_context.accepted_ranges_by_type.get(ValueType::Length);
+        else if (value->type()->matches_percentage())
+            accepted_range = m_context.accepted_ranges_by_type.get(ValueType::Percentage);
+        else if (value->type()->matches_resolution(m_context.percentages_resolve_as))
+            accepted_range = m_context.accepted_ranges_by_type.get(ValueType::Resolution);
+        else if (value->type()->matches_time(m_context.percentages_resolve_as))
+            accepted_range = m_context.accepted_ranges_by_type.get(ValueType::Time);
 
-    if (!accepted_range.has_value()) {
-        dbgln_if(LIBWEB_CSS_DEBUG, "FIXME: Calculation context missing accepted type range {}", value->type());
-        // FIXME: Infinity for integers should be i32 max rather than float max
-        accepted_range = { AK::NumericLimits<float>::lowest(), AK::NumericLimits<float>::max() };
+        if (!accepted_range.has_value()) {
+            dbgln_if(LIBWEB_CSS_DEBUG, "FIXME: Calculation context missing accepted range {}", value->type());
+            // FIXME: Infinity for integers should be i32 max rather than float max
+            accepted_range = { AK::NumericLimits<float>::lowest(), AK::NumericLimits<float>::max() };
+        }
+
+        raw_value = clamp(raw_value, accepted_range->min, accepted_range->max);
     }
-
-    raw_value = clamp(raw_value, accepted_range->min, accepted_range->max);
 
     return ResolvedValue { raw_value, value->type() };
 }
@@ -2954,6 +3128,16 @@ Optional<Length> CalculatedStyleValue::resolve_length(CalculationResolutionConte
     return {};
 }
 
+Optional<double> CalculatedStyleValue::resolve_raw_length(CalculationResolutionContext const& context) const
+{
+    auto result = resolve_value(context, false);
+
+    if (result.has_value() && result->type.has_value() && result->type->matches_length(m_context.percentages_resolve_as))
+        return result->value;
+
+    return {};
+}
+
 Optional<Percentage> CalculatedStyleValue::resolve_percentage(CalculationResolutionContext const& context) const
 {
     auto result = resolve_value(context);
@@ -2994,12 +3178,12 @@ Optional<double> CalculatedStyleValue::resolve_number(CalculationResolutionConte
     return {};
 }
 
-Optional<i64> CalculatedStyleValue::resolve_integer(CalculationResolutionContext const& context) const
+Optional<i32> CalculatedStyleValue::resolve_integer(CalculationResolutionContext const& context) const
 {
     auto result = resolve_value(context);
 
     if (result.has_value() && result->type.has_value() && result->type->matches_number(m_context.percentages_resolve_as))
-        return llround(result->value);
+        return round_to_nearest_integer(result->value);
 
     return {};
 }

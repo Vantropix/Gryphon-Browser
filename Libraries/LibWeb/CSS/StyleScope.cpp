@@ -13,18 +13,73 @@
 #include <LibWeb/CSS/CSSNestedDeclarations.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
+#include <LibWeb/CSS/CounterStyle.h>
+#include <LibWeb/CSS/CounterStyleDefinition.h>
+#include <LibWeb/CSS/Enums.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleScope.h>
+#include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Page/Page.h>
 
 namespace Web::CSS {
 
+void RuleCaches::visit_edges(GC::Cell::Visitor& visitor)
+{
+    main.visit_edges(visitor);
+    for (auto& it : by_layer) {
+        it.value->visit_edges(visitor);
+    }
+}
+
 void StyleScope::visit_edges(GC::Cell::Visitor& visitor)
 {
+    visitor.visit(m_node);
     visitor.visit(m_user_style_sheet);
+    for (auto& cache : m_pseudo_class_rule_cache) {
+        if (cache)
+            cache->visit_edges(visitor);
+    }
+    if (m_author_rule_cache)
+        m_author_rule_cache->visit_edges(visitor);
+    if (m_user_rule_cache)
+        m_user_rule_cache->visit_edges(visitor);
+    if (m_user_agent_rule_cache)
+        m_user_agent_rule_cache->visit_edges(visitor);
+}
+
+void MatchingRule::visit_edges(GC::Cell::Visitor& visitor)
+{
+    visitor.visit(shadow_root);
+    visitor.visit(rule);
+    visitor.visit(sheet);
+}
+
+void RuleCache::visit_edges(GC::Cell::Visitor& visitor)
+{
+    auto visit_vector = [&](auto& vector) {
+        for (auto& rule : vector)
+            rule.visit_edges(visitor);
+    };
+    auto visit_map = [&](auto& map) {
+        for (auto& [_, rules] : map) {
+            visit_vector(rules);
+        }
+    };
+
+    visit_map(rules_by_id);
+    visit_map(rules_by_class);
+    visit_map(rules_by_tag_name);
+    visit_map(rules_by_attribute_name);
+    for (auto& rules : rules_by_pseudo_element) {
+        visit_vector(rules);
+    }
+    visit_vector(root_rules);
+    visit_vector(slotted_rules);
+    visit_vector(part_rules);
+    visit_vector(other_rules);
 }
 
 StyleScope::StyleScope(GC::Ref<DOM::Node> node)
@@ -42,9 +97,7 @@ void StyleScope::build_rule_cache()
     m_selector_insights = make<SelectorInsights>();
     m_style_invalidation_data = make<StyleInvalidationData>();
 
-    if (auto user_style_source = document().page().user_style(); user_style_source.has_value()) {
-        m_user_style_sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(document()), user_style_source.value()));
-    }
+    build_user_style_sheet_if_needed();
 
     build_qualified_layer_names_cache();
 
@@ -62,6 +115,7 @@ void StyleScope::build_rule_cache()
 
 void StyleScope::invalidate_rule_cache()
 {
+    invalidate_counter_style_cache();
     m_author_rule_cache = nullptr;
 
     // NOTE: We could be smarter about keeping the user rule cache, and style sheet.
@@ -78,6 +132,15 @@ void StyleScope::invalidate_rule_cache()
     m_style_invalidation_data = nullptr;
 }
 
+void StyleScope::build_user_style_sheet_if_needed()
+{
+    if (m_user_style_sheet)
+        return;
+
+    if (auto user_style_source = document().page().user_style(); user_style_source.has_value())
+        m_user_style_sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(document()), user_style_source.value()));
+}
+
 void StyleScope::build_rule_cache_if_needed() const
 {
     if (has_valid_rule_cache())
@@ -90,7 +153,7 @@ static CSSStyleSheet& default_stylesheet()
     static GC::Root<CSSStyleSheet> sheet;
     if (!sheet.cell()) {
         extern String default_stylesheet_source;
-        sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm()), default_stylesheet_source));
+        sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm(), Parser::IsUAStyleSheet::Yes), default_stylesheet_source));
     }
     return *sheet;
 }
@@ -100,7 +163,7 @@ static CSSStyleSheet& quirks_mode_stylesheet()
     static GC::Root<CSSStyleSheet> sheet;
     if (!sheet.cell()) {
         extern String quirks_mode_stylesheet_source;
-        sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm()), quirks_mode_stylesheet_source));
+        sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm(), Parser::IsUAStyleSheet::Yes), quirks_mode_stylesheet_source));
     }
     return *sheet;
 }
@@ -110,7 +173,7 @@ static CSSStyleSheet& mathml_stylesheet()
     static GC::Root<CSSStyleSheet> sheet;
     if (!sheet.cell()) {
         extern String mathml_stylesheet_source;
-        sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm()), mathml_stylesheet_source));
+        sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm(), Parser::IsUAStyleSheet::Yes), mathml_stylesheet_source));
     }
     return *sheet;
 }
@@ -120,13 +183,12 @@ static CSSStyleSheet& svg_stylesheet()
     static GC::Root<CSSStyleSheet> sheet;
     if (!sheet.cell()) {
         extern String svg_stylesheet_source;
-        sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm()), svg_stylesheet_source));
+        sheet = GC::make_root(parse_css_stylesheet(CSS::Parser::ParsingParams(internal_css_realm(), Parser::IsUAStyleSheet::Yes), svg_stylesheet_source));
     }
     return *sheet;
 }
 
-template<typename Callback>
-void StyleScope::for_each_stylesheet(CascadeOrigin cascade_origin, Callback callback) const
+void StyleScope::for_each_stylesheet(CascadeOrigin cascade_origin, Function<void(CSS::CSSStyleSheet&)> const& callback) const
 {
     if (cascade_origin == CascadeOrigin::UserAgent) {
         callback(default_stylesheet());
@@ -136,8 +198,10 @@ void StyleScope::for_each_stylesheet(CascadeOrigin cascade_origin, Callback call
         callback(svg_stylesheet());
     }
     if (cascade_origin == CascadeOrigin::User) {
-        if (m_user_style_sheet)
-            callback(*m_user_style_sheet);
+        auto& style_scope = const_cast<StyleScope&>(*this);
+        style_scope.build_user_style_sheet_if_needed();
+        if (style_scope.m_user_style_sheet)
+            callback(*style_scope.m_user_style_sheet);
     }
     if (cascade_origin == CascadeOrigin::Author) {
         for_each_active_css_style_sheet(move(callback));
@@ -182,36 +246,27 @@ void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin
 
             for (CSS::Selector const& selector : absolutized_selectors) {
                 MatchingRule matching_rule {
-                    scope_shadow_root,
-                    &rule,
-                    sheet,
-                    sheet.default_namespace(),
-                    selector,
-                    style_sheet_index,
-                    rule_index,
-                    selector.specificity(),
-                    cascade_origin,
-                    false,
+                    .shadow_root = scope_shadow_root,
+                    .rule = &rule,
+                    .sheet = sheet,
+                    .default_namespace = sheet.default_namespace(),
+                    .selector = selector,
+                    .style_sheet_index = style_sheet_index,
+                    .rule_index = rule_index,
+                    .specificity = selector.specificity(),
+                    .cascade_origin = cascade_origin,
+                    .contains_pseudo_element = selector.target_pseudo_element().has_value(),
+                    .slotted = selector.is_slotted(),
+                    .contains_part_pseudo_element = selector.has_part_pseudo_element(),
                 };
 
                 auto const& qualified_layer_name = matching_rule.qualified_layer_name();
                 auto& rule_cache = qualified_layer_name.is_empty() ? rule_caches.main : *rule_caches.by_layer.ensure(qualified_layer_name, [] { return make<RuleCache>(); });
 
-                bool contains_root_pseudo_class = false;
-                Optional<CSS::PseudoElement> pseudo_element;
-
                 collect_selector_insights(selector, insights);
 
+                bool contains_root_pseudo_class = false;
                 for (auto const& simple_selector : selector.compound_selectors().last().simple_selectors) {
-                    if (!matching_rule.contains_pseudo_element) {
-                        if (simple_selector.type == CSS::Selector::SimpleSelector::Type::PseudoElement) {
-                            matching_rule.contains_pseudo_element = true;
-                            // FIXME: This wrongly assumes there is only one pseudo-element per selector.
-                            pseudo_element = simple_selector.pseudo_element().type();
-                            matching_rule.slotted = pseudo_element == PseudoElement::Slotted;
-                            matching_rule.contains_part_pseudo_element = pseudo_element == PseudoElement::Part;
-                        }
-                    }
                     if (!contains_root_pseudo_class) {
                         if (simple_selector.type == CSS::Selector::SimpleSelector::Type::PseudoClass
                             && simple_selector.pseudo_class().type == CSS::PseudoClass::Root) {
@@ -231,7 +286,7 @@ void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin
                     }
                 }
 
-                rule_cache.add_rule(matching_rule, pseudo_element, contains_root_pseudo_class);
+                rule_cache.add_rule(matching_rule, selector.target_pseudo_element().map([](auto& it) { return it.type(); }), contains_root_pseudo_class);
             }
             ++rule_index;
         });
@@ -249,6 +304,33 @@ void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin
                 auto key = static_cast<u64>(keyframe.key().value() * Animations::KeyframeEffect::AnimationKeyFrameKeyScaleFactor);
                 auto const& keyframe_style = *keyframe.style();
                 for (auto const& it : keyframe_style.properties()) {
+                    if (it.property_id == PropertyID::AnimationTimingFunction) {
+                        // animation-timing-function is a list property, but inside @keyframes only
+                        // a single value is meaningful.
+                        NonnullRefPtr<StyleValue const> easing_value = it.value;
+                        if (easing_value->is_value_list()) {
+                            auto const& list = easing_value->as_value_list();
+                            if (list.size() > 0)
+                                easing_value = list.value_at(0, false);
+                            else
+                                continue;
+                        }
+                        if (easing_value->is_easing() || easing_value->is_keyword())
+                            resolved_keyframe.easing = EasingFunction::from_style_value(*easing_value);
+                        else
+                            resolved_keyframe.easing = easing_value;
+                        continue;
+                    }
+                    if (it.property_id == PropertyID::AnimationComposition) {
+                        auto composition_str = it.value->to_string(SerializationMode::Normal);
+                        AnimationComposition composition = AnimationComposition::Replace;
+                        if (composition_str == "add"sv)
+                            composition = AnimationComposition::Add;
+                        else if (composition_str == "accumulate"sv)
+                            composition = AnimationComposition::Accumulate;
+                        resolved_keyframe.composite = Animations::css_animation_composition_to_bindings_composite_operation_or_auto(composition);
+                        continue;
+                    }
                     if (!is_animatable_property(it.property_id))
                         continue;
 
@@ -259,7 +341,16 @@ void StyleScope::make_rule_cache_for_cascade_origin(CascadeOrigin cascade_origin
                     });
                 }
 
-                keyframe_set->keyframes_by_key.insert(key, resolved_keyframe);
+                if (auto* existing_keyframe = keyframe_set->keyframes_by_key.find(key)) {
+                    for (auto& [property_id, value] : resolved_keyframe.properties)
+                        existing_keyframe->properties.set(property_id, move(value));
+                    if (resolved_keyframe.composite != Bindings::CompositeOperationOrAuto::Auto)
+                        existing_keyframe->composite = resolved_keyframe.composite;
+                    if (!resolved_keyframe.easing.has<Empty>())
+                        existing_keyframe->easing = move(resolved_keyframe.easing);
+                } else {
+                    keyframe_set->keyframes_by_key.insert(key, resolved_keyframe);
+                }
             }
 
             Animations::KeyframeEffect::generate_initial_and_final_frames(keyframe_set, animated_properties);
@@ -283,10 +374,25 @@ void StyleScope::collect_selector_insights(Selector const& selector, SelectorIns
             if (simple_selector.type == Selector::SimpleSelector::Type::PseudoClass) {
                 if (simple_selector.pseudo_class().type == PseudoClass::Has) {
                     insights.has_has_selectors = true;
+                    for (auto const& argument_selector : simple_selector.pseudo_class().argument_selector_list) {
+                        for (auto const& relative_compound_selector : argument_selector->compound_selectors()) {
+                            if (relative_compound_selector.combinator == Selector::Combinator::NextSibling
+                                || relative_compound_selector.combinator == Selector::Combinator::SubsequentSibling) {
+                                insights.has_has_selectors_with_relative_selector_that_has_sibling_combinator = true;
+                                break;
+                            }
+                        }
+                    }
                 }
                 for (auto const& argument_selector : simple_selector.pseudo_class().argument_selector_list) {
                     collect_selector_insights(*argument_selector, insights);
                 }
+            } else if (simple_selector.type == Selector::SimpleSelector::Type::PseudoElement) {
+                // Pseudo-elements like ::slotted(...) carry a compound selector argument whose contents need the
+                // same insight collection pass.
+                auto const& pseudo_element = simple_selector.pseudo_element();
+                if (pseudo_element.type() == PseudoElement::Slotted)
+                    collect_selector_insights(pseudo_element.compound_selector(), insights);
             }
         }
     }
@@ -352,7 +458,12 @@ void StyleScope::build_qualified_layer_names_cache()
                 // Ignore everything else
             case CSSRule::Type::Style:
             case CSSRule::Type::Media:
+            case CSSRule::Type::Container:
+            case CSSRule::Type::CounterStyle:
             case CSSRule::Type::FontFace:
+            case CSSRule::Type::FontFeatureValues:
+            case CSSRule::Type::Function:
+            case CSSRule::Type::FunctionDeclarations:
             case CSSRule::Type::Keyframes:
             case CSSRule::Type::Keyframe:
             case CSSRule::Type::Margin:
@@ -371,6 +482,297 @@ void StyleScope::build_qualified_layer_names_cache()
     flatten_layer_names_tree(m_qualified_layer_names_in_order, ""sv, {}, root);
 }
 
+void StyleScope::invalidate_counter_style_cache()
+{
+    m_needs_counter_style_cache_update = true;
+
+    // FIXME: We only need to invalidate this style scope and those belonging to descendant shadow roots (since they may
+    //        include counter styles which extend the ones defined in this scope), not all style scopes in the document.
+    m_node->document().style_scope().m_needs_counter_style_cache_update = true;
+    m_node->document().for_each_shadow_root([&](DOM::ShadowRoot& shadow_root) {
+        shadow_root.style_scope().m_needs_counter_style_cache_update = true;
+    });
+}
+
+void StyleScope::build_counter_style_cache()
+{
+    m_is_doing_counter_style_cache_update = true;
+
+    m_registered_counter_styles.clear_with_capacity();
+
+    HashMap<FlyString, CSS::CounterStyleDefinition> counter_style_definitions;
+
+    auto const define_complex_predefined_counter_styles = [&]() {
+        // https://drafts.csswg.org/css-counter-styles-3/#complex-predefined-counters
+        // While authors may define their own counter styles using the @counter-style rule or rely on the set of
+        // predefined counter styles, a few counter styles are described by rules that are too complex to be captured by
+        // the predefined algorithms.
+
+        // FIXME: All of the counter styles defined in this section have a spoken form of numbers
+
+        // https://drafts.csswg.org/css-counter-styles-3/#ethiopic-numeric-counter-style
+        // For this system, the name is "ethiopic-numeric", the range is 1 infinite, the suffix is "/ " (U+002F SOLIDUS
+        // followed by a U+0020 SPACE), and the rest of the descriptors have their initial value.
+        counter_style_definitions.set(
+            "ethiopic-numeric"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "ethiopic-numeric"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::EthiopicNumericCounterStyleAlgorithm {} },
+                {},
+                {},
+                "/ "_fly_string,
+                Vector<CSS::CounterStyleRangeEntry> { { 1, AK::NumericLimits<i32>::max() } },
+                {},
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#extended-range-optional
+        // For all of these counter styles, the descriptors are the same as for the limited range variants, except for
+        // the range, which is calc(-1 * pow(10, 16) + 1) calc(pow(10, 16) - 1).
+        // AD-HOC: Ranges (as with all other CSS <integer>s are limited to i32 range)
+        Vector<CSS::CounterStyleRangeEntry> extended_cjk_range { { AK::clamp_to<i32>(-9999999999999999), AK::clamp_to<i32>(9999999999999999) } };
+
+        // https://drafts.csswg.org/css-counter-styles-3/#limited-chinese
+        // For all of these counter styles, the suffix is "、" U+3001, the fallback is cjk-decimal, the range is -9999
+        // 9999, and the negative value is given in the table of symbols for each style.
+
+        //                  simp-chinese-informal simp-chinese-formal trad-chinese-informal trad-chinese-formal
+        // Negative Sign    负 U+8D1F             负 U+8D1F           負 U+8CA0              負 U+8CA0
+
+        // https://drafts.csswg.org/css-counter-styles-3/#simp-chinese-informal
+        // simp-chinese-informal
+        counter_style_definitions.set(
+            "simp-chinese-informal"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "simp-chinese-informal"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::SimpChineseInformal } },
+                CSS::CounterStyleNegativeSign { "\U00008D1F"_fly_string, ""_fly_string },
+                {},
+                "\U00003001"_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#simp-chinese-formal
+        // simp-chinese-formal
+        counter_style_definitions.set(
+            "simp-chinese-formal"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "simp-chinese-formal"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::SimpChineseFormal } },
+                CSS::CounterStyleNegativeSign { "\U00008D1F"_fly_string, ""_fly_string },
+                {},
+                "\U00003001"_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#trad-chinese-informal
+        // trad-chinese-informal
+        counter_style_definitions.set(
+            "trad-chinese-informal"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "trad-chinese-informal"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::TradChineseInformal } },
+                CSS::CounterStyleNegativeSign { "\U00008CA0"_fly_string, ""_fly_string },
+                {},
+                "\U00003001"_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#trad-chinese-formal
+        // trad-chinese-formal
+        counter_style_definitions.set(
+            "trad-chinese-formal"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "trad-chinese-formal"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::TradChineseFormal } },
+                CSS::CounterStyleNegativeSign { "\U00008CA0"_fly_string, ""_fly_string },
+                {},
+                "\U00003001"_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#cjk-ideographic
+        // cjk-ideographic
+        // This counter style is identical to trad-chinese-informal. (It exists for legacy reasons.)
+        counter_style_definitions.set(
+            "cjk-ideographic"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "cjk-ideographic"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::TradChineseInformal } },
+                CSS::CounterStyleNegativeSign { "\U00008CA0"_fly_string, ""_fly_string },
+                {},
+                "\U00003001"_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#japanese-informal
+        // japanese-informal
+        counter_style_definitions.set(
+            "japanese-informal"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "japanese-informal"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::JapaneseInformal } },
+                CSS::CounterStyleNegativeSign { "\U000030DE\U000030A4\U000030CA\U000030B9"_fly_string, ""_fly_string },
+                {},
+                "\U00003001"_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#japanese-formal
+        // japanese-formal
+        counter_style_definitions.set(
+            "japanese-formal"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "japanese-formal"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::JapaneseFormal } },
+                CSS::CounterStyleNegativeSign { "\U000030DE\U000030A4\U000030CA\U000030B9"_fly_string, ""_fly_string },
+                {},
+                "\U00003001"_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#korean-hangul-formal
+        // korean-hangul-formal
+        counter_style_definitions.set(
+            "korean-hangul-formal"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "korean-hangul-formal"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::KoreanHangulFormal } },
+                CSS::CounterStyleNegativeSign { "\U0000B9C8\U0000C774\U0000B108\U0000C2A4 "_fly_string, ""_fly_string },
+                {},
+                ", "_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#korean-hanja-informal
+        // korean-hanja-informal
+        counter_style_definitions.set(
+            "korean-hanja-informal"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "korean-hanja-informal"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaInformal } },
+                CSS::CounterStyleNegativeSign { "\U0000B9C8\U0000C774\U0000B108\U0000C2A4 "_fly_string, ""_fly_string },
+                {},
+                ", "_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+
+        // https://drafts.csswg.org/css-counter-styles-3/#korean-hanja-formal
+        // korean-hanja-formal
+        counter_style_definitions.set(
+            "korean-hanja-formal"_fly_string,
+            CSS::CounterStyleDefinition::create(
+                "korean-hanja-formal"_fly_string,
+                CSS::CounterStyleAlgorithmOrExtends { CSS::ExtendedCJKCounterStyleAlgorithm { CSS::ExtendedCJKCounterStyleAlgorithm::Type::KoreanHanjaFormal } },
+                CSS::CounterStyleNegativeSign { "\U0000B9C8\U0000C774\U0000B108\U0000C2A4 "_fly_string, ""_fly_string },
+                {},
+                ", "_fly_string,
+                extended_cjk_range,
+                "cjk-decimal"_fly_string,
+                {}));
+    };
+
+    CSS::ComputationContext computation_context {
+        .length_resolution_context = CSS::Length::ResolutionContext::for_document(document())
+    };
+
+    Function<void(CSS::CSSStyleSheet&)> const collect_counter_style_definitions = [&](CSS::CSSStyleSheet const& style_sheet) {
+        style_sheet.for_each_effective_counter_style_at_rule([&](CSS::CSSCounterStyleRule const& counter_style_rule) {
+            if (auto const& definition = CSS::CounterStyleDefinition::from_counter_style_rule(counter_style_rule, computation_context); definition.has_value())
+                counter_style_definitions.set(definition->name(), *definition);
+        });
+    };
+
+    // NB: We should only register predefined counter styles in the document's style scope, this ensures overrides are
+    //     correctly inherited by shadow roots.
+    if (m_node->is_document()) {
+        for_each_stylesheet(CSS::CascadeOrigin::UserAgent, collect_counter_style_definitions);
+        define_complex_predefined_counter_styles();
+        for_each_stylesheet(CSS::CascadeOrigin::User, collect_counter_style_definitions);
+    }
+
+    for_each_stylesheet(CSS::CascadeOrigin::Author, collect_counter_style_definitions);
+
+    VERIFY(!m_node->is_document() || counter_style_definitions.contains("decimal"_fly_string));
+
+    auto const is_part_of_extends_cycle = [&](FlyString const& counter_style_name) {
+        HashTable<FlyString> visited;
+        auto current_counter_style_name = counter_style_name;
+
+        while (true) {
+            if (visited.contains(current_counter_style_name))
+                return true;
+
+            visited.set(current_counter_style_name);
+
+            auto const& current_definition = counter_style_definitions.get(current_counter_style_name);
+
+            // NB: If we don't have a definition for this counter style it means it's either undefined in this scope
+            //     (and will the counter style extending it will instead default to extending "decimal" instead) or it's
+            //     defined in an outer style scope (and thus can't extend a counter style in the current scope), neither
+            //     of which can lead to a cycle.
+            if (!current_definition.has_value())
+                return false;
+
+            if (current_definition->algorithm().has<CSS::CounterStyleAlgorithm>())
+                return false;
+
+            current_counter_style_name = current_definition->algorithm().get<CSS::CounterStyleSystemStyleValue::Extends>().name;
+        }
+
+        VERIFY_NOT_REACHED();
+    };
+
+    // NB: We register non-extending counter styles immediately and then extending counter styles after we have
+    //     registered their corresponding extended counter style.
+    Vector<CSS::CounterStyleDefinition> extending_counter_styles;
+
+    for (auto const& [name, definition] : counter_style_definitions) {
+        // NB: We don't need to wait for this counter style's extended counter style to be registered since it doesn't
+        //     have one - register it immediately.
+        if (definition.algorithm().has<CSS::CounterStyleAlgorithm>()) {
+            m_registered_counter_styles.set(name, CSS::CounterStyle::from_counter_style_definition(definition, *this));
+            continue;
+        }
+
+        auto extends = definition.algorithm().get<CSS::CounterStyleSystemStyleValue::Extends>();
+
+        if (is_part_of_extends_cycle(name)) {
+            auto copied = definition;
+            copied.set_algorithm(CSS::CounterStyleSystemStyleValue::Extends { "decimal"_fly_string });
+            extending_counter_styles.append(copied);
+        } else {
+            extending_counter_styles.append(definition);
+        }
+    }
+
+    // FIXME: This is O(n^2) in the worst case but we usually don't see many counter styles so it should be fine in practice.
+    while (!extending_counter_styles.is_empty()) {
+        for (size_t i = 0; i < extending_counter_styles.size(); ++i) {
+            auto const& definition = extending_counter_styles.at(i);
+            auto extends = definition.algorithm().get<CSS::CounterStyleSystemStyleValue::Extends>();
+
+            if (!m_registered_counter_styles.contains(extends.name) && counter_style_definitions.contains(extends.name))
+                continue;
+
+            m_registered_counter_styles.set(definition.name(), CSS::CounterStyle::from_counter_style_definition(definition, *this));
+            extending_counter_styles.remove(i);
+            --i;
+        }
+    }
+
+    m_is_doing_counter_style_cache_update = false;
+    m_needs_counter_style_cache_update = false;
+}
+
 bool StyleScope::may_have_has_selectors() const
 {
     if (!has_valid_rule_cache())
@@ -386,6 +788,21 @@ bool StyleScope::have_has_selectors() const
     return m_selector_insights->has_has_selectors;
 }
 
+bool StyleScope::may_have_has_selectors_with_relative_selector_that_has_sibling_combinator() const
+{
+    if (!has_valid_rule_cache())
+        return true;
+
+    build_rule_cache_if_needed();
+    return m_selector_insights->has_has_selectors_with_relative_selector_that_has_sibling_combinator;
+}
+
+bool StyleScope::have_has_selectors_with_relative_selector_that_has_sibling_combinator() const
+{
+    build_rule_cache_if_needed();
+    return m_selector_insights->has_has_selectors_with_relative_selector_that_has_sibling_combinator;
+}
+
 DOM::Document& StyleScope::document() const
 {
     return m_node->document();
@@ -397,13 +814,19 @@ RuleCache const& StyleScope::get_pseudo_class_rule_cache(PseudoClass pseudo_clas
     return *m_pseudo_class_rule_cache[to_underlying(pseudo_class)];
 }
 
-void StyleScope::for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)>&& callback) const
+void StyleScope::for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)> const& callback) const
 {
     if (auto* shadow_root = as_if<DOM::ShadowRoot>(*m_node)) {
-        shadow_root->for_each_active_css_style_sheet(move(callback));
+        shadow_root->for_each_active_css_style_sheet(callback);
     } else {
-        m_node->document().for_each_active_css_style_sheet(move(callback));
+        m_node->document().for_each_active_css_style_sheet(callback);
     }
+}
+
+void StyleScope::schedule_ancestors_style_invalidation_due_to_presence_of_has(DOM::Node& node)
+{
+    m_pending_nodes_for_style_invalidation_due_to_presence_of_has.set(node);
+    document().set_needs_invalidation_of_elements_affected_by_has();
 }
 
 void StyleScope::invalidate_style_of_elements_affected_by_has()
@@ -423,29 +846,113 @@ void StyleScope::invalidate_style_of_elements_affected_by_has()
         return;
     }
 
+    auto& counters = document().style_invalidation_counters();
+    ++counters.has_ancestor_walk_invocations;
+
+    auto is_in_has_scope = [](DOM::Element const& element) {
+        return element.in_has_scope()
+            || element.affected_by_has_pseudo_class_in_subject_position()
+            || element.affected_by_has_pseudo_class_in_non_subject_position();
+    };
+
+    auto is_in_subtree_of_has_relative_selector_with_sibling_combinator = [](DOM::Element const& element) {
+        return element.in_subtree_of_has_pseudo_class_relative_selector_with_sibling_combinator()
+            || element.affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator();
+    };
+
+    HashTable<DOM::Element*> elements_already_invalidated_for_has;
     auto nodes = move(m_pending_nodes_for_style_invalidation_due_to_presence_of_has);
-    for (auto const& node : nodes) {
-        if (!node)
-            continue;
-        for (auto ancestor = node.ptr(); ancestor; ancestor = ancestor->parent_or_shadow_host()) {
+    bool should_scan_ancestor_siblings = have_has_selectors_with_relative_selector_that_has_sibling_combinator();
+    for (auto& node : nodes) {
+        Vector<DOM::Element*, 16> has_scope_ancestors;
+        bool should_delay_ancestor_sibling_scans = false;
+        for (auto* ancestor = &node; ancestor; ancestor = ancestor->parent_or_shadow_host()) {
             if (!ancestor->is_element())
                 continue;
             auto& element = static_cast<DOM::Element&>(*ancestor);
-            element.invalidate_style_if_affected_by_has();
 
-            auto* parent = ancestor->parent_or_shadow_host();
+            // Terminate the upward walk once we reach an element that no :has()
+            // anchor has ever observed. Its style cannot be affected by a mutation
+            // further down the tree, so neither can anything above it.
+            if (!is_in_has_scope(element))
+                break;
+
+            has_scope_ancestors.append(&element);
+            should_delay_ancestor_sibling_scans |= is_in_subtree_of_has_relative_selector_with_sibling_combinator(element);
+        }
+
+        for (auto* element : has_scope_ancestors) {
+            VERIFY(element);
+
+            if (elements_already_invalidated_for_has.set(element) != AK::HashSetResult::InsertedNewEntry)
+                continue;
+
+            ++counters.has_ancestor_walk_visits;
+            element->invalidate_style_if_affected_by_has();
+
+            auto* parent = element->parent_or_shadow_host();
             if (!parent)
                 return;
 
             // If any ancestor's sibling was tested against selectors like ".a:has(+ .b)" or ".a:has(~ .b)"
             // its style might be affected by the change in descendant node.
+            if (!should_scan_ancestor_siblings)
+                continue;
+            if (should_delay_ancestor_sibling_scans && !is_in_subtree_of_has_relative_selector_with_sibling_combinator(*element))
+                continue;
             parent->for_each_child_of_type<DOM::Element>([&](auto& ancestor_sibling_element) {
-                if (ancestor_sibling_element.affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator())
+                ++counters.has_ancestor_sibling_element_checks;
+                if (ancestor_sibling_element.affected_by_has_pseudo_class_with_relative_selector_that_has_sibling_combinator()) {
+                    if (elements_already_invalidated_for_has.set(&ancestor_sibling_element) != AK::HashSetResult::InsertedNewEntry)
+                        return IterationDecision::Continue;
+
+                    ++counters.has_ancestor_walk_visits;
                     ancestor_sibling_element.invalidate_style_if_affected_by_has();
+                }
                 return IterationDecision::Continue;
             });
         }
     }
+}
+
+RefPtr<CSS::CounterStyle const> StyleScope::get_registered_counter_style(FlyString const& name) const
+{
+    if (m_needs_counter_style_cache_update && !m_is_doing_counter_style_cache_update)
+        const_cast<StyleScope*>(this)->build_counter_style_cache();
+
+    return dereference_global_tree_scoped_reference<CSS::CounterStyle const*>([&](StyleScope const& scope) { return scope.m_registered_counter_styles.get(name); })
+        .value_or(nullptr);
+}
+
+template<typename T>
+Optional<T> StyleScope::dereference_global_tree_scoped_reference(Function<Optional<T>(StyleScope const&)> const& callback) const
+{
+    // https://drafts.csswg.org/css-shadow-1/#tree-scoped-name-global
+    // If a tree-scoped name is global (such as @font-face names), then when a tree-scoped reference is dereferenced to
+    // find it, first search only the tree-scoped names associated with the same root as the tree-scoped reference. If
+    // no relevant tree-scoped name is found, and the root is a shadow root, then repeat this search in the root’s
+    // host’s node tree (recursively). (In other words, global tree-scoped names “inherit” into descendant shadow trees,
+    // so long as they don’t define the same name themselves.)
+    if (auto result = callback(*this); result.has_value())
+        return result;
+
+    if (auto* shadow_root = as_if<DOM::ShadowRoot>(*m_node)) {
+        if (auto* host = shadow_root->host()) {
+            auto const& root = host->root();
+
+            if (root.is_shadow_root()) {
+                auto const& shadow_root = as<DOM::ShadowRoot>(root);
+                if (shadow_root.uses_document_style_sheets())
+                    return root.document().style_scope().dereference_global_tree_scoped_reference(callback);
+
+                return shadow_root.style_scope().dereference_global_tree_scoped_reference(callback);
+            }
+
+            return as<DOM::Document>(root).style_scope().dereference_global_tree_scoped_reference(callback);
+        }
+    }
+
+    return {};
 }
 
 }

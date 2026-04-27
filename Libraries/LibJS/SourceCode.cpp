@@ -25,6 +25,20 @@ SourceCode::SourceCode(String filename, Utf16String code)
 {
 }
 
+u16 const* SourceCode::utf16_data() const
+{
+    if (!m_code_view.has_ascii_storage())
+        return reinterpret_cast<u16 const*>(m_code_view.utf16_span().data());
+
+    if (m_utf16_data_cache.is_empty() && m_length_in_code_units > 0) {
+        auto ascii = m_code_view.ascii_span();
+        m_utf16_data_cache.ensure_capacity(m_length_in_code_units);
+        for (size_t i = 0; i < m_length_in_code_units; ++i)
+            m_utf16_data_cache.unchecked_append(static_cast<u16>(ascii[i]));
+    }
+    return m_utf16_data_cache.data();
+}
+
 void SourceCode::fill_position_cache() const
 {
     constexpr size_t predicted_minimum_cached_positions = 8;
@@ -35,9 +49,9 @@ void SourceCode::fill_position_cache() const
         return;
 
     u32 previous_code_point = 0;
-    size_t line = 1;
-    size_t column = 1;
-    size_t offset_of_last_starting_point = 0;
+    u32 line = 1;
+    u32 column = 1;
+    u32 offset_of_last_starting_point = 0;
 
     m_cached_positions.ensure_capacity(predicted_minimum_cached_positions + (m_code.length_in_code_units() / maximum_distance_between_cached_positions));
     m_cached_positions.append({ .line = 1, .column = 1, .offset = 0 });
@@ -49,12 +63,13 @@ void SourceCode::fill_position_cache() const
         bool is_line_terminator = code_point == '\r' || (code_point == '\n' && previous_code_point != '\r') || code_point == LINE_SEPARATOR || code_point == PARAGRAPH_SEPARATOR;
 
         auto offset = view.iterator_offset(it);
+        VERIFY(offset <= NumericLimits<u32>::max());
 
         bool is_nonempty_line = is_line_terminator && previous_code_point != '\n' && previous_code_point != LINE_SEPARATOR && previous_code_point != PARAGRAPH_SEPARATOR && (code_point == '\n' || previous_code_point != '\r');
         auto distance_between_cached_position = offset - offset_of_last_starting_point;
 
         if ((distance_between_cached_position >= minimum_distance_between_cached_positions && is_nonempty_line) || distance_between_cached_position >= maximum_distance_between_cached_positions) {
-            m_cached_positions.append({ .line = line, .column = column, .offset = offset });
+            m_cached_positions.append({ .line = line, .column = column, .offset = static_cast<u32>(offset) });
             offset_of_last_starting_point = offset;
         }
 

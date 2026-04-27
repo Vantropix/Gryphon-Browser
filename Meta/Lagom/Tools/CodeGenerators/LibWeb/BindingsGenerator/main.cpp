@@ -9,22 +9,94 @@
  */
 
 #include "IDLGenerators.h"
-#include "Namespaces.h"
+#include <AK/Assertions.h>
 #include <AK/Debug.h>
+#include <AK/HashTable.h>
 #include <AK/LexicalPath.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/File.h>
+#include <LibCore/MappedFile.h>
 #include <LibIDL/IDLParser.h>
 #include <LibIDL/Types.h>
+
+template<typename GeneratorFunction>
+static ErrorOr<void> write_if_changed(GeneratorFunction generator_function, IDL::Interface const& interface, StringView file_path)
+{
+    StringBuilder output_builder;
+    generator_function(interface, output_builder);
+
+    auto current_file_or_error = Core::File::open(file_path, Core::File::OpenMode::Read);
+    if (current_file_or_error.is_error() && current_file_or_error.error().code() != ENOENT)
+        return current_file_or_error.release_error();
+
+    ByteBuffer current_contents;
+    if (!current_file_or_error.is_error())
+        current_contents = TRY(current_file_or_error.value()->read_until_eof());
+    // Only write to disk if contents have changed
+    if (current_contents != output_builder.string_view().bytes()) {
+        auto output_file = TRY(Core::File::open(file_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
+        TRY(output_file->write_until_depleted(output_builder.string_view().bytes()));
+    }
+
+    return {};
+}
+
+static ErrorOr<void> generate_depfile(StringView depfile_path, ReadonlySpan<ByteString> dependency_paths, ReadonlySpan<ByteString> output_files)
+{
+    auto depfile = TRY(Core::File::open_file_or_standard_stream(depfile_path, Core::File::OpenMode::Write));
+
+    StringBuilder depfile_builder;
+    bool first_output = true;
+    for (auto const& s : output_files) {
+        if (!first_output)
+            depfile_builder.append(' ');
+
+        depfile_builder.append(s);
+        first_output = false;
+    }
+    depfile_builder.append(':');
+    for (auto const& path : dependency_paths) {
+        depfile_builder.append(" \\\n "sv);
+        depfile_builder.append(path);
+    }
+    depfile_builder.append('\n');
+    return depfile->write_until_depleted(depfile_builder.string_view().bytes());
+}
+
+static ByteString cpp_namespace_for_module_path(ByteString const& module_own_path)
+{
+    auto path = LexicalPath { module_own_path };
+    auto parts = path.parts_view();
+    for (size_t i = 0; i + 2 < parts.size(); ++i) {
+        if (parts[i] != "LibWeb"sv)
+            continue;
+
+        return parts[i + 1].to_byte_string();
+    }
+
+    if (parts.size() >= 2)
+        return parts[parts.size() - 2].to_byte_string();
+
+    return {};
+}
+
+static void assign_fully_qualified_name(IDL::Interface& interface)
+{
+    auto namespace_name = cpp_namespace_for_module_path(interface.module_own_path);
+    if (namespace_name.is_empty()) {
+        interface.fully_qualified_name = interface.implemented_name;
+        return;
+    }
+
+    interface.fully_qualified_name = ByteString::formatted("{}::{}", namespace_name, interface.implemented_name);
+}
 
 ErrorOr<int> ladybird_main(Main::Arguments arguments)
 {
     Core::ArgsParser args_parser;
-    StringView path;
-    Vector<ByteString> import_base_paths;
+    Vector<ByteString> paths;
     StringView output_path = "-"sv;
     StringView depfile_path;
-    StringView depfile_prefix;
 
     args_parser.add_option(Core::ArgsParser::Option {
         .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
@@ -39,177 +111,69 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     });
     args_parser.add_option(output_path, "Path to output generated files into", "output-path", 'o', "output-path");
     args_parser.add_option(depfile_path, "Path to write dependency file to", "depfile", 'd', "depfile-path");
-    args_parser.add_option(depfile_prefix, "Prefix to prepend to relative paths in dependency file", "depfile-prefix", 'p', "depfile-prefix");
-    args_parser.add_positional_argument(path, "IDL file", "idl-file");
-    args_parser.add_positional_argument(import_base_paths, "Import base path", "import-base-path", Core::ArgsParser::Required::No);
+    args_parser.add_positional_argument(paths, "IDL file(s)", "idl-files");
     args_parser.parse(arguments);
 
-    auto idl_file = TRY(Core::File::open(path, Core::File::OpenMode::Read));
+    if (paths.first().starts_with("@"sv)) {
+        auto file = TRY(Core::File::open(paths.first().substring_view(1), Core::File::OpenMode::Read));
+        paths.remove(0);
+        VERIFY(paths.is_empty());
 
-    LexicalPath lexical_path(path);
-    auto& namespace_ = lexical_path.parts_view().at(lexical_path.parts_view().size() - 2);
-
-    auto data = TRY(idl_file->read_until_eof());
-
-    if (import_base_paths.is_empty())
-        import_base_paths.append(lexical_path.dirname());
-
-    IDL::Parser parser(path, data, move(import_base_paths));
-    auto& interface = parser.parse();
-
-    // If the interface name is the same as its namespace, qualify the name in the generated code.
-    // e.g. Selection::Selection
-    if (IDL::libweb_interface_namespaces.span().contains_slow(namespace_)) {
-        StringBuilder builder;
-        builder.append(namespace_);
-        builder.append("::"sv);
-        builder.append(interface.implemented_name);
-        interface.fully_qualified_name = builder.to_byte_string();
-    } else {
-        interface.fully_qualified_name = interface.implemented_name;
-    }
-
-    if constexpr (BINDINGS_GENERATOR_DEBUG) {
-        dbgln("Attributes:");
-        for (auto& attribute : interface.attributes) {
-            dbgln("  {}{}{}{} {}",
-                attribute.inherit ? "inherit " : "",
-                attribute.readonly ? "readonly " : "",
-                attribute.type->name(),
-                attribute.type->is_nullable() ? "?" : "",
-                attribute.name);
-        }
-
-        dbgln("Functions:");
-        for (auto& function : interface.functions) {
-            dbgln("  {}{} {}",
-                function.return_type->name(),
-                function.return_type->is_nullable() ? "?" : "",
-                function.name);
-            for (auto& parameter : function.parameters) {
-                dbgln("    {}{} {}",
-                    parameter.type->name(),
-                    parameter.type->is_nullable() ? "?" : "",
-                    parameter.name);
-            }
-        }
-
-        dbgln("Static Functions:");
-        for (auto& function : interface.static_functions) {
-            dbgln("  static {}{} {}",
-                function.return_type->name(),
-                function.return_type->is_nullable() ? "?" : "",
-                function.name);
-            for (auto& parameter : function.parameters) {
-                dbgln("    {}{} {}",
-                    parameter.type->name(),
-                    parameter.type->is_nullable() ? "?" : "",
-                    parameter.name);
-            }
+        auto string = TRY(file->read_until_eof());
+        for (auto const& path : StringView(string).split_view('\n')) {
+            if (path.is_empty())
+                continue;
+            paths.append(path);
         }
     }
 
-    StringBuilder output_builder;
+    IDL::Context context;
+    Vector<ByteString> dependency_paths;
+    HashTable<ByteString> seen_dependency_paths;
+    Vector<ByteString> output_files;
 
-    auto write_if_changed = [&](auto generator_function, StringView file_path) -> ErrorOr<void> {
-        (*generator_function)(interface, output_builder);
-
-        auto current_file_or_error = Core::File::open(file_path, Core::File::OpenMode::Read);
-        if (current_file_or_error.is_error() && current_file_or_error.error().code() != ENOENT)
-            return current_file_or_error.release_error();
-
-        ByteBuffer current_contents;
-        if (!current_file_or_error.is_error())
-            current_contents = TRY(current_file_or_error.value()->read_until_eof());
-        // Only write to disk if contents have changed
-        if (current_contents != output_builder.string_view().bytes()) {
-            auto output_file = TRY(Core::File::open(file_path, Core::File::OpenMode::Write | Core::File::OpenMode::Truncate));
-            TRY(output_file->write_until_depleted(output_builder.string_view().bytes()));
-        }
-        // FIXME: Can we add clear_with_capacity to StringBuilder instead of throwing away the allocated buffer?
-        output_builder.clear();
-        return {};
+    auto append_dependency_path = [&](ByteString const& dependency_path) {
+        if (seen_dependency_paths.set(dependency_path) != AK::HashSetResult::InsertedNewEntry)
+            return;
+        dependency_paths.append(dependency_path);
     };
 
-    String namespace_header;
-    String namespace_implementation;
-    String constructor_header;
-    String constructor_implementation;
-    String prototype_header;
-    String prototype_implementation;
-    String iterator_prototype_header;
-    String iterator_prototype_implementation;
-    String async_iterator_prototype_header;
-    String async_iterator_prototype_implementation;
-    String global_mixin_header;
-    String global_mixin_implementation;
-
-    auto path_prefix = LexicalPath::join(output_path, lexical_path.basename(LexicalPath::StripExtension::Yes));
-
-    if (interface.is_namespace) {
-        namespace_header = TRY(String::formatted("{}Namespace.h", path_prefix));
-        namespace_implementation = TRY(String::formatted("{}Namespace.cpp", path_prefix));
-
-        TRY(write_if_changed(&IDL::generate_namespace_header, namespace_header));
-        TRY(write_if_changed(&IDL::generate_namespace_implementation, namespace_implementation));
-    } else {
-        constructor_header = TRY(String::formatted("{}Constructor.h", path_prefix));
-        constructor_implementation = TRY(String::formatted("{}Constructor.cpp", path_prefix));
-        prototype_header = TRY(String::formatted("{}Prototype.h", path_prefix));
-        prototype_implementation = TRY(String::formatted("{}Prototype.cpp", path_prefix));
-
-        TRY(write_if_changed(&IDL::generate_constructor_header, constructor_header));
-        TRY(write_if_changed(&IDL::generate_constructor_implementation, constructor_implementation));
-        TRY(write_if_changed(&IDL::generate_prototype_header, prototype_header));
-        TRY(write_if_changed(&IDL::generate_prototype_implementation, prototype_implementation));
+    for (auto const& path : paths) {
+        auto file = TRY(Core::MappedFile::map(path, Core::MappedFile::Mode::ReadOnly));
+        auto module = IDL::Parser::parse(path, file->bytes(), context);
+        append_dependency_path(path);
     }
 
-    if (interface.pair_iterator_types.has_value()) {
-        iterator_prototype_header = TRY(String::formatted("{}IteratorPrototype.h", path_prefix));
-        iterator_prototype_implementation = TRY(String::formatted("{}IteratorPrototype.cpp", path_prefix));
+    context.resolve();
 
-        TRY(write_if_changed(&IDL::generate_iterator_prototype_header, iterator_prototype_header));
-        TRY(write_if_changed(&IDL::generate_iterator_prototype_implementation, iterator_prototype_implementation));
-    }
+    for (auto& interface : context.owned_interfaces)
+        assign_fully_qualified_name(*interface);
 
-    if (interface.async_value_iterator_type.has_value()) {
-        async_iterator_prototype_header = TRY(String::formatted("{}AsyncIteratorPrototype.h", path_prefix));
-        async_iterator_prototype_implementation = TRY(String::formatted("{}AsyncIteratorPrototype.cpp", path_prefix));
+    for (auto const& module : context.owned_modules) {
+        if (!module->interface.has_value())
+            continue;
 
-        TRY(write_if_changed(&IDL::generate_async_iterator_prototype_header, async_iterator_prototype_header));
-        TRY(write_if_changed(&IDL::generate_async_iterator_prototype_implementation, async_iterator_prototype_implementation));
-    }
+        auto& interface = module->interface.value();
+        if (!interface.will_generate_code())
+            continue;
 
-    if (interface.extended_attributes.contains("Global")) {
-        global_mixin_header = TRY(String::formatted("{}GlobalMixin.h", path_prefix));
-        global_mixin_implementation = TRY(String::formatted("{}GlobalMixin.cpp", path_prefix));
+        if constexpr (BINDINGS_GENERATOR_DEBUG)
+            interface.dump();
 
-        TRY(write_if_changed(&IDL::generate_global_mixin_header, global_mixin_header));
-        TRY(write_if_changed(&IDL::generate_global_mixin_implementation, global_mixin_implementation));
+        auto lexical_path = LexicalPath { module->module_own_path };
+        auto path_prefix = LexicalPath::join(output_path, lexical_path.basename(LexicalPath::StripExtension::Yes));
+        auto header_path = ByteString::formatted("{}.h", path_prefix);
+        auto implementation_path = ByteString::formatted("{}.cpp", path_prefix);
+
+        TRY(write_if_changed(&IDL::generate_header, interface, header_path));
+        TRY(write_if_changed(&IDL::generate_implementation, interface, implementation_path));
+
+        output_files.append(header_path);
+        output_files.append(implementation_path);
     }
 
     if (!depfile_path.is_empty()) {
-        auto depfile = TRY(Core::File::open_file_or_standard_stream(depfile_path, Core::File::OpenMode::Write));
-
-        StringBuilder depfile_builder;
-        for (StringView s : { constructor_header, constructor_implementation, prototype_header, prototype_implementation, namespace_header, namespace_implementation, iterator_prototype_header, iterator_prototype_implementation, async_iterator_prototype_header, async_iterator_prototype_implementation, global_mixin_header, global_mixin_implementation }) {
-            if (s.is_empty())
-                continue;
-
-            if (!depfile_prefix.is_empty())
-                depfile_builder.append(LexicalPath::join(depfile_prefix, s).string());
-            else
-                depfile_builder.append(s);
-
-            break;
-        }
-        depfile_builder.append(':');
-        for (auto const& path : parser.imported_files()) {
-            depfile_builder.append(" \\\n "sv);
-            depfile_builder.append(path);
-        }
-        depfile_builder.append('\n');
-        TRY(depfile->write_until_depleted(depfile_builder.string_view().bytes()));
+        TRY(generate_depfile(depfile_path, dependency_paths, output_files));
     }
     return 0;
 }

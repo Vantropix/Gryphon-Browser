@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020, the SerenityOS developers.
+ * Copyright (c) 2026, Gregory Bertilson <gregory@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -25,21 +26,41 @@ class HTMLVideoElement final : public HTMLMediaElement {
     GC_DECLARE_ALLOCATOR(HTMLVideoElement);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~HTMLVideoElement() override;
 
     Layout::VideoBox* layout_node();
     Layout::VideoBox const* layout_node() const;
 
-    void set_video_width(u32 video_width) { m_video_width = video_width; }
+    void set_intrinsic_video_dimensions(Optional<Gfx::Size<u32>>);
     u32 video_width() const;
-
-    void set_video_height(u32 video_height) { m_video_height = video_height; }
     u32 video_height() const;
+
+    virtual void update_intrinsic_video_dimensions() override;
+    virtual void update_natural_dimensions() override;
+    Optional<Gfx::Size<u32>> natural_media_size() const;
+    Optional<CSSPixelSize> natural_element_size() const;
 
     RefPtr<Gfx::Bitmap> const& poster_frame() const { return m_poster_frame; }
 
+    // https://html.spec.whatwg.org/multipage/media.html#the-video-element:the-video-element-7
+    // NB: We combine the values of...
+    //      - The last frame of the video to have been rendered
+    //      - The frame of video corresponding to the current playback position
+    //     ...into the value of VideoFrame below, as the playback system itself implements
+    //     the details of the selection of a video frame to match the specification in this
+    //     respect.
+    enum class Representation : u8 {
+        VideoFrame,
+        FirstVideoFrame,
+        PosterFrame,
+        TransparentBlack,
+    };
+    Representation current_representation() const;
+
     // FIXME: This is a hack for images used as CanvasImageSource. Do something more elegant.
-    RefPtr<Gfx::Bitmap> bitmap() const;
+    RefPtr<Gfx::ImmutableBitmap> bitmap() const;
 
 private:
     HTMLVideoElement(DOM::Document&, DOM::QualifiedName);
@@ -54,7 +75,6 @@ private:
     virtual bool supports_dimension_attributes() const override { return true; }
 
     virtual GC::Ptr<Layout::Node> create_layout_node(GC::Ref<CSS::ComputedProperties>) override;
-    virtual void adjust_computed_style(CSS::ComputedProperties&) override;
 
     WebIDL::ExceptionOr<void> determine_element_poster_frame(Optional<String> const& poster);
 
@@ -62,8 +82,8 @@ private:
     VideoFrame m_current_frame;
     RefPtr<Gfx::Bitmap> m_poster_frame;
 
-    u32 m_video_width { 0 };
-    u32 m_video_height { 0 };
+    Optional<Gfx::Size<u32>> m_intrinsic_video_dimensions;
+    Optional<CSSPixelSize> m_natural_dimensiosn;
 
     GC::Ptr<Fetch::Infrastructure::FetchController> m_fetch_controller;
     Optional<DOM::DocumentLoadEventDelayer> m_load_event_delayer;

@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/PromiseRejectionEventPrototype.h>
+#include <LibWeb/Bindings/PromiseRejectionEvent.h>
 #include <LibWeb/HTML/PromiseRejectionEvent.h>
 
 namespace Web::HTML {
@@ -14,7 +14,9 @@ GC_DEFINE_ALLOCATOR(PromiseRejectionEvent);
 
 GC::Ref<PromiseRejectionEvent> PromiseRejectionEvent::create(JS::Realm& realm, FlyString const& event_name, PromiseRejectionEventInit const& event_init)
 {
-    return realm.create<PromiseRejectionEvent>(realm, event_name, event_init);
+    auto event = realm.create<PromiseRejectionEvent>(realm, event_name, event_init);
+    event->set_is_trusted(true);
+    return event;
 }
 
 WebIDL::ExceptionOr<GC::Ref<PromiseRejectionEvent>> PromiseRejectionEvent::construct_impl(JS::Realm& realm, FlyString const& event_name, PromiseRejectionEventInit const& event_init)

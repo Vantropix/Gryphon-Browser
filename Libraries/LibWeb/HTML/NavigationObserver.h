@@ -15,10 +15,12 @@
 namespace Web::HTML {
 
 class WEB_API NavigationObserver final : public Bindings::PlatformObject {
-    WEB_PLATFORM_OBJECT(NavigationObserver, Bindings::PlatformObject);
+    WEB_NON_IDL_PLATFORM_OBJECT(NavigationObserver, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(NavigationObserver);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     [[nodiscard]] GC::Ptr<GC::Function<void()>> navigation_complete() const { return m_navigation_complete; }
     void set_navigation_complete(Function<void()>);
 

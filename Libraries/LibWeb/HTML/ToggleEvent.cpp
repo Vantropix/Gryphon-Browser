@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ToggleEventPrototype.h>
+#include <LibWeb/Bindings/ToggleEvent.h>
 #include <LibWeb/HTML/ToggleEvent.h>
 
 namespace Web::HTML {
@@ -14,7 +14,9 @@ GC_DEFINE_ALLOCATOR(ToggleEvent);
 
 GC::Ref<ToggleEvent> ToggleEvent::create(JS::Realm& realm, FlyString const& event_name, ToggleEventInit event_init)
 {
-    return realm.create<ToggleEvent>(realm, event_name, move(event_init));
+    auto event = realm.create<ToggleEvent>(realm, event_name, move(event_init));
+    event->set_is_trusted(true);
+    return event;
 }
 
 WebIDL::ExceptionOr<GC::Ref<ToggleEvent>> ToggleEvent::construct_impl(JS::Realm& realm, FlyString const& event_name, ToggleEventInit event_init)

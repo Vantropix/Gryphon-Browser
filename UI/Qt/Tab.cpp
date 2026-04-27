@@ -29,6 +29,40 @@
 
 namespace Ladybird {
 
+class HamburgerButton final : public QToolButton {
+public:
+    using QToolButton::QToolButton;
+
+protected:
+    virtual void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton)
+            show_menu();
+        else
+            QToolButton::mousePressEvent(event);
+    }
+
+    virtual void keyPressEvent(QKeyEvent* event) override
+    {
+        if (first_is_one_of(event->key(), Qt::Key_Select, Qt::Key_Space))
+            show_menu();
+        else
+            QToolButton::keyPressEvent(event);
+    }
+
+private:
+    void show_menu()
+    {
+        auto* menu = this->menu();
+        VERIFY(menu);
+
+        auto bottom_right = mapToGlobal(rect().bottomRight());
+        auto menu_width = menu->sizeHint().width();
+
+        menu->popup(QPoint { bottom_right.x() - menu_width, bottom_right.y() });
+    }
+};
+
 static QIcon default_favicon()
 {
     static QIcon icon = load_icon_from_uri("resource://icons/48x48/app-browser.png"sv);
@@ -52,6 +86,7 @@ Tab::Tab(BrowserWindow* window, RefPtr<WebView::WebContentClient> parent_client,
     m_find_in_page->setVisible(false);
     m_toolbar = new QToolBar(this);
     m_location_edit = new LocationEdit(this);
+    m_bookmarks_bar = new BookmarksBar(this);
 
     m_hover_label = new HyperlinkLabel(this);
     m_hover_label->hide();
@@ -67,16 +102,24 @@ Tab::Tab(BrowserWindow* window, RefPtr<WebView::WebContentClient> parent_client,
     addAction(focus_location_editor_action);
 
     m_layout->addWidget(m_toolbar);
+    m_layout->addWidget(m_bookmarks_bar);
     m_layout->addWidget(m_view);
     m_layout->addWidget(m_find_in_page);
 
-    m_hamburger_button = new QToolButton(m_toolbar);
+    m_hamburger_button = new HamburgerButton(m_toolbar);
     m_hamburger_button->setText("Show &Menu");
     m_hamburger_button->setToolTip("Show Menu");
     m_hamburger_button->setIcon(create_tvg_icon_with_theme_colors("hamburger", palette()));
     m_hamburger_button->setPopupMode(QToolButton::InstantPopup);
     m_hamburger_button->setMenu(&m_window->hamburger_menu());
     m_hamburger_button->setStyleSheet(":menu-indicator {image: none}");
+
+    QObject::connect(&m_window->hamburger_menu(), &QMenu::aboutToShow, m_hamburger_button, [this]() {
+        m_hamburger_button->setDown(true);
+    });
+    QObject::connect(&m_window->hamburger_menu(), &QMenu::aboutToHide, m_hamburger_button, [this]() {
+        m_hamburger_button->setDown(false);
+    });
 
     m_navigate_back_action = create_application_action(*this, view().navigate_back_action());
     m_navigate_forward_action = create_application_action(*this, view().navigate_forward_action());
@@ -95,6 +138,7 @@ Tab::Tab(BrowserWindow* window, RefPtr<WebView::WebContentClient> parent_client,
     m_toolbar->addAction(m_navigate_forward_action);
     m_toolbar->addAction(m_reload_action);
     m_toolbar->addWidget(m_location_edit);
+    m_toolbar->addAction(create_application_action(*m_toolbar, view().toggle_bookmark_action()));
     m_toolbar->addAction(create_application_action(*m_toolbar, view().reset_zoom_action()));
     m_hamburger_button_action = m_toolbar->addWidget(m_hamburger_button);
 
@@ -115,7 +159,7 @@ Tab::Tab(BrowserWindow* window, RefPtr<WebView::WebContentClient> parent_client,
     };
 
     view().on_close = [this] {
-        m_window->close_tab(tab_index());
+        m_window->definitely_close_tab(tab_index());
     };
 
     view().on_link_hover = [this](auto const& url) {
@@ -349,8 +393,13 @@ Tab::Tab(BrowserWindow* window, RefPtr<WebView::WebContentClient> parent_client,
     };
 
     view().on_fullscreen_window = [this]() {
-        m_window->showFullScreen();
-        view().did_update_window_rect();
+        m_toolbar->hide();
+        m_window->fullscreen_mode().enter(this);
+    };
+
+    view().on_exit_fullscreen_window = [this]() {
+        m_window->fullscreen_mode().exit(FullscreenMode::ExitInitiatedBy::WebContent);
+        m_toolbar->show();
     };
 
     view().on_audio_play_state_changed = [this](auto play_state) {
@@ -374,20 +423,20 @@ Tab::Tab(BrowserWindow* window, RefPtr<WebView::WebContentClient> parent_client,
 
     auto* close_tab_action = new QAction("&Close Tab", this);
     QObject::connect(close_tab_action, &QAction::triggered, this, [this]() {
-        view().on_close();
+        request_close();
     });
 
     auto* close_tabs_to_left_action = new QAction("C&lose Tabs to Left", this);
     QObject::connect(close_tabs_to_left_action, &QAction::triggered, this, [this]() {
         for (auto i = tab_index() - 1; i >= 0; i--) {
-            m_window->close_tab(i);
+            m_window->request_to_close_tab(i);
         }
     });
 
     auto* close_tabs_to_right_action = new QAction("Close Tabs to R&ight", this);
     QObject::connect(close_tabs_to_right_action, &QAction::triggered, this, [this]() {
         for (auto i = m_window->tab_count() - 1; i > tab_index(); i--) {
-            m_window->close_tab(i);
+            m_window->request_to_close_tab(i);
         }
     });
 
@@ -397,7 +446,7 @@ Tab::Tab(BrowserWindow* window, RefPtr<WebView::WebContentClient> parent_client,
             if (i == tab_index())
                 continue;
 
-            m_window->close_tab(i);
+            m_window->request_to_close_tab(i);
         }
     });
 
@@ -436,9 +485,14 @@ void Tab::load_html(StringView html)
 
 void Tab::location_edit_return_pressed()
 {
-    if (m_location_edit->text().isEmpty())
+    auto text = m_location_edit->text();
+    if (text.isEmpty())
         return;
-    navigate(m_location_edit->url());
+
+    if (auto url = m_location_edit->url(); url.has_value())
+        navigate(*url);
+    else
+        view().load_navigation_error_page(ak_string_from_qstring(text));
 }
 
 void Tab::open_file()
@@ -511,6 +565,21 @@ void Tab::find_previous()
 void Tab::find_next()
 {
     m_find_in_page->find_next();
+}
+
+void Tab::request_close()
+{
+    // Prevent closing on first request so WebContent can cleanly shutdown (e.g. asking if the user is sure they want
+    // to leave, closing WebSocket connections, etc.)
+    if (!m_already_requested_close) {
+        m_already_requested_close = true;
+        view().request_close();
+        return;
+    }
+
+    // If the user has already requested a close, then respect the user's request and just close the tab.
+    // For example, the WebContent process may not be responding.
+    m_window->definitely_close_tab(tab_index());
 }
 
 }

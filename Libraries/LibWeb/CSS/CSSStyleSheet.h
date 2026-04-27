@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2019-2021, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2024, Tim Ledbetter <timledbetter@gmail.com>
+ * Copyright (c) 2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -13,14 +14,15 @@
 #include <LibWeb/CSS/CSSRuleList.h>
 #include <LibWeb/CSS/CSSStyleRule.h>
 #include <LibWeb/CSS/StyleSheet.h>
-#include <LibWeb/DOM/Node.h>
+#include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
+#include <LibWeb/DOM/StyleInvalidationReason.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/WebIDL/Types.h>
 
 namespace Web::CSS {
 
 class CSSImportRule;
-class FontLoader;
+struct ShadowRootStylesheetEffects;
 
 struct CSSStyleSheetInit {
     Optional<String> base_url {};
@@ -34,6 +36,28 @@ class WEB_API CSSStyleSheet final : public StyleSheet {
     GC_DECLARE_ALLOCATOR(CSSStyleSheet);
 
 public:
+    enum class LoadingState : u8 {
+        Unloaded,
+        Loading,
+        Loaded,
+        Error,
+    };
+    static StringView loading_state_name(LoadingState);
+
+    class Subresource {
+    public:
+        virtual ~Subresource() = default;
+
+        virtual GC::Ptr<CSSStyleSheet> parent_style_sheet_for_subresource() = 0;
+        LoadingState loading_state() const { return m_loading_state; }
+        virtual void visit_edges(Cell::Visitor&) = 0;
+
+        void set_loading_state(LoadingState);
+
+    private:
+        LoadingState m_loading_state { LoadingState::Unloaded };
+    };
+
     [[nodiscard]] static GC::Ref<CSSStyleSheet> create(JS::Realm&, CSSRuleList&, MediaList&, Optional<::URL::URL> location);
     static WebIDL::ExceptionOr<GC::Ref<CSSStyleSheet>> construct_impl(JS::Realm&, Optional<CSSStyleSheetInit> const& options = {});
 
@@ -64,12 +88,15 @@ public:
     // Returns whether the match state of any media queries changed after evaluation.
     bool evaluate_media_queries(DOM::Document const&);
     void for_each_effective_keyframes_at_rule(Function<void(CSSKeyframesRule const&)> const& callback) const;
+    void for_each_effective_counter_style_at_rule(Function<void(CSSCounterStyleRule const&)> const& callback) const;
 
-    HashTable<GC::Ptr<DOM::Node>> owning_documents_or_shadow_roots() const { return m_owning_documents_or_shadow_roots; }
+    HashTable<GC::Ptr<DOM::Node>> const& owning_documents_or_shadow_roots() const { return m_owning_documents_or_shadow_roots; }
     void add_owning_document_or_shadow_root(DOM::Node& document_or_shadow_root);
     void remove_owning_document_or_shadow_root(DOM::Node& document_or_shadow_root);
-    void invalidate_owners(DOM::StyleInvalidationReason);
+    void invalidate_owners(DOM::StyleInvalidationReason, ShadowRootStylesheetEffects const* previous_sheet_effects = nullptr);
     GC::Ptr<DOM::Document> owning_document() const;
+    virtual void set_disabled(bool) override;
+    void for_each_owning_style_scope(Function<void(StyleScope&)> const&) const;
 
     Optional<FlyString> default_namespace() const;
     GC::Ptr<CSSNamespaceRule> default_namespace_rule() const { return m_default_namespace_rule; }
@@ -82,6 +109,9 @@ public:
     Optional<::URL::URL> base_url() const { return m_base_url; }
     void set_base_url(Optional<::URL::URL> base_url) { m_base_url = move(base_url); }
 
+    void register_pending_image_value(ImageStyleValue& value) { m_pending_image_values.append(value); }
+    void load_pending_image_resources(DOM::Document&);
+
     bool constructed() const { return m_constructed; }
 
     GC::Ptr<DOM::Document const> constructor_document() const { return m_constructor_document; }
@@ -92,11 +122,10 @@ public:
     void set_source_text(String);
     Optional<String> source_text(Badge<DOM::Document>) const;
 
-    void add_associated_font_loader(GC::Ref<FontLoader const> font_loader)
-    {
-        m_associated_font_loaders.append(font_loader);
-    }
-    bool has_associated_font_loader(FontLoader& font_loader) const;
+    void add_critical_subresource(Subresource&);
+    void remove_critical_subresource(Subresource&);
+    LoadingState loading_state() const;
+    void check_if_loading_completed();
 
 private:
     CSSStyleSheet(JS::Realm&, CSSRuleList&, MediaList&, Optional<::URL::URL> location);
@@ -127,7 +156,9 @@ private:
     bool m_disallow_modification { false };
     Optional<bool> m_did_match;
 
-    Vector<GC::Ptr<FontLoader const>> m_associated_font_loaders;
+    Vector<Subresource&> m_critical_subresources;
+
+    IGNORE_GC Vector<WeakPtr<ImageStyleValue>> m_pending_image_values;
 };
 
 }

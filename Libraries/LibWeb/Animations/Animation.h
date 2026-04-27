@@ -8,7 +8,7 @@
 
 #include <LibJS/Runtime/PromiseCapability.h>
 #include <LibWeb/Animations/TimeValue.h>
-#include <LibWeb/Bindings/AnimationPrototype.h>
+#include <LibWeb/Bindings/Animation.h>
 #include <LibWeb/DOM/AbstractElement.h>
 #include <LibWeb/DOM/EventTarget.h>
 
@@ -29,8 +29,10 @@ class Animation : public DOM::EventTarget {
     GC_DECLARE_ALLOCATOR(Animation);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     static GC::Ref<Animation> create(JS::Realm&, GC::Ptr<AnimationEffect>, Optional<GC::Ptr<AnimationTimeline>>);
-    static WebIDL::ExceptionOr<GC::Ref<Animation>> construct_impl(JS::Realm&, GC::Ptr<AnimationEffect>, Optional<GC::Ptr<AnimationTimeline>>);
+    static GC::Ref<Animation> construct_impl(JS::Realm&, GC::Ptr<AnimationEffect>, Optional<GC::Ptr<AnimationTimeline>>);
 
     FlyString const& id() const { return m_id; }
     void set_id(FlyString value) { m_id = move(value); }
@@ -41,21 +43,26 @@ public:
     GC::Ptr<AnimationTimeline> timeline() const { return m_timeline; }
     void set_timeline(GC::Ptr<AnimationTimeline>);
 
+    virtual GC::Ptr<AnimationTimeline> timeline_for_bindings() const { return m_timeline; }
+    virtual void set_timeline_for_bindings(GC::Ptr<AnimationTimeline> timeline) { set_timeline(timeline); }
+
     // https://drafts.csswg.org/web-animations-2/#dom-animation-starttime
     NullableCSSNumberish start_time_for_bindings() const
     {
-        return NullableCSSNumberish::from_optional_css_numberish_time(start_time());
+        return NullableCSSNumberish::from_optional_css_numberish_time(realm(), start_time());
     }
     Optional<TimeValue> start_time() const { return m_start_time; }
-    WebIDL::ExceptionOr<void> set_start_time_for_bindings(Optional<CSS::CSSNumberish> const&);
+    WebIDL::ExceptionOr<void> set_start_time_for_bindings(NullableCSSNumberish const&);
+
+    void calculate_auto_aligned_start_time();
 
     // https://drafts.csswg.org/web-animations-2/#dom-animation-currenttime
     NullableCSSNumberish current_time_for_bindings() const
     {
-        return NullableCSSNumberish::from_optional_css_numberish_time(current_time());
+        return NullableCSSNumberish::from_optional_css_numberish_time(realm(), current_time());
     }
     Optional<TimeValue> current_time() const;
-    WebIDL::ExceptionOr<void> set_current_time_for_bindings(Optional<CSS::CSSNumberish> const&);
+    WebIDL::ExceptionOr<void> set_current_time_for_bindings(NullableCSSNumberish const&);
 
     double playback_rate() const { return m_playback_rate; }
     WebIDL::ExceptionOr<void> set_playback_rate(double value);
@@ -156,7 +163,7 @@ private:
 
     double effective_playback_rate() const;
 
-    WebIDL::ExceptionOr<Optional<TimeValue>> validate_a_css_numberish_time(Optional<CSS::CSSNumberish> const&) const;
+    WebIDL::ExceptionOr<Optional<TimeValue>> validate_a_css_numberish_time(NullableCSSNumberish const&) const;
 
     void apply_any_pending_playback_rate();
     WebIDL::ExceptionOr<void> silently_set_current_time(Optional<TimeValue>);
@@ -188,6 +195,8 @@ private:
 
     // https://www.w3.org/TR/web-animations-1/#animation-start-time
     Optional<TimeValue> m_start_time {};
+
+    bool m_auto_align_start_time { false };
 
     // https://www.w3.org/TR/web-animations-1/#animation-hold-time
     Optional<TimeValue> m_hold_time {};

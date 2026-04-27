@@ -8,6 +8,7 @@
 #pragma once
 
 #include <AK/NonnullRefPtr.h>
+#include <AK/RefPtr.h>
 #include <AK/StringView.h>
 #include <AK/Types.h>
 #include <LibJS/Export.h>
@@ -23,19 +24,7 @@ struct JS_API SourceRange {
     Position start;
     Position end;
 
-    ByteString filename() const;
-};
-
-struct UnrealizedSourceRange {
-    [[nodiscard]] SourceRange realize() const
-    {
-        VERIFY(source_code);
-        return source_code->range_from_offsets(start_offset, end_offset);
-    }
-
-    RefPtr<SourceCode const> source_code;
-    u32 start_offset { 0 };
-    u32 end_offset { 0 };
+    ByteString filename() const { return code->filename().to_byte_string(); }
 };
 
 }

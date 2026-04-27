@@ -5,7 +5,8 @@
  */
 
 #include <LibGfx/ImmutableBitmap.h>
-#include <LibWeb/Bindings/HTMLObjectElementPrototype.h>
+#include <LibWeb/Bindings/HTMLObjectElement.h>
+#include <LibWeb/CSS/CascadedProperties.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
@@ -20,6 +21,7 @@
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
+#include <LibWeb/HTML/BrowsingContext.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/HTMLMediaElement.h>
 #include <LibWeb/HTML/HTMLObjectElement.h>
@@ -121,6 +123,7 @@ bool HTMLObjectElement::is_presentational_hint(FlyString const& name) const
 
 void HTMLObjectElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
 {
+    Base::apply_presentational_hints(cascaded_properties);
     for_each_attribute([&](auto& name, auto& value) {
         if (name == HTML::AttributeNames::align) {
             if (value.equals_ignoring_ascii_case("center"sv))
@@ -356,7 +359,7 @@ void HTMLObjectElement::resource_did_load(Fetch::Infrastructure::Response const&
     // 1. Let the resource type be unknown.
     Optional<MimeSniff::MimeType> resource_type;
 
-    // FIXME: 3. If the user agent is configured to strictly obey Content-Type headers for this resource, and the resource has
+    // FIXME: 2. If the user agent is configured to strictly obey Content-Type headers for this resource, and the resource has
     //           associated Content-Type metadata, then let the resource type be the type specified in the resource's Content-Type
     //           metadata, and jump to the step below labeled handler.
 
@@ -439,8 +442,7 @@ void HTMLObjectElement::run_object_representation_handler_steps(Fetch::Infrastru
     if (can_load_document_with_type(resource_type) && (resource_type.is_xml() || !resource_type.is_image())) {
         // If the object element's content navigable is null, then create a new child navigable for the element.
         if (!m_content_navigable && in_a_document_tree()) {
-            MUST(create_new_child_navigable());
-            set_content_navigable_has_session_history_entry_and_ready_for_navigation();
+            create_new_child_navigable();
         }
 
         // NOTE: Creating a new nested browsing context can fail if the document is not attached to a browsing context

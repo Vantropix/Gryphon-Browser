@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2021, the SerenityOS developers.
- * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2026, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2022-2024, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2025, Lorenz Ackermann <me@lorenzackermann.xyz>
  *
@@ -10,7 +10,7 @@
 #include <AK/Debug.h>
 #include <AK/ScopeGuard.h>
 #include <LibTextCodec/Decoder.h>
-#include <LibWeb/Bindings/CSSImportRulePrototype.h>
+#include <LibWeb/Bindings/CSSImportRule.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSImportRule.h>
 #include <LibWeb/CSS/CSSLayerBlockRule.h>
@@ -66,15 +66,20 @@ void CSSImportRule::visit_edges(Cell::Visitor& visitor)
 
 void CSSImportRule::set_parent_style_sheet(CSSStyleSheet* parent_style_sheet)
 {
+    if (m_parent_style_sheet)
+        m_parent_style_sheet->remove_critical_subresource(*this);
+
     Base::set_parent_style_sheet(parent_style_sheet);
+
+    if (m_parent_style_sheet)
+        m_parent_style_sheet->add_critical_subresource(*this);
 
     if (m_style_sheet && parent_style_sheet) {
         for (auto owning_document_or_shadow_root : parent_style_sheet->owning_documents_or_shadow_roots())
             m_style_sheet->add_owning_document_or_shadow_root(*owning_document_or_shadow_root);
     }
 
-    // Crude detection of whether we're already fetching.
-    if (m_style_sheet || m_document_load_event_delayer.has_value())
+    if (loading_state() != CSSStyleSheet::LoadingState::Unloaded)
         return;
 
     // Only try to fetch if we now have a parent
@@ -129,37 +134,42 @@ void CSSImportRule::fetch()
     auto& parent_style_sheet = *this->parent_style_sheet();
 
     // 2. If rule has a <supports-condition>, and that condition is not true, return.
-    if (m_supports && !m_supports->matches()) {
+    if (m_supports && !m_supports->matches())
         return;
-    }
-
-    // 3. Let parsedUrl be the result of the URL parser steps with rule’s URL and parentStylesheet’s location.
-    //    If the algorithm returns an error, return. [CSSOM]
-    auto parsed_url = DOMURL::parse(href(), parent_style_sheet.location());
-    if (!parsed_url.has_value()) {
-        dbgln("Unable to parse @import url `{}` parent location `{}` as a URL.", href(), parent_style_sheet.location());
-        return;
-    }
-
-    // FIXME: Figure out the "correct" way to delay the load event.
-    m_document_load_event_delayer.emplace(*m_document);
 
     // AD-HOC: Track pending import rules to block rendering until they are done.
     m_document->add_pending_css_import_rule({}, *this);
+    set_loading_state(CSSStyleSheet::LoadingState::Loading);
 
-    // 4. Fetch a style resource from parsedUrl, with stylesheet parentStylesheet, destination "style", CORS mode "no-cors", and processResponse being the following steps given response response and byte stream, null or failure byteStream:
-    (void)fetch_a_style_resource(parsed_url.value(), { parent_style_sheet }, Fetch::Infrastructure::Request::Destination::Style, CorsMode::NoCors,
-        [strong_this = GC::Ref { *this }, parent_style_sheet = GC::Ref { parent_style_sheet }, parsed_url = parsed_url.value(), document = m_document](auto response, auto maybe_byte_stream) {
+    // 3. Fetch a style resource from rule’s URL, with ruleOrDeclaration rule, destination "style", CORS mode "no-cors", and
+    //    processResponse being the following steps given response response and byte stream, null or failure byteStream:
+    RuleOrDeclaration rule_or_declaration {
+        .environment_settings_object = HTML::relevant_settings_object(parent_style_sheet),
+        .value = RuleOrDeclaration::Rule {
+            .parent_style_sheet = &parent_style_sheet,
+        }
+    };
+    (void)fetch_a_style_resource(URL { href() }, rule_or_declaration, Fetch::Infrastructure::Request::Destination::Style, CorsMode::NoCors,
+        [strong_this = GC::Ref { *this }, parent_style_sheet = GC::Ref { parent_style_sheet }, document = m_document](auto response, auto maybe_byte_stream) {
             // AD-HOC: Stop delaying the load event.
             ScopeGuard guard = [strong_this, document] {
                 document->remove_pending_css_import_rule({}, strong_this);
-                strong_this->m_document_load_event_delayer.clear();
+                if (strong_this->loading_state() != CSSStyleSheet::LoadingState::Error) {
+                    // If we have no critical subresources, or they're loaded already, we can report that immediately.
+                    auto sheet_loading_state = strong_this->m_style_sheet->loading_state();
+                    if (sheet_loading_state == CSSStyleSheet::LoadingState::Loaded || sheet_loading_state == CSSStyleSheet::LoadingState::Error) {
+                        strong_this->set_loading_state(sheet_loading_state);
+                    }
+                }
             };
 
             // 1. If byteStream is not a byte stream, return.
             auto byte_stream = maybe_byte_stream.template get_pointer<ByteBuffer>();
-            if (!byte_stream)
+            if (!byte_stream) {
+                // AD-HOC: This means the fetch failed, so we should report this as a load failure.
+                strong_this->set_loading_state(CSSStyleSheet::LoadingState::Error);
                 return;
+            }
 
             // FIXME: 2. If parentStylesheet is in quirks mode and response is CORS-same-origin, let content type be "text/css".
             //           Otherwise, let content type be the Content Type metadata of response.
@@ -173,6 +183,10 @@ void CSSImportRule::fetch()
 
             // 4. Let importedStylesheet be the result of parsing byteStream given parsedUrl.
             // FIXME: Tidy up our parsing API. For now, do the decoding here.
+            // FIXME: Spec issue: parsedURL is not defined - we instead need to get that from the response.
+            //        https://github.com/w3c/csswg-drafts/issues/12288
+            auto url = response->unsafe_response()->url().value();
+
             Optional<String> mime_type_charset;
             if (auto extracted_mime_type = Fetch::Infrastructure::extract_mime_type(response->header_list()); extracted_mime_type.has_value()) {
                 if (auto charset = extracted_mime_type->parameters().get("charset"sv); charset.has_value())
@@ -183,12 +197,11 @@ void CSSImportRule::fetch()
             Optional<StringView> environment_encoding;
             auto decoded_or_error = css_decode_bytes(environment_encoding, mime_type_charset, *byte_stream);
             if (decoded_or_error.is_error()) {
-                dbgln_if(CSS_LOADER_DEBUG, "CSSImportRule: Failed to decode CSS file: {}", parsed_url);
+                dbgln_if(CSS_LOADER_DEBUG, "CSSImportRule: Failed to decode CSS file: {}", url);
                 return;
             }
             auto decoded = decoded_or_error.release_value();
-
-            auto imported_style_sheet = parse_css_stylesheet(Parser::ParsingParams(*strong_this->m_document), decoded, parsed_url, strong_this->m_media);
+            auto imported_style_sheet = parse_css_stylesheet(Parser::ParsingParams(*strong_this->m_document), decoded, url, strong_this->m_media);
 
             // 5. Set importedStylesheet’s origin-clean flag to parentStylesheet’s origin-clean flag.
             imported_style_sheet->set_origin_clean(parent_style_sheet->is_origin_clean());
@@ -211,6 +224,9 @@ void CSSImportRule::set_style_sheet(GC::Ref<CSSStyleSheet> style_sheet)
         for (auto owning_document_or_shadow_root : m_parent_style_sheet->owning_documents_or_shadow_roots())
             m_style_sheet->add_owning_document_or_shadow_root(*owning_document_or_shadow_root);
     }
+
+    if (auto document = m_style_sheet->owning_document())
+        m_style_sheet->load_pending_image_resources(*document);
 
     m_style_sheet->invalidate_owners(DOM::StyleInvalidationReason::CSSImportRule);
 }
@@ -270,7 +286,7 @@ void CSSImportRule::dump(StringBuilder& builder, int indent_levels) const
     builder.appendff("Document URL: {}\n", url().to_string());
 
     dump_indent(builder, indent_levels + 1);
-    builder.appendff("Has document load delayer: {}\n", m_document_load_event_delayer.has_value());
+    builder.appendff("Loading state: {}\n", CSSStyleSheet::loading_state_name(loading_state()));
 
     if (m_layer.has_value()) {
         dump_indent(builder, indent_levels + 1);

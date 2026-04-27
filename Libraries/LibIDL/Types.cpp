@@ -10,6 +10,48 @@
 
 namespace IDL {
 
+Interface& Context::add_interface(NonnullOwnPtr<Interface> interface)
+{
+    auto& interface_ref = *interface;
+
+    if (!interface_ref.name.is_empty())
+        interfaces.set(interface_ref.name, &interface_ref);
+
+    owned_interfaces.append(move(interface));
+    return interface_ref;
+}
+
+Interface& Context::add_mixin(NonnullOwnPtr<Interface> interface)
+{
+    auto& interface_ref = *interface;
+    mixins.set(interface_ref.name, &interface_ref);
+
+    for (auto& partial_mixin : partial_mixins) {
+        if (partial_mixin->name == interface_ref.name)
+            interface_ref.extend_with_partial_interface(*partial_mixin);
+    }
+
+    owned_mixins.append(move(interface));
+    return interface_ref;
+}
+
+Module& Context::add_module(NonnullOwnPtr<Module> module)
+{
+    auto& module_ref = *module;
+    owned_modules.append(move(module));
+    return module_ref;
+}
+
+Module* Context::find_parsed_module(ByteString const& module_path)
+{
+    for (auto const& module : owned_modules) {
+        if (module->module_own_path == module_path)
+            return module.ptr();
+    }
+
+    return nullptr;
+}
+
 ParameterizedType const& Type::as_parameterized() const
 {
     return as<ParameterizedType const>(*this);
@@ -61,12 +103,8 @@ bool Type::includes_undefined() const
     // FIXME: - the type is an annotated type and its inner type includes undefined, or
 
     // - the type is a union type and one of its member types includes undefined.
-    if (is_union()) {
-        for (auto& type : as_union().member_types()) {
-            if (type->includes_undefined())
-                return true;
-        }
-    }
+    if (is_union())
+        return as_union().member_types().contains([](auto& type) { return type->includes_undefined(); });
 
     return false;
 }
@@ -77,7 +115,7 @@ bool Type::is_distinguishable_from(IDL::Interface const& interface, IDL::Type co
     // 1. If one type includes a nullable type and the other type either includes a nullable type,
     //    is a union type with flattened member types including a dictionary type, or is a dictionary type,
     //    return false.
-    if (includes_nullable_type() && (other.includes_nullable_type() || (other.is_union() && any_of(other.as_union().flattened_member_types(), [&interface](auto const& type) { return interface.dictionaries.contains(type->name()); })) || interface.dictionaries.contains(other.name())))
+    if (includes_nullable_type() && (other.includes_nullable_type() || (other.is_union() && any_of(other.as_union().flattened_member_types(), [&interface](auto const& type) { return interface.context.dictionaries.contains(type->name()); })) || interface.context.dictionaries.contains(other.name())))
         return false;
 
     // 2. If both types are either a union type or nullable union type, return true if each member type
@@ -169,7 +207,7 @@ bool Type::is_distinguishable_from(IDL::Interface const& interface, IDL::Type co
         // * Dictionary Types
         // * Record Types
         // FIXME: * Callback Interface Types
-        if (interface.dictionaries.contains(type.name()) || (type.is_parameterized() && type.name() == "record"sv))
+        if (interface.context.dictionaries.contains(type.name()) || (type.is_parameterized() && type.name() == "record"sv))
             return DistinguishabilityCategory::DictionaryLike;
         // FIXME: Frozen array types are included in "sequence-like"
         if (type.is_sequence())
@@ -193,7 +231,7 @@ bool Type::is_distinguishable_from(IDL::Interface const& interface, IDL::Type co
 }
 
 // https://webidl.spec.whatwg.org/#dfn-json-types
-bool Type::is_json(Interface const& interface) const
+bool Type::is_json(Context const& context) const
 {
     // The JSON types are:
     // - numeric types,
@@ -205,7 +243,7 @@ bool Type::is_json(Interface const& interface) const
         return true;
 
     // - string types,
-    if (is_string() || interface.enumerations.find(m_name) != interface.enumerations.end())
+    if (is_string() || context.enumerations.contains(m_name))
         return true;
 
     // - object,
@@ -221,7 +259,7 @@ bool Type::is_json(Interface const& interface) const
         auto const& union_type = as_union();
 
         for (auto const& type : union_type.member_types()) {
-            if (!type->is_json(interface))
+            if (!type->is_json(context))
                 return false;
         }
 
@@ -229,9 +267,9 @@ bool Type::is_json(Interface const& interface) const
     }
 
     // - typedefs whose type being given a new name is a JSON type,
-    auto typedef_iterator = interface.typedefs.find(m_name);
-    if (typedef_iterator != interface.typedefs.end())
-        return typedef_iterator->value.type->is_json(interface);
+    auto typedef_iterator = context.typedefs.find(m_name);
+    if (typedef_iterator != context.typedefs.end())
+        return typedef_iterator->value.type->is_json(context);
 
     // - sequence types whose parameterized type is a JSON type,
     // - frozen array types whose parameterized type is a JSON type,
@@ -240,7 +278,7 @@ bool Type::is_json(Interface const& interface) const
         auto const& parameterized_type = as_parameterized();
 
         for (auto const& parameter : parameterized_type.parameters()) {
-            if (!parameter->is_json(interface))
+            if (!parameter->is_json(context))
                 return false;
         }
 
@@ -248,11 +286,11 @@ bool Type::is_json(Interface const& interface) const
     }
 
     // - dictionary types where the types of all members declared on the dictionary and all its inherited dictionaries are JSON types,
-    auto dictionary_iterator = interface.dictionaries.find(m_name);
-    if (dictionary_iterator != interface.dictionaries.end()) {
+    auto dictionary_iterator = context.dictionaries.find(m_name);
+    if (dictionary_iterator != context.dictionaries.end()) {
         auto const& dictionary = dictionary_iterator->value;
         for (auto const& member : dictionary.members) {
-            if (!member.type->is_json(interface))
+            if (!member.type->is_json(context))
                 return false;
         }
 
@@ -260,42 +298,31 @@ bool Type::is_json(Interface const& interface) const
     }
 
     // - interface types that have a toJSON operation declared on themselves or one of their inherited interfaces.
-    Optional<Interface const&> current_interface_for_to_json;
-    if (m_name == interface.name) {
-        current_interface_for_to_json = interface;
-    } else {
-        // NOTE: Interface types must have the IDL file of their interface imported.
-        //       Though the type name may not refer to an interface, so we don't assert this here.
-        auto imported_interface_iterator = interface.imported_modules.find_if([this](IDL::Interface const& imported_interface) {
-            return imported_interface.name == m_name;
-        });
-
-        if (imported_interface_iterator != interface.imported_modules.end())
-            current_interface_for_to_json = *imported_interface_iterator;
-    }
-
-    while (current_interface_for_to_json.has_value()) {
-        auto to_json_iterator = current_interface_for_to_json->functions.find_if([](IDL::Function const& function) {
+    auto current_interface = context.interfaces.get(m_name);
+    while (current_interface.has_value()) {
+        auto to_json_iterator = current_interface.value()->functions.find_if([](IDL::Function const& function) {
             return function.name == "toJSON"sv;
         });
 
-        if (to_json_iterator != current_interface_for_to_json->functions.end())
+        if (to_json_iterator != current_interface.value()->functions.end())
             return true;
 
-        if (current_interface_for_to_json->parent_name.is_empty())
+        if (current_interface.value()->parent_name.is_empty())
             break;
 
-        auto imported_interface_iterator = current_interface_for_to_json->imported_modules.find_if([&current_interface_for_to_json](IDL::Interface const& imported_interface) {
-            return imported_interface.name == current_interface_for_to_json->parent_name;
-        });
-
-        // Inherited interfaces must have their IDL files imported.
-        VERIFY(imported_interface_iterator != interface.imported_modules.end());
-
-        current_interface_for_to_json = *imported_interface_iterator;
+        current_interface = context.interfaces.get(current_interface.value()->parent_name);
+        VERIFY(current_interface.has_value());
     }
 
     return false;
+}
+
+bool Interface::will_generate_code() const
+{
+    return !is_partial
+        && (!name.is_empty()
+            || !own_dictionaries.is_empty()
+            || !own_enumerations.is_empty());
 }
 
 void EffectiveOverloadSet::remove_all_other_entries()
@@ -303,6 +330,47 @@ void EffectiveOverloadSet::remove_all_other_entries()
     Vector<Item> new_items;
     new_items.append(m_items[*m_last_matching_item_index]);
     m_items = move(new_items);
+}
+
+void Interface::dump()
+{
+    dbgln("Attributes:");
+    for (auto& attribute : attributes) {
+        dbgln("  {}{}{}{} {}",
+            attribute.inherit ? "inherit " : "",
+            attribute.readonly ? "readonly " : "",
+            attribute.type->name(),
+            attribute.type->is_nullable() ? "?" : "",
+            attribute.name);
+    }
+
+    dbgln("Functions:");
+    for (auto& function : functions) {
+        dbgln("  {}{} {}",
+            function.return_type->name(),
+            function.return_type->is_nullable() ? "?" : "",
+            function.name);
+        for (auto& parameter : function.parameters) {
+            dbgln("    {}{} {}",
+                parameter.type->name(),
+                parameter.type->is_nullable() ? "?" : "",
+                parameter.name);
+        }
+    }
+
+    dbgln("Static Functions:");
+    for (auto& function : static_functions) {
+        dbgln("  static {}{} {}",
+            function.return_type->name(),
+            function.return_type->is_nullable() ? "?" : "",
+            function.name);
+        for (auto& parameter : function.parameters) {
+            dbgln("    {}{} {}",
+                parameter.type->name(),
+                parameter.type->is_nullable() ? "?" : "",
+                parameter.name);
+        }
+    }
 }
 
 void Interface::extend_with_partial_interface(Interface const& partial)

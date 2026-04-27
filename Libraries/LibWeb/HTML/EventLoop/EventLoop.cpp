@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/TemporaryChange.h>
 #include <LibCore/EventLoop.h>
 #include <LibJS/Runtime/VM.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
@@ -37,7 +38,6 @@ EventLoop::EventLoop(Type type)
     : m_type(type)
 {
     m_task_queue = heap().allocate<TaskQueue>(*this);
-    m_microtask_queue = heap().allocate<TaskQueue>(*this);
 
     m_rendering_task_function = GC::create_function(heap(), [this] {
         update_the_rendering();
@@ -51,7 +51,7 @@ void EventLoop::visit_edges(Visitor& visitor)
     Base::visit_edges(visitor);
     visitor.visit(m_reached_step_1_tasks);
     visitor.visit(m_task_queue);
-    visitor.visit(m_microtask_queue);
+    m_microtask_queue.for_each([&](auto& task) { visitor.visit(task); });
     visitor.visit(m_currently_running_task);
     visitor.visit(m_backup_incumbent_realm_stack);
     visitor.visit(m_rendering_task_function);
@@ -114,44 +114,6 @@ void EventLoop::spin_until(GC::Ref<GC::Function<bool()>> goal_condition)
 
     // 7. Stop task, allowing whatever algorithm that invoked it to resume.
     // NOTE: This is achieved by returning from the function.
-}
-
-void EventLoop::spin_processing_tasks_with_source_until(Task::Source source, GC::Ref<GC::Function<bool()>> goal_condition)
-{
-    auto& vm = this->vm();
-    vm.save_execution_context_stack();
-    vm.clear_execution_context_stack();
-
-    perform_a_microtask_checkpoint();
-
-    // NOTE: HTML event loop processing steps could run a task with arbitrary source
-    m_skip_event_loop_processing_steps = true;
-
-    Platform::EventLoopPlugin::the().spin_until(GC::create_function(heap(), [this, source, goal_condition] {
-        if (goal_condition->function()())
-            return true;
-        if (m_task_queue->has_runnable_tasks()) {
-            auto tasks = m_task_queue->take_tasks_matching([&](auto& task) {
-                return task.source() == source && task.is_runnable();
-            });
-
-            for (auto& task : tasks) {
-                m_currently_running_task = task.ptr();
-                task->execute();
-                m_currently_running_task = nullptr;
-            }
-        }
-
-        // FIXME: Remove the platform event loop plugin so that this doesn't look out of place
-        Core::EventLoop::current().wake();
-        return goal_condition->function()();
-    }));
-
-    m_skip_event_loop_processing_steps = false;
-
-    schedule();
-
-    vm.restore_execution_context_stack();
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model
@@ -227,7 +189,7 @@ void EventLoop::process()
     }
 
     // If there are eligible tasks in the queue, schedule a new round of processing. :^)
-    if (m_task_queue->has_runnable_tasks() || (!m_microtask_queue->is_empty() && !m_performing_a_microtask_checkpoint)) {
+    if (m_task_queue->has_runnable_tasks() || (!m_microtask_queue.is_empty() && !m_performing_a_microtask_checkpoint)) {
         schedule();
     }
 }
@@ -293,7 +255,7 @@ void EventLoop::process_input_events() const
                 [&](MouseEvent const& mouse_event) {
                     switch (mouse_event.type) {
                     case MouseEvent::Type::MouseDown:
-                        return page.handle_mousedown(mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers);
+                        return page.handle_mousedown(mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers, mouse_event.click_count);
                     case MouseEvent::Type::MouseUp:
                         return page.handle_mouseup(mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers);
                     case MouseEvent::Type::MouseMove:
@@ -302,8 +264,6 @@ void EventLoop::process_input_events() const
                         return page.handle_mouseleave();
                     case MouseEvent::Type::MouseWheel:
                         return page.handle_mousewheel(mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers, mouse_event.wheel_delta_x, mouse_event.wheel_delta_y);
-                    case MouseEvent::Type::DoubleClick:
-                        return page.handle_doubleclick(mouse_event.position, mouse_event.screen_position, mouse_event.button, mouse_event.buttons, mouse_event.modifiers);
                     }
                     VERIFY_NOT_REACHED();
                 },
@@ -356,7 +316,12 @@ void EventLoop::update_the_rendering()
     // 1. Let frameTimestamp be eventLoop's last render opportunity time.
     auto frame_timestamp = m_last_render_opportunity_time;
 
-    // FIXME: 2. Let docs be all fully active Document objects whose relevant agent's event loop is eventLoop, sorted arbitrarily except that the following conditions must be met:
+    // 2. Let docs be all fully active Document objects whose relevant agent's event loop is
+    //    eventLoop, sorted arbitrarily except that the following conditions must be met:
+    //    - Any Document B whose container document is A must be listed after A in the list.
+    //    - If there are two documents A and B that both have the same non-null container document
+    //      C, then the order of A and B in the list must match the shadow-including tree order
+    //      of their respective navigable containers in C's node tree.
     // 3. Filter non-renderable documents: Remove from docs any Document object doc for which any of the following are true:
     auto docs = documents_in_this_event_loop_matching([&](auto const& document) {
         if (!document.is_fully_active())
@@ -390,13 +355,22 @@ void EventLoop::update_the_rendering()
     for (auto& document : docs)
         document->page().update_all_media_element_video_sinks();
 
+    // AD-HOC: Present all canvas element surfaces in documents' pages.
+    for (auto& document : docs)
+        document->page().present_all_canvas_element_surfaces();
+
     // FIXME: 4. Unnecessary rendering: Remove from docs any Document object doc for which all of the following are true:
 
     // FIXME: 5. Remove from docs all Document objects for which the user agent believes that it's preferable to skip updating the rendering for other reasons.
 
     // FIXME: 6. For each doc of docs, reveal doc.
 
-    // FIXME: 7. For each doc of docs, flush autofocus candidates for doc if its node navigable is a top-level traversable.
+    // 7. For each doc of docs, flush autofocus candidates for doc if its node navigable is a top-level traversable.
+    for (auto& document : docs) {
+        auto navigable = document->navigable();
+        if (navigable && navigable->is_top_level_traversable())
+            document->flush_autofocus_candidates();
+    }
 
     // 8. For each doc of docs, run the resize steps for doc. [CSSOMVIEW]
     for (auto& document : docs) {
@@ -404,9 +378,8 @@ void EventLoop::update_the_rendering()
     }
 
     // 9. For each doc of docs, run the scroll steps for doc. [CSSOMVIEW]
-    for (auto& document : docs) {
+    for (auto& document : docs)
         document->run_the_scroll_steps();
-    }
 
     // 10. For each doc of docs, evaluate media queries and report changes for doc. [CSSOMVIEW]
     for (auto& document : docs) {
@@ -418,7 +391,10 @@ void EventLoop::update_the_rendering()
         document->update_animations_and_send_events(HighResolutionTime::relative_high_resolution_time(frame_timestamp, relevant_global_object(*document)));
     };
 
-    // FIXME: 12. For each doc of docs, run the fullscreen steps for doc. [FULLSCREEN]
+    // 12. For each doc of docs, run the fullscreen steps for doc. [FULLSCREEN]
+    for (auto& document : docs) {
+        document->run_fullscreen_steps();
+    }
 
     // FIXME: 13. For each doc of docs, if the user agent detects that the backing storage associated with a CanvasRenderingContext2D or an OffscreenCanvasRenderingContext2D, context, has been lost, then it must run the context lost steps for each such context:
 
@@ -440,6 +416,11 @@ void EventLoop::update_the_rendering()
             // 1. Recalculate styles and update layout for doc.
             // NOTE: Recalculation of styles is handled by update_layout()
             document->update_layout(DOM::UpdateLayoutReason::HTMLEventLoopRenderingUpdate);
+
+            // Clamp viewport scroll offset to valid range after layout, in case the
+            // scrollable overflow area has shrunk (e.g. after a viewport size change).
+            if (auto navigable = document->navigable())
+                navigable->clamp_viewport_scroll_offset();
 
             // 2. Let hadInitialVisibleContentVisibilityDetermination be false.
             bool had_initial_visible_content_visibility_determination = false;
@@ -498,6 +479,10 @@ void EventLoop::update_the_rendering()
 
     // 19. For each doc of docs, run the update intersection observations steps for doc, passing in the relative high resolution time given now and doc's relevant global object as the timestamp. [INTERSECTIONOBSERVER]
     for (auto& document : docs) {
+        // NB: Layout may have been invalidated by previous steps (e.g. view transitions at step 18).
+        //     Re-run layout here since intersection observations need up-to-date geometry.
+        document->update_layout(DOM::UpdateLayoutReason::HTMLEventLoopRenderingUpdate);
+
         auto now = HighResolutionTime::relative_high_resolution_time(frame_timestamp, relevant_global_object(*document));
         document->run_the_update_intersection_observations_steps(now);
     }
@@ -507,15 +492,19 @@ void EventLoop::update_the_rendering()
     // FIXME: 21. For each doc of docs, mark paint timing for doc.
 
     // 22. For each doc of docs, update the rendering or user interface of doc and its node navigable to reflect the current state.
-    for (auto& document : docs) {
-        auto navigable = document->navigable();
-        if (!navigable->is_traversable())
-            continue;
-        auto traversable = navigable->traversable_navigable();
-        traversable->process_screenshot_requests();
+    for (auto& doc : docs.in_reverse()) {
+        auto navigable = doc->navigable();
         if (!navigable->needs_repaint())
             continue;
+        if (navigable->is_svg_page())
+            continue;
+        if (auto document = navigable->active_document())
+            document->update_layout(DOM::UpdateLayoutReason::HTMLEventLoopRenderingUpdate);
         navigable->paint_next_frame();
+        if (navigable->is_traversable()) {
+            auto traversable = navigable->traversable_navigable();
+            traversable->process_screenshot_requests();
+        }
     }
 
     // 23. For each doc of docs, process top layer removals given doc.
@@ -524,10 +513,13 @@ void EventLoop::update_the_rendering()
     }
 
     for (auto& document : docs) {
-        if (document->readiness() == HTML::DocumentReadyState::Complete && document->font_computer().number_of_css_font_faces_with_loading_in_progress() == 0) {
-            HTML::TemporaryExecutionContext context(document->realm(), HTML::TemporaryExecutionContext::CallbacksEnabled::Yes);
-            document->fonts()->resolve_ready_promise();
-        }
+        // https://drafts.csswg.org/css-font-loading/#fontfaceset-pending-on-the-environment
+        // A FontFaceSet is pending on the environment if any of the following are true:
+        // - the document is still loading
+        // - the document has pending stylesheet requests
+        // FIXME: - the document has pending layout operations which might cause the user agent to request a font, or which depend on recently-loaded fonts
+        TemporaryExecutionContext context(document->realm(), TemporaryExecutionContext::CallbacksEnabled::Yes);
+        document->fonts()->set_is_pending_on_the_environment(document->readiness() == DocumentReadyState::Loading);
     }
 }
 
@@ -554,12 +546,13 @@ TaskID queue_a_task(HTML::Task::Source source, GC::Ptr<EventLoop> event_loop, GC
     auto task = HTML::Task::create(event_loop->vm(), source, document, steps);
 
     // 8. Let queue be the task queue to which source is associated on event loop.
-    auto& queue = source == HTML::Task::Source::Microtask ? event_loop->microtask_queue() : event_loop->task_queue();
-
     // 9. Append task to queue.
-    queue.add(task);
+    if (source == HTML::Task::Source::Microtask)
+        event_loop->enqueue_microtask(task);
+    else
+        event_loop->task_queue().add(task);
 
-    return queue.last_added_task()->id();
+    return task->id();
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#queue-a-global-task
@@ -595,7 +588,7 @@ void queue_a_microtask(DOM::Document const* document, GC::Ref<GC::Function<void(
     // FIXME: 7. Set microtask's script evaluation environment settings object set to an empty set.
 
     // 8. Enqueue microtask on event loop's microtask queue.
-    event_loop.microtask_queue().enqueue(microtask);
+    event_loop.enqueue_microtask(microtask);
 }
 
 void perform_a_microtask_checkpoint()
@@ -609,21 +602,22 @@ void EventLoop::perform_a_microtask_checkpoint()
     if (execution_paused())
         return;
 
-    // NOTE: This assertion is per requirement 9.5 of the ECMA-262 spec, see: https://tc39.es/ecma262/#sec-jobs
-    // > At some future point in time, when there is no running context in the agent for which the job is scheduled and that agent's execution context stack is empty...
-    VERIFY(vm().execution_context_stack().is_empty());
-
     // 1. If the event loop's performing a microtask checkpoint is true, then return.
     if (m_performing_a_microtask_checkpoint)
         return;
+
+    // NOTE: This assertion is per requirement 9.5 of the ECMA-262 spec, see: https://tc39.es/ecma262/#sec-jobs
+    // > At some future point in time, when there is no running context in the agent for which the job is scheduled and that agent's execution context stack is empty...
+    VERIFY(vm().execution_context_stack().is_empty());
+    VERIFY(!vm().has_running_execution_context());
 
     // 2. Set the event loop's performing a microtask checkpoint to true.
     m_performing_a_microtask_checkpoint = true;
 
     // 3. While the event loop's microtask queue is not empty:
-    while (!m_microtask_queue->is_empty()) {
+    while (!m_microtask_queue.is_empty()) {
         // 1. Let oldestMicrotask be the result of dequeuing from the event loop's microtask queue.
-        auto oldest_microtask = m_microtask_queue->dequeue();
+        auto oldest_microtask = m_microtask_queue.dequeue();
 
         // 2. Set the event loop's currently running task to oldestMicrotask.
         m_currently_running_task = oldest_microtask;
@@ -638,8 +632,7 @@ void EventLoop::perform_a_microtask_checkpoint()
     // 4. For each environment settings object settingsObject whose responsible event loop is this event loop, notify about rejected promises given settingsObject's global object.
     auto environments = GC::RootVector { heap(), m_related_environment_settings_objects };
     for (auto& environment_settings_object : environments) {
-        auto& global = as<HTML::UniversalGlobalScopeMixin>(environment_settings_object->global_object());
-        global.notify_about_rejected_promises({});
+        environment_settings_object->universal_global_scope().notify_about_rejected_promises({});
     }
 
     // 5. Cleanup Indexed Database transactions.
@@ -656,6 +649,7 @@ void EventLoop::perform_a_microtask_checkpoint()
 
 Vector<GC::Root<DOM::Document>> EventLoop::documents_in_this_event_loop_matching(Function<bool(DOM::Document&)> callback) const
 {
+    ensure_documents_sorted();
     Vector<GC::Root<DOM::Document>> documents;
     for (auto& document : m_documents) {
         VERIFY(document);
@@ -671,6 +665,7 @@ Vector<GC::Root<DOM::Document>> EventLoop::documents_in_this_event_loop_matching
 void EventLoop::register_document(Badge<DOM::Document>, DOM::Document& document)
 {
     m_documents.append(&document);
+    m_documents_sort_dirty = true;
 }
 
 void EventLoop::unregister_document(Badge<DOM::Document>, DOM::Document& document)
@@ -679,9 +674,54 @@ void EventLoop::unregister_document(Badge<DOM::Document>, DOM::Document& documen
     VERIFY(did_remove);
 }
 
-void EventLoop::push_onto_backup_incumbent_realm_stack(JS::Realm& realm)
+void EventLoop::document_navigable_did_change(Badge<DOM::Document>)
 {
-    m_backup_incumbent_realm_stack.append(realm);
+    m_documents_sort_dirty = true;
+}
+
+void EventLoop::ensure_documents_sorted() const
+{
+    // https://html.spec.whatwg.org/multipage/webappapis.html#update-the-rendering step 3.2:
+    // - Any Document B whose container document is A must be listed after A in the list.
+    // - If there are two documents A and B that both have the same non-null container document
+    //   C, then the order of A and B in the list must match the shadow-including tree order
+    //   of their respective navigable containers in C's node tree.
+
+    if (!m_documents_sort_dirty)
+        return;
+    m_documents_sort_dirty = false;
+
+    HashMap<DOM::Document*, size_t> doc_to_index;
+    doc_to_index.ensure_capacity(m_documents.size());
+    for (size_t i = 0; i < m_documents.size(); ++i)
+        doc_to_index.set(m_documents[i].ptr(), i);
+
+    Vector<bool> visited;
+    visited.resize(m_documents.size());
+    Vector<GC::Weak<DOM::Document>> sorted;
+    sorted.ensure_capacity(m_documents.size());
+
+    auto visit = [&](auto& self, size_t idx) -> void {
+        if (visited[idx])
+            return;
+        visited[idx] = true;
+        if (auto navigable = m_documents[idx]->navigable()) {
+            if (auto container_doc = navigable->container_document()) {
+                if (auto container_idx = doc_to_index.get(container_doc.ptr()); container_idx.has_value())
+                    self(self, *container_idx);
+            }
+        }
+        sorted.append(m_documents[idx]);
+    };
+    for (size_t i = 0; i < m_documents.size(); ++i)
+        visit(visit, i);
+
+    m_documents = move(sorted);
+}
+
+void EventLoop::push_onto_backup_incumbent_realm_stack(GC::Ref<EnvironmentSettingsObject> environment_settings_object)
+{
+    m_backup_incumbent_realm_stack.append(environment_settings_object);
 }
 
 void EventLoop::pop_backup_incumbent_realm_stack()
@@ -689,7 +729,7 @@ void EventLoop::pop_backup_incumbent_realm_stack()
     m_backup_incumbent_realm_stack.take_last();
 }
 
-JS::Realm& EventLoop::top_of_backup_incumbent_realm_stack()
+EnvironmentSettingsObject& EventLoop::top_of_backup_incumbent_realm_stack()
 {
     return m_backup_incumbent_realm_stack.last();
 }
@@ -763,7 +803,7 @@ EventLoop::PauseHandle EventLoop::pause()
     m_execution_paused = true;
 
     // 1. Let global be the current global object.
-    auto& global = current_principal_global_object();
+    auto& global = current_global_object();
 
     // 2. Let timeBeforePause be the current high resolution time given global.
     auto time_before_pause = HighResolutionTime::current_high_resolution_time(global);

@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Cookie/ParsedCookie.h>
+#include <AK/Debug.h>
+#include <LibHTTP/Cookie/ParsedCookie.h>
+#include <LibIPC/TransportHandle.h>
 #include <LibWebView/Application.h>
 #include <LibWebView/CookieJar.h>
 #include <LibWebView/HelperProcess.h>
+#include <LibWebView/HistoryStore.h>
 #include <LibWebView/SourceHighlighter.h>
 #include <LibWebView/ViewImplementation.h>
 #include <LibWebView/WebContentClient.h>
@@ -17,20 +20,23 @@ namespace WebView {
 
 HashTable<WebContentClient*> WebContentClient::s_clients;
 
-Optional<ViewImplementation&> WebContentClient::view_for_pid_and_page_id(pid_t pid, u64 page_id)
+static Optional<String> history_title(Utf16String const& title, URL::URL const& url)
 {
-    for (auto* client : s_clients) {
-        if (client->m_process_handle.pid == pid)
-            return client->view_for_page_id(page_id);
-    }
-    return {};
+    if (title.is_empty())
+        return {};
+
+    auto title_utf8 = title.to_utf8();
+    if (title_utf8 == url.serialize() || title_utf8 == url.serialize(URL::ExcludeFragment::Yes))
+        return {};
+
+    return title_utf8;
 }
 
 WebContentClient::WebContentClient(NonnullOwnPtr<IPC::Transport> transport, ViewImplementation& view)
     : IPC::ConnectionToServer<WebContentClientEndpoint, WebContentServerEndpoint>(*this, move(transport))
 {
     s_clients.set(this);
-    m_views.set(0, &view);
+    m_views.set(0, view);
 }
 
 WebContentClient::WebContentClient(NonnullOwnPtr<IPC::Transport> transport)
@@ -52,27 +58,49 @@ void WebContentClient::die()
 void WebContentClient::assign_view(Badge<Application>, ViewImplementation& view)
 {
     VERIFY(m_views.is_empty());
-    m_views.set(0, &view);
+    m_views.set(0, view);
 }
 
 void WebContentClient::register_view(u64 page_id, ViewImplementation& view)
 {
     VERIFY(page_id > 0);
-    m_views.set(page_id, &view);
+    m_views.set(page_id, view);
+    m_history_recorded_urls_for_current_load.remove(page_id);
 }
 
 void WebContentClient::unregister_view(u64 page_id)
 {
     m_views.remove(page_id);
-    if (m_views.is_empty()) {
-        on_web_content_process_crash = nullptr;
+    m_history_recorded_urls_for_current_load.remove(page_id);
+    if (m_views.is_empty())
         async_close_server();
-    }
 }
 
 void WebContentClient::web_ui_disconnected(Badge<WebUI>)
 {
     m_web_ui.clear();
+}
+
+void WebContentClient::notify_all_views_of_crash()
+{
+    // Collect view IDs first, then use deferred_invoke to handle crashes safely
+    // (avoids signal handler deadlock and allows views to be looked up by ID
+    // in case they're destroyed before the deferred_invoke runs).
+    Vector<u64> view_ids;
+    view_ids.ensure_capacity(m_views.size());
+    for (auto& [page_id, view] : m_views)
+        view_ids.unchecked_append(view->view_id());
+
+    for (auto view_id : view_ids) {
+        Core::deferred_invoke([view_id] {
+            auto view = ViewImplementation::find_view_by_id(view_id);
+            if (!view.has_value())
+                return;
+            view->handle_web_content_process_crash();
+            if (view->on_web_content_crashed)
+                view->on_web_content_crashed();
+        });
+    }
 }
 
 void WebContentClient::did_paint(u64 page_id, Gfx::IntRect rect, i32 bitmap_id)
@@ -87,16 +115,42 @@ void WebContentClient::did_request_new_process_for_navigation(u64 page_id, URL::
         view->create_new_process_for_cross_site_navigation(url);
 }
 
+void WebContentClient::maybe_record_history_visit_for_current_load(u64 page_id, URL::URL const& url, Optional<String> title, StringView reason)
+{
+    auto normalized_url = HistoryStore::normalize_url(url);
+    if (!normalized_url.has_value())
+        return;
+
+    if (auto recorded_url = m_history_recorded_urls_for_current_load.get(page_id); recorded_url.has_value() && *recorded_url == *normalized_url) {
+        dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] Visit for page {} at '{}' was already recorded during this load before {}", page_id, *normalized_url, reason);
+        return;
+    }
+
+    dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] Recording history visit for page {} at '{}' after {}", page_id, *normalized_url, reason);
+
+    // Title and favicon updates already give us a useful history entry, so
+    // do not wait for did_finish_loading() on pages that never reach it.
+    Application::history_store().record_visit(url, move(title));
+    m_history_recorded_urls_for_current_load.set(page_id, normalized_url.release_value());
+}
+
 void WebContentClient::did_start_loading(u64 page_id, URL::URL url, bool is_redirect)
 {
     if (auto process = WebView::Application::the().find_process(m_process_handle.pid); process.has_value())
         process->set_title(OptionalNone {});
+
+    m_history_recorded_urls_for_current_load.remove(page_id);
 
     if (auto view = view_for_page_id(page_id); view.has_value()) {
         view->set_url({}, url);
 
         if (view->on_load_start)
             view->on_load_start(url, is_redirect);
+
+        for (auto const& [id, listener] : view->m_navigation_listeners) {
+            if (listener.on_load_start)
+                listener.on_load_start(url, is_redirect);
+        }
     }
 }
 
@@ -111,9 +165,26 @@ void WebContentClient::did_finish_loading(u64 page_id, URL::URL url)
 
     if (auto view = view_for_page_id(page_id); view.has_value()) {
         view->set_url({}, url);
+        auto title = history_title(view->title(), url);
+
+        dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] Load finished for page {} at '{}' with title '{}'",
+            page_id,
+            url,
+            title.has_value() ? title->bytes_as_string_view() : "<none>"sv);
+
+        maybe_record_history_visit_for_current_load(page_id, url, title, "load finish"sv);
+        if (title.has_value())
+            Application::history_store().update_title(url, *title);
+        if (view->favicon_base64_png().has_value())
+            Application::history_store().update_favicon(url, *view->favicon_base64_png());
 
         if (view->on_load_finish)
             view->on_load_finish(url);
+
+        for (auto const& [id, listener] : view->m_navigation_listeners) {
+            if (listener.on_load_finish)
+                listener.on_load_finish(url);
+        }
     }
 }
 
@@ -138,6 +209,14 @@ void WebContentClient::did_receive_reference_test_metadata(u64 page_id, JsonValu
     if (auto view = view_for_page_id(page_id); view.has_value()) {
         if (view->on_reference_test_metadata)
             view->on_reference_test_metadata(metadata);
+    }
+}
+
+void WebContentClient::did_receive_test_variant_metadata(u64 page_id, JsonValue metadata)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        if (view->on_test_variant_metadata)
+            view->on_test_variant_metadata(metadata);
     }
 }
 
@@ -175,6 +254,18 @@ void WebContentClient::did_change_title(u64 page_id, Utf16String title)
         process->set_title(title);
 
     if (auto view = view_for_page_id(page_id); view.has_value()) {
+        if (!title.is_empty()) {
+            auto title_utf8 = title.to_utf8();
+
+            maybe_record_history_visit_for_current_load(page_id, view->url(), title_utf8, "title change"sv);
+            dbgln_if(WEBVIEW_HISTORY_DEBUG, "[History] Title changed for page {} at '{}' to '{}'",
+                page_id,
+                view->url(),
+                title_utf8);
+
+            Application::history_store().update_title(view->url(), title_utf8);
+        }
+
         if (title.is_empty())
             title = Utf16String::from_utf8(view->url().serialize());
 
@@ -188,6 +279,12 @@ void WebContentClient::did_change_title(u64 page_id, Utf16String title)
 void WebContentClient::did_change_url(u64 page_id, URL::URL url)
 {
     if (auto view = view_for_page_id(page_id); view.has_value()) {
+        // Some navigations report the same URL more than once. Keep those
+        // duplicate updates inside LibWebView so frontends do not reset
+        // location bar state or steal focus for a no-op change.
+        if (view->url() == url)
+            return;
+
         view->set_url({}, url);
 
         if (view->on_url_change)
@@ -384,7 +481,7 @@ void WebContentClient::did_take_screenshot(u64 page_id, Gfx::ShareableBitmap scr
         view->did_receive_screenshot({}, screenshot);
 }
 
-void WebContentClient::did_get_internal_page_info(u64 page_id, WebView::PageInfoType type, String info)
+void WebContentClient::did_get_internal_page_info(u64 page_id, WebView::PageInfoType type, Optional<Core::AnonymousBuffer> info)
 {
     if (auto view = view_for_page_id(page_id); view.has_value())
         view->did_receive_internal_page_info({}, type, info);
@@ -398,19 +495,43 @@ void WebContentClient::did_execute_js_console_input(u64 page_id, JsonValue resul
     }
 }
 
-void WebContentClient::did_output_js_console_message(u64 page_id, i32 message_index)
+void WebContentClient::did_output_js_console_message(u64 page_id, ConsoleOutput console_output)
 {
     if (auto view = view_for_page_id(page_id); view.has_value()) {
-        if (view->on_console_message_available)
-            view->on_console_message_available(message_index);
+        if (view->on_console_message)
+            view->on_console_message(move(console_output));
     }
 }
 
-void WebContentClient::did_get_js_console_messages(u64 page_id, i32 start_index, Vector<ConsoleOutput> console_output)
+void WebContentClient::did_start_network_request(u64 page_id, u64 request_id, URL::URL url, ByteString method, Vector<HTTP::Header> request_headers, ByteBuffer request_body, Optional<String> initiator_type)
 {
     if (auto view = view_for_page_id(page_id); view.has_value()) {
-        if (view->on_received_console_messages)
-            view->on_received_console_messages(start_index, move(console_output));
+        if (view->on_network_request_started)
+            view->on_network_request_started(request_id, url, method, request_headers, move(request_body), move(initiator_type));
+    }
+}
+
+void WebContentClient::did_receive_network_response_headers(u64 page_id, u64 request_id, u32 status_code, Optional<String> reason_phrase, Vector<HTTP::Header> response_headers)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        if (view->on_network_response_headers_received)
+            view->on_network_response_headers_received(request_id, status_code, reason_phrase, response_headers);
+    }
+}
+
+void WebContentClient::did_receive_network_response_body(u64 page_id, u64 request_id, ByteBuffer data)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        if (view->on_network_response_body_received)
+            view->on_network_response_body_received(request_id, move(data));
+    }
+}
+
+void WebContentClient::did_finish_network_request(u64 page_id, u64 request_id, u64 body_size, Requests::RequestTimingInfo timing_info, Optional<Requests::NetworkError> network_error)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        if (view->on_network_request_finished)
+            view->on_network_request_finished(request_id, body_size, timing_info, network_error);
     }
 }
 
@@ -470,8 +591,16 @@ void WebContentClient::did_change_favicon(u64 page_id, Gfx::ShareableBitmap favi
     }
 
     if (auto view = view_for_page_id(page_id); view.has_value()) {
-        if (view->on_favicon_change)
-            view->on_favicon_change(*favicon.bitmap());
+        maybe_record_history_visit_for_current_load(page_id, view->url(), history_title(view->title(), view->url()), "favicon change"sv);
+        view->set_favicon({}, *favicon.bitmap());
+    }
+}
+
+void WebContentClient::did_request_document_cookie_version_index(u64 page_id, i64 document_id, String domain)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        if (auto document_index = view->ensure_document_cookie_version_index({}, domain); !document_index.is_error())
+            async_set_document_cookie_version_index(page_id, document_id, document_index.value());
     }
 }
 
@@ -490,17 +619,25 @@ Messages::WebContentClient::DidRequestNamedCookieResponse WebContentClient::did_
     return Application::cookie_jar().get_named_cookie(url, name);
 }
 
-Messages::WebContentClient::DidRequestCookieResponse WebContentClient::did_request_cookie(URL::URL url, Web::Cookie::Source source)
+Messages::WebContentClient::DidRequestCookieResponse WebContentClient::did_request_cookie(u64 page_id, URL::URL url, HTTP::Cookie::Source source)
 {
-    return Application::cookie_jar().get_cookie(url, source);
+    HTTP::Cookie::VersionedCookie cookie;
+    cookie.cookie = Application::cookie_jar().get_cookie(url, source);
+
+    if (source == HTTP::Cookie::Source::NonHttp) {
+        if (auto view = view_for_page_id(page_id); view.has_value())
+            cookie.cookie_version = view->document_cookie_version(url);
+    }
+
+    return cookie;
 }
 
-void WebContentClient::did_set_cookie(URL::URL url, Web::Cookie::ParsedCookie cookie, Web::Cookie::Source source)
+void WebContentClient::did_set_cookie(URL::URL url, HTTP::Cookie::ParsedCookie cookie, HTTP::Cookie::Source source)
 {
     Application::cookie_jar().set_cookie(url, cookie, source);
 }
 
-void WebContentClient::did_update_cookie(Web::Cookie::Cookie cookie)
+void WebContentClient::did_update_cookie(HTTP::Cookie::Cookie cookie)
 {
     Application::cookie_jar().update_cookie(cookie);
 }
@@ -533,6 +670,16 @@ Messages::WebContentClient::DidRequestStorageKeysResponse WebContentClient::did_
 void WebContentClient::did_clear_storage(Web::StorageAPI::StorageEndpointType storage_endpoint, String storage_key)
 {
     Application::storage_jar().clear_storage_key(storage_endpoint, storage_key);
+}
+
+void WebContentClient::did_post_broadcast_channel_message(u64, Web::HTML::BroadcastChannelMessage message)
+{
+    WebContentClient::for_each_client([&](auto& client) {
+        if (client.pid() == message.source_process_id)
+            return IterationDecision::Continue;
+        client.async_broadcast_channel_message(message);
+        return IterationDecision::Continue;
+    });
 }
 
 Messages::WebContentClient::DidRequestNewWebViewResponse WebContentClient::did_request_new_web_view(u64 page_id, Web::HTML::ActivateTab activate_tab, Web::HTML::WebViewHints hints, Optional<u64> page_index)
@@ -617,6 +764,14 @@ void WebContentClient::did_request_fullscreen_window(u64 page_id)
     }
 }
 
+void WebContentClient::did_request_exit_fullscreen(u64 page_id)
+{
+    if (auto view = view_for_page_id(page_id); view.has_value()) {
+        if (view->on_exit_fullscreen_window)
+            view->on_exit_fullscreen_window();
+    }
+}
+
 void WebContentClient::did_request_file(u64 page_id, ByteString path, i32 request_id)
 {
     if (auto view = view_for_page_id(page_id); view.has_value()) {
@@ -691,20 +846,23 @@ void WebContentClient::did_update_navigation_buttons_state(u64 page_id, bool bac
         view->did_update_navigation_buttons_state({}, back_enabled, forward_enabled);
 }
 
-void WebContentClient::did_allocate_backing_stores(u64 page_id, i32 front_bitmap_id, Gfx::ShareableBitmap front_bitmap, i32 back_bitmap_id, Gfx::ShareableBitmap back_bitmap)
+void WebContentClient::did_allocate_backing_stores(u64 page_id, i32 front_bitmap_id, Gfx::SharedImage front_backing_store, i32 back_bitmap_id, Gfx::SharedImage back_backing_store)
 {
     if (auto view = view_for_page_id(page_id); view.has_value())
-        view->did_allocate_backing_stores({}, front_bitmap_id, front_bitmap, back_bitmap_id, back_bitmap);
+        view->did_allocate_backing_stores({}, front_bitmap_id, move(front_backing_store), back_bitmap_id, move(back_backing_store));
 }
 
 Messages::WebContentClient::RequestWorkerAgentResponse WebContentClient::request_worker_agent(u64 page_id, Web::Bindings::AgentType worker_type)
 {
     if (auto view = view_for_page_id(page_id); view.has_value()) {
+        auto request_server_handle = MUST(connect_new_request_server_client());
+        auto image_decoder_handle = MUST(connect_new_image_decoder_client());
         auto worker_client = MUST(WebView::launch_web_worker_process(worker_type));
-        return worker_client->clone_transport();
+        auto worker_handle = MUST(worker_client->transport().release_for_transfer());
+        return { move(worker_handle), move(request_server_handle), move(image_decoder_handle) };
     }
 
-    return IPC::File {};
+    return { IPC::TransportHandle {}, IPC::TransportHandle {}, IPC::TransportHandle {} };
 }
 
 Optional<ViewImplementation&> WebContentClient::view_for_page_id(u64 page_id, SourceLocation location)

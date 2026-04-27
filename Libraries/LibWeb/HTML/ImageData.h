@@ -8,7 +8,7 @@
 #pragma once
 
 #include <LibGfx/Forward.h>
-#include <LibWeb/Bindings/ImageDataPrototype.h>
+#include <LibWeb/Bindings/ImageData.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Bindings/Serializable.h>
 #include <LibWeb/WebIDL/Types.h>
@@ -28,10 +28,10 @@ class ImageData final
 public:
     [[nodiscard]] static GC::Ref<ImageData> create(JS::Realm&);
     [[nodiscard]] static WebIDL::ExceptionOr<GC::Ref<ImageData>> create(JS::Realm&, u32 sw, u32 sh, Optional<ImageDataSettings> const& settings = {});
-    [[nodiscard]] static WebIDL::ExceptionOr<GC::Ref<ImageData>> create(JS::Realm&, GC::Root<WebIDL::BufferSource> const& data, u32 sw, Optional<u32> sh = {}, Optional<ImageDataSettings> const& settings = {});
+    [[nodiscard]] static WebIDL::ExceptionOr<GC::Ref<ImageData>> create(JS::Realm&, GC::Root<JS::Uint8ClampedArray> const& data, u32 sw, Optional<u32> sh = {}, Optional<ImageDataSettings> const& settings = {});
 
     [[nodiscard]] static WebIDL::ExceptionOr<GC::Ref<ImageData>> construct_impl(JS::Realm&, u32 sw, u32 sh, Optional<ImageDataSettings> const& settings = {});
-    [[nodiscard]] static WebIDL::ExceptionOr<GC::Ref<ImageData>> construct_impl(JS::Realm&, GC::Root<WebIDL::BufferSource> const& data, u32 sw, Optional<u32> sh = {}, Optional<ImageDataSettings> const& settings = {});
+    [[nodiscard]] static WebIDL::ExceptionOr<GC::Ref<ImageData>> construct_impl(JS::Realm&, GC::Root<JS::Uint8ClampedArray> const& data, u32 sw, Optional<u32> sh = {}, Optional<ImageDataSettings> const& settings = {});
 
     virtual ~ImageData() override;
 
@@ -46,7 +46,6 @@ public:
 
     Bindings::PredefinedColorSpace color_space() const { return m_color_space; }
 
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::ImageData; }
     virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
     virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
 

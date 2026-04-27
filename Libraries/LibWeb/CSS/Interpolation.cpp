@@ -3,7 +3,7 @@
  * Copyright (c) 2021, the SerenityOS developers.
  * Copyright (c) 2021-2025, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2024, Matthew Olsson <mattco@serenityos.org>
- * Copyright (c) 2025, Tim Ledbetter <tim.ledbetter@ladybird.org>
+ * Copyright (c) 2025-2026, Tim Ledbetter <tim.ledbetter@ladybird.org>
  * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -17,20 +17,27 @@
 #include <LibWeb/CSS/StyleValues/AngleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BackgroundSizeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BorderImageSliceStyleValue.h>
+#include <LibWeb/CSS/StyleValues/BorderRadiusRectStyleValue.h>
 #include <LibWeb/CSS/StyleValues/BorderRadiusStyleValue.h>
 #include <LibWeb/CSS/StyleValues/CalculatedStyleValue.h>
 #include <LibWeb/CSS/StyleValues/ColorStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FilterValueListStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FlexStyleValue.h>
 #include <LibWeb/CSS/StyleValues/FontStyleStyleValue.h>
 #include <LibWeb/CSS/StyleValues/FrequencyStyleValue.h>
+#include <LibWeb/CSS/StyleValues/FunctionStyleValue.h>
+#include <LibWeb/CSS/StyleValues/GridTrackSizeListStyleValue.h>
 #include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
+#include <LibWeb/CSS/StyleValues/OpacityValueStyleValue.h>
 #include <LibWeb/CSS/StyleValues/OpenTypeTaggedStyleValue.h>
 #include <LibWeb/CSS/StyleValues/PercentageStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RadialSizeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RatioStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RectStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ShadowStyleValue.h>
 #include <LibWeb/CSS/StyleValues/StyleValueList.h>
 #include <LibWeb/CSS/StyleValues/SuperellipseStyleValue.h>
 #include <LibWeb/CSS/StyleValues/TextIndentStyleValue.h>
@@ -43,21 +50,21 @@
 namespace Web::CSS {
 
 template<typename T>
-static T interpolate_raw(T from, T to, float delta, Optional<AcceptedTypeRange> accepted_type_range = {})
+static T interpolate_raw(T from, T to, float delta, Optional<NumericRange> accepted_range = {})
 {
     if constexpr (AK::Detail::IsSame<T, double>) {
-        if (accepted_type_range.has_value())
-            return clamp(from + (to - from) * static_cast<double>(delta), accepted_type_range->min, accepted_type_range->max);
+        if (accepted_range.has_value())
+            return clamp(from + (to - from) * static_cast<double>(delta), accepted_range->min, accepted_range->max);
         return from + (to - from) * static_cast<double>(delta);
     } else if constexpr (AK::Detail::IsIntegral<T>) {
         auto from_float = static_cast<float>(from);
         auto to_float = static_cast<float>(to);
-        auto min = accepted_type_range.has_value() ? accepted_type_range->min : NumericLimits<T>::min();
-        auto max = accepted_type_range.has_value() ? accepted_type_range->max : NumericLimits<T>::max();
+        auto min = accepted_range.has_value() ? accepted_range->min : NumericLimits<T>::min();
+        auto max = accepted_range.has_value() ? accepted_range->max : NumericLimits<T>::max();
         auto unclamped_result = roundf(from_float + (to_float - from_float) * delta);
         return static_cast<AK::Detail::RemoveCVReference<T>>(clamp(unclamped_result, min, max));
     }
-    VERIFY(!accepted_type_range.has_value());
+    VERIFY(!accepted_range.has_value());
     return static_cast<AK::Detail::RemoveCVReference<T>>(from + (to - from) * delta);
 }
 
@@ -146,61 +153,91 @@ static Optional<FilterValue> interpolate_filter_function(DOM::Element& element, 
         [&](FilterOperation::Blur const& from_value) -> Optional<FilterValue> {
             auto const& to_value = to.get<FilterOperation::Blur>();
 
-            if (auto interpolated_style_value = interpolate_value(element, calculation_context, from_value.radius.as_style_value(), to_value.radius.as_style_value(), delta, allow_discrete)) {
-                LengthOrCalculated interpolated_radius = interpolated_style_value->is_length() ? LengthOrCalculated { interpolated_style_value->as_length().length() } : LengthOrCalculated { interpolated_style_value->as_calculated() };
+            CalculationContext blur_calculation_context = calculation_context;
+            blur_calculation_context.accepted_ranges_by_type.set(ValueType::Length, { 0, NumericLimits<float>::max() });
+            if (auto interpolated_style_value = interpolate_value(element, blur_calculation_context, from_value.radius, to_value.radius, delta, allow_discrete)) {
                 return FilterOperation::Blur {
-                    .radius = interpolated_radius
+                    .radius = interpolated_style_value.release_nonnull()
                 };
             }
             return {};
         },
         [&](FilterOperation::HueRotate const& from_value) -> Optional<FilterValue> {
             auto const& to_value = to.get<FilterOperation::HueRotate>();
-            auto const& from_style_value = from_value.angle.has<FilterOperation::HueRotate::Zero>() ? AngleStyleValue::create(Angle::make_degrees(0)) : from_value.angle.get<AngleOrCalculated>().as_style_value();
-            auto const& to_style_value = to_value.angle.has<FilterOperation::HueRotate::Zero>() ? AngleStyleValue::create(Angle::make_degrees(0)) : to_value.angle.get<AngleOrCalculated>().as_style_value();
-            if (auto interpolated_style_value = interpolate_value(element, calculation_context, from_style_value, to_style_value, delta, allow_discrete)) {
-                AngleOrCalculated interpolated_angle = interpolated_style_value->is_angle() ? AngleOrCalculated { interpolated_style_value->as_angle().angle() } : AngleOrCalculated { interpolated_style_value->as_calculated() };
+            if (auto interpolated_style_value = interpolate_value(element, calculation_context, from_value.angle, to_value.angle, delta, allow_discrete)) {
                 return FilterOperation::HueRotate {
-                    .angle = interpolated_angle,
+                    .angle = interpolated_style_value.release_nonnull(),
                 };
             }
             return {};
         },
         [&](FilterOperation::Color const& from_value) -> Optional<FilterValue> {
-            auto resolve_number_percentage = [](NumberPercentage const& amount) -> ValueComparingNonnullRefPtr<StyleValue const> {
-                if (amount.is_number())
-                    return NumberStyleValue::create(amount.number().value());
-                if (amount.is_percentage())
-                    return NumberStyleValue::create(amount.percentage().as_fraction());
-                if (amount.is_calculated())
-                    return amount.calculated();
-                VERIFY_NOT_REACHED();
-            };
             auto const& to_value = to.get<FilterOperation::Color>();
-            auto from_style_value = resolve_number_percentage(from_value.amount);
-            auto to_style_value = resolve_number_percentage(to_value.amount);
-            if (auto interpolated_style_value = interpolate_value(element, calculation_context, from_style_value, to_style_value, delta, allow_discrete)) {
-                auto to_number_percentage = [&](StyleValue const& style_value) -> NumberPercentage {
-                    if (style_value.is_number())
-                        return Number {
-                            Number::Type::Number,
-                            style_value.as_number().number(),
-                        };
-                    if (style_value.is_percentage())
-                        return Percentage { style_value.as_percentage().percentage() };
-                    if (style_value.is_calculated())
-                        return NumberPercentage { style_value.as_calculated() };
-                    VERIFY_NOT_REACHED();
-                };
+            auto operation = delta >= 0.5f ? to_value.operation : from_value.operation;
+
+            CalculationContext filter_function_calculation_context = calculation_context;
+            switch (operation) {
+            case Gfx::ColorFilterType::Grayscale:
+            case Gfx::ColorFilterType::Invert:
+            case Gfx::ColorFilterType::Opacity:
+            case Gfx::ColorFilterType::Sepia:
+                filter_function_calculation_context.accepted_ranges_by_type.set(ValueType::Number, { 0, 1 });
+                break;
+            case Gfx::ColorFilterType::Brightness:
+            case Gfx::ColorFilterType::Contrast:
+            case Gfx::ColorFilterType::Saturate:
+                filter_function_calculation_context.accepted_ranges_by_type.set(ValueType::Number, { 0, NumericLimits<float>::max() });
+                break;
+            }
+
+            if (auto interpolated_style_value = interpolate_value(element, filter_function_calculation_context, from_value.amount, to_value.amount, delta, allow_discrete)) {
                 return FilterOperation::Color {
-                    .operation = delta >= 0.5f ? to_value.operation : from_value.operation,
-                    .amount = to_number_percentage(*interpolated_style_value)
+                    .operation = operation,
+                    .amount = *interpolated_style_value
                 };
             }
             return {};
         },
-        [](auto const&) -> Optional<FilterValue> {
-            // FIXME: Handle interpolating shadow list values
+        [&](FilterOperation::DropShadow const& from_value) -> Optional<FilterValue> {
+            auto const& to_value = to.get<FilterOperation::DropShadow>();
+
+            auto drop_shadow_to_shadow_style_value = [](FilterOperation::DropShadow const& drop_shadow) {
+                return ShadowStyleValue::create(
+                    ShadowStyleValue::ShadowType::Normal,
+                    drop_shadow.color,
+                    drop_shadow.offset_x,
+                    drop_shadow.offset_y,
+                    drop_shadow.radius,
+                    LengthStyleValue::create(Length::make_px(0)),
+                    ShadowPlacement::Outer);
+            };
+
+            StyleValueVector from_shadows { drop_shadow_to_shadow_style_value(from_value) };
+            StyleValueVector to_shadows { drop_shadow_to_shadow_style_value(to_value) };
+            auto from_list = StyleValueList::create(move(from_shadows), StyleValueList::Separator::Comma);
+            auto to_list = StyleValueList::create(move(to_shadows), StyleValueList::Separator::Comma);
+
+            auto result = interpolate_box_shadow(element, calculation_context, *from_list, *to_list, delta, allow_discrete);
+            if (!result)
+                return {};
+
+            auto const& result_shadow = result->as_value_list().value_at(0, false)->as_shadow();
+
+            RefPtr<StyleValue const> result_radius;
+            auto radius_has_value = delta >= 0.5f ? to_value.radius : from_value.radius;
+            if (radius_has_value)
+                result_radius = result_shadow.blur_radius();
+
+            return FilterOperation::DropShadow {
+                .offset_x = result_shadow.offset_x(),
+                .offset_y = result_shadow.offset_y(),
+                .radius = result_radius,
+                // FIXME: We shouldn't apply the default color here
+                .color = result_shadow.color()
+            };
+        },
+        [](URL const&) -> Optional<FilterValue> {
+            // URL filters cannot be interpolated
             return {};
         });
 
@@ -218,17 +255,17 @@ static RefPtr<StyleValue const> interpolate_filter_value_list(DOM::Element& elem
     };
 
     auto initial_value_for = [&](FilterValue value) {
-        return value.visit([&](FilterOperation::Blur const&) -> FilterValue { return FilterOperation::Blur {}; },
+        return value.visit([&](FilterOperation::Blur const&) -> FilterValue { return FilterOperation::Blur { LengthStyleValue::create(Length::make_px(0)) }; },
             [&](FilterOperation::DropShadow const&) -> FilterValue {
                 return FilterOperation::DropShadow {
-                    .offset_x = Length::make_px(0),
-                    .offset_y = Length::make_px(0),
-                    .radius = Length::make_px(0),
-                    .color = Color::Transparent
+                    .offset_x = LengthStyleValue::create(Length::make_px(0)),
+                    .offset_y = LengthStyleValue::create(Length::make_px(0)),
+                    .radius = LengthStyleValue::create(Length::make_px(0)),
+                    .color = ColorStyleValue::create_from_color(Color::Transparent, ColorSyntax::Legacy)
                 };
             },
             [&](FilterOperation::HueRotate const&) -> FilterValue {
-                return FilterOperation::HueRotate {};
+                return FilterOperation::HueRotate { AngleStyleValue::create(Angle::make_degrees(0)) };
             },
             [&](FilterOperation::Color const& color) -> FilterValue {
                 auto default_value_for_interpolation = [&]() {
@@ -245,7 +282,7 @@ static RefPtr<StyleValue const> interpolate_filter_value_list(DOM::Element& elem
                     }
                     VERIFY_NOT_REACHED();
                 }();
-                return FilterOperation::Color { .operation = color.operation, .amount = NumberPercentage { Number { Number::Type::Integer, default_value_for_interpolation } } };
+                return FilterOperation::Color { .operation = color.operation, .amount = NumberStyleValue::create(default_value_for_interpolation) };
             },
             [&](auto&) -> FilterValue {
                 VERIFY_NOT_REACHED();
@@ -443,13 +480,41 @@ static RefPtr<StyleValue const> interpolate_rotate(DOM::Element& element, Calcul
         FloatVector3 axis { quaternion[0], quaternion[1], quaternion[2] };
         auto epsilon = 1e-5f;
         auto sin_half_angle = sqrtf(max(0.0f, 1.0f - quaternion[3] * quaternion[3]));
+        auto angle = 2.0f * acosf(clamp(quaternion[3], -1.0f, 1.0f));
         if (sin_half_angle < epsilon)
-            return AxisAngle { axis, quaternion[3] };
-        auto angle = 2.0f * acosf(quaternion[3]);
+            return AxisAngle { axis, angle };
         axis = axis * (1.0f / sin_half_angle);
         return AxisAngle { axis, angle };
     };
 
+    // https://drafts.csswg.org/css-transforms-2/#interpolation-of-transform-functions
+    // If the normalized vectors are equal, or if one of the angles is zero, interpolate the angle
+    // numerically and use the rotation vector of the non-zero angle (or (0, 0, 1) if both are zero).
+    auto epsilon = 1e-5f;
+    auto from_axis_normalized = from_axis.length() > epsilon ? from_axis.normalized() : FloatVector3 { 0, 0, 1 };
+    auto to_axis_normalized = to_axis.length() > epsilon ? to_axis.normalized() : FloatVector3 { 0, 0, 1 };
+    bool axes_are_equal = (from_axis_normalized - to_axis_normalized).length() < epsilon;
+    if (axes_are_equal || from_angle == 0.f || to_angle == 0.f) {
+        auto result_angle = from_angle + (to_angle - from_angle) * delta;
+        FloatVector3 result_axis = { 0, 0, 1 };
+        if (to_angle != 0.f)
+            result_axis = to_axis_normalized;
+        else if (from_angle != 0.f)
+            result_axis = from_axis_normalized;
+
+        auto interpolated_x_axis = NumberStyleValue::create(result_axis.x());
+        auto interpolated_y_axis = NumberStyleValue::create(result_axis.y());
+        auto interpolated_z_axis = NumberStyleValue::create(result_axis.z());
+        auto interpolated_angle = AngleStyleValue::create(Angle::make_degrees(AK::to_degrees(result_angle)));
+
+        return TransformationStyleValue::create(
+            PropertyID::Rotate,
+            TransformFunction::Rotate3d,
+            { interpolated_x_axis, interpolated_y_axis, interpolated_z_axis, interpolated_angle });
+    }
+
+    // If the normalized vectors are not equal and both rotation angles are non-zero, convert to
+    // 4x4 matrices and interpolate as defined in Interpolation of Matrices.
     auto from_quaternion = from_axis_angle(from_axis, from_angle);
     auto to_quaternion = from_axis_angle(to_axis, to_angle);
 
@@ -466,94 +531,62 @@ static RefPtr<StyleValue const> interpolate_rotate(DOM::Element& element, Calcul
         { interpolated_x_axis, interpolated_y_axis, interpolated_z_axis, interpolated_angle });
 }
 
-static Optional<GridTrackSizeList> interpolate_grid_track_size_list(CalculationContext const& calculation_context, GridTrackSizeList const& from, GridTrackSizeList const& to, float delta)
+struct ExpandedGridTracksAndLines {
+    Vector<ExplicitGridTrack> tracks;
+    Vector<Optional<GridLineNames>> line_names;
+};
+
+static ExpandedGridTracksAndLines expand_grid_tracks_and_lines(GridTrackSizeList const& list)
 {
-    auto interpolate_css_size = [&](Size const& from_size, Size const& to_size) -> Size {
-        if (from_size.is_length_percentage() && to_size.is_length_percentage()) {
-            auto interpolated_length = interpolate_length_percentage(calculation_context, from_size.length_percentage(), to_size.length_percentage(), delta);
-            return Size::make_length_percentage(*interpolated_length);
-        }
-
-        if (from_size.type() != to_size.type())
-            return delta < 0.5f ? from_size : to_size;
-
-        switch (from_size.type()) {
-        case Size::Type::FitContent: {
-            if (!from_size.fit_content_available_space().has_value() || !to_size.fit_content_available_space().has_value())
-                break;
-            auto interpolated_available_space = interpolate_length_percentage(calculation_context, *from_size.fit_content_available_space(), *to_size.fit_content_available_space(), delta);
-            if (!interpolated_available_space.has_value())
-                break;
-            return Size::make_fit_content(interpolated_available_space.release_value());
-        }
-        default:
-            break;
-        }
-
-        return delta < 0.5f ? from_size : to_size;
+    ExpandedGridTracksAndLines result;
+    Optional<ExplicitGridTrack> current_track;
+    Optional<GridLineNames> current_line_names;
+    auto append_result = [&] {
+        result.tracks.append(*current_track);
+        result.line_names.append(move(current_line_names));
+        current_track.clear();
+        current_line_names.clear();
     };
 
-    auto interpolate_grid_size = [&](GridSize const& from_grid_size, GridSize const& to_grid_size) -> GridSize {
-        if (from_grid_size.is_flexible_length() || to_grid_size.is_flexible_length()) {
-            if (from_grid_size.is_flexible_length() && to_grid_size.is_flexible_length()) {
-                auto interpolated_flex = interpolate_raw(from_grid_size.flex_factor(), to_grid_size.flex_factor(), delta);
-                return GridSize { Flex::make_fr(interpolated_flex) };
-            }
-        } else {
-            auto interpolated_size = interpolate_css_size(from_grid_size.css_size(), to_grid_size.css_size());
-            return GridSize { move(interpolated_size) };
-        }
-        return delta < 0.5f ? from_grid_size : to_grid_size;
-    };
-
-    struct ExpandedTracksAndLines {
-        Vector<ExplicitGridTrack> tracks;
-        Vector<Optional<GridLineNames>> line_names;
-    };
-
-    auto expand_tracks_and_lines = [](GridTrackSizeList const& list) -> ExpandedTracksAndLines {
-        ExpandedTracksAndLines result;
-        Optional<ExplicitGridTrack> current_track;
-        Optional<GridLineNames> current_line_names;
-        auto append_result = [&] {
-            result.tracks.append(*current_track);
-            result.line_names.append(move(current_line_names));
-            current_track.clear();
-            current_line_names.clear();
-        };
-
-        for (auto const& component : list.list()) {
-            if (auto const* grid_line_names = component.get_pointer<GridLineNames>()) {
-                VERIFY(!current_line_names.has_value());
-                current_line_names = *grid_line_names;
-            } else if (auto const* grid_track = component.get_pointer<ExplicitGridTrack>()) {
-                if (current_track.has_value())
-                    append_result();
-
-                current_track = *grid_track;
-            }
-            if (current_track.has_value() && current_line_names.has_value())
+    for (auto const& component : list.list()) {
+        if (auto const* grid_line_names = component.get_pointer<GridLineNames>()) {
+            VERIFY(!current_line_names.has_value());
+            current_line_names = *grid_line_names;
+        } else if (auto const* grid_track = component.get_pointer<ExplicitGridTrack>()) {
+            if (current_track.has_value())
                 append_result();
-        }
-        if (current_track.has_value())
-            append_result();
 
-        return result;
+            current_track = *grid_track;
+        }
+        if (current_track.has_value() && current_line_names.has_value())
+            append_result();
+    }
+    if (current_track.has_value())
+        append_result();
+
+    return result;
+}
+
+static void append_grid_track_with_line_names(GridTrackSizeList& list, ExplicitGridTrack track, Optional<GridLineNames> line_names)
+{
+    list.append(move(track));
+    if (line_names.has_value())
+        list.append(line_names.release_value());
+}
+
+static Optional<GridTrackSizeList> interpolate_grid_track_size_list(DOM::Element& element, CalculationContext const& calculation_context, GridTrackSizeList const& from, GridTrackSizeList const& to, float delta)
+{
+    auto interpolate_grid_size = [&](GridSize const& from_grid_size, GridSize const& to_grid_size) -> GridSize {
+        return GridSize { *interpolate_value(element, calculation_context, from_grid_size.style_value(), to_grid_size.style_value(), delta, AllowDiscrete::Yes) };
     };
 
-    auto expanded_from = expand_tracks_and_lines(from);
-    auto expanded_to = expand_tracks_and_lines(to);
+    auto expanded_from = expand_grid_tracks_and_lines(from);
+    auto expanded_to = expand_grid_tracks_and_lines(to);
 
     if (expanded_from.tracks.size() != expanded_to.tracks.size())
         return {};
 
-    GridTrackSizeList interpolated_grid_track_size_list;
-    auto add_interpolated_grid_track = [&](ExplicitGridTrack track, Optional<GridLineNames> line_names) {
-        interpolated_grid_track_size_list.append(move(track));
-        if (line_names.has_value())
-            interpolated_grid_track_size_list.append(line_names.release_value());
-    };
-
+    GridTrackSizeList result;
     for (size_t i = 0; i < expanded_from.tracks.size(); ++i) {
         auto& from_track = expanded_from.tracks[i];
         auto& to_track = expanded_to.tracks[i];
@@ -571,31 +604,31 @@ static Optional<GridTrackSizeList> interpolate_grid_track_size_list(CalculationC
             if (from_repeat.repeat_count() != to_repeat.repeat_count() || from_repeat.grid_track_size_list().track_list().size() != to_repeat.grid_track_size_list().track_list().size())
                 return {};
 
-            auto interpolated_repeat_grid_tracks = interpolate_grid_track_size_list(calculation_context, from_repeat.grid_track_size_list(), to_repeat.grid_track_size_list(), delta);
+            auto interpolated_repeat_grid_tracks = interpolate_grid_track_size_list(element, calculation_context, from_repeat.grid_track_size_list(), to_repeat.grid_track_size_list(), delta);
             if (!interpolated_repeat_grid_tracks.has_value())
                 return {};
 
-            ExplicitGridTrack interpolated_grid_track { GridRepeat { from_repeat.type(), move(*interpolated_repeat_grid_tracks), from_repeat.repeat_count() } };
-            add_interpolated_grid_track(move(interpolated_grid_track), move(interpolated_line_names));
+            ExplicitGridTrack interpolated_grid_track { GridRepeat { from_repeat.type(), move(*interpolated_repeat_grid_tracks), IntegerStyleValue::create(from_repeat.repeat_count()) } };
+            append_grid_track_with_line_names(result, move(interpolated_grid_track), move(interpolated_line_names));
         } else if (from_track.is_minmax() && to_track.is_minmax()) {
             auto from_minmax = from_track.minmax();
             auto to_minmax = to_track.minmax();
             auto interpolated_min = interpolate_grid_size(from_minmax.min_grid_size(), to_minmax.min_grid_size());
             auto interpolated_max = interpolate_grid_size(from_minmax.max_grid_size(), to_minmax.max_grid_size());
             ExplicitGridTrack interpolated_grid_track { GridMinMax { interpolated_min, interpolated_max } };
-            add_interpolated_grid_track(move(interpolated_grid_track), move(interpolated_line_names));
+            append_grid_track_with_line_names(result, move(interpolated_grid_track), move(interpolated_line_names));
         } else if (from_track.is_default() && to_track.is_default()) {
             auto const& from_grid_size = from_track.grid_size();
             auto const& to_grid_size = to_track.grid_size();
             auto interpolated_grid_size = interpolate_grid_size(from_grid_size, to_grid_size);
             ExplicitGridTrack interpolated_grid_track { move(interpolated_grid_size) };
-            add_interpolated_grid_track(move(interpolated_grid_track), move(interpolated_line_names));
+            append_grid_track_with_line_names(result, move(interpolated_grid_track), move(interpolated_line_names));
         } else {
             auto interpolated_grid_track = delta < 0.5f ? move(from_track) : move(to_track);
-            add_interpolated_grid_track(move(interpolated_grid_track), move(interpolated_line_names));
+            append_grid_track_with_line_names(result, move(interpolated_grid_track), move(interpolated_line_names));
         }
     }
-    return interpolated_grid_track_size_list;
+    return result;
 }
 
 ValueComparingRefPtr<StyleValue const> interpolate_property(DOM::Element& element, PropertyID property_id, StyleValue const& a_from, StyleValue const& a_to, float delta, AllowDiscrete allow_discrete)
@@ -631,9 +664,9 @@ ValueComparingRefPtr<StyleValue const> interpolate_property(DOM::Element& elemen
         }
 
         if (property_id == PropertyID::FontStyle) {
-            auto static oblique_0deg_value = FontStyleStyleValue::create(FontStyle::Oblique, AngleStyleValue::create(Angle::make_degrees(0)));
-            auto from_value = from->as_font_style().font_style() == FontStyle::Normal ? oblique_0deg_value : from;
-            auto to_value = to->as_font_style().font_style() == FontStyle::Normal ? oblique_0deg_value : to;
+            auto static oblique_0deg_value = FontStyleStyleValue::create(FontStyleKeyword::Oblique, AngleStyleValue::create(Angle::make_degrees(0)));
+            auto from_value = from->as_font_style().font_style() == FontStyleKeyword::Normal ? oblique_0deg_value : from;
+            auto to_value = to->as_font_style().font_style() == FontStyleKeyword::Normal ? oblique_0deg_value : to;
             return interpolate_value(element, calculation_context, from_value, to_value, delta, allow_discrete);
         }
 
@@ -682,7 +715,7 @@ ValueComparingRefPtr<StyleValue const> interpolate_property(DOM::Element& elemen
                 return from;
 
             auto from_is_hidden = from->to_keyword() == Keyword::Hidden;
-            auto to_is_hidden = to->to_keyword() == Keyword::Hidden || to->to_keyword() == Keyword::Auto;
+            auto to_is_hidden = to->to_keyword() == Keyword::Hidden;
 
             if (from_is_hidden || to_is_hidden) {
                 auto non_hidden_value = from_is_hidden ? to : from;
@@ -725,7 +758,7 @@ ValueComparingRefPtr<StyleValue const> interpolate_property(DOM::Element& elemen
             auto from_list = from->as_grid_track_size_list().grid_track_size_list();
             auto to_list = to->as_grid_track_size_list().grid_track_size_list();
 
-            auto interpolated_grid_tack_size_list = interpolate_grid_track_size_list(calculation_context, from_list, to_list, delta);
+            auto interpolated_grid_tack_size_list = interpolate_grid_track_size_list(element, calculation_context, from_list, to_list, delta);
             if (!interpolated_grid_tack_size_list.has_value())
                 return interpolate_discrete(from, to, delta, allow_discrete);
 
@@ -983,7 +1016,7 @@ static StyleValueVector matrix_to_style_value_vector(FloatMatrix4x4 const& matri
 
 // https://drafts.csswg.org/css-transforms-1/#interpolation-of-transforms
 RefPtr<StyleValue const> interpolate_transform(DOM::Element& element, CalculationContext const& calculation_context,
-    StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete)
+    StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete allow_discrete)
 {
     // * If both Va and Vb are none:
     //   * Vresult is none.
@@ -1164,8 +1197,9 @@ RefPtr<StyleValue const> interpolate_transform(DOM::Element& element, Calculatio
             break;
         default:
             generic_function = TransformFunction::Matrix3d;
+            // NB: Called during animation interpolation.
             auto paintable_box = [&] -> Optional<Painting::PaintableBox const&> {
-                if (auto* box = element.paintable_box())
+                if (auto* box = element.unsafe_paintable_box())
                     return *box;
                 return {};
             }();
@@ -1266,18 +1300,17 @@ RefPtr<StyleValue const> interpolate_transform(DOM::Element& element, Calculatio
     //     transform functions in each of Va and Vb respectively to produce two 4x4 matrices. Interpolate these two
     //     matrices as described in § 11 Interpolation of Matrices, append the result to Vresult, and cease
     //     iterating over Va and Vb.
+    // NB: Called during animation interpolation.
     Optional<Painting::PaintableBox const&> paintable_box;
-    if (auto* paintable = as_if<Painting::PaintableBox>(element.paintable()))
+    if (auto* paintable = as_if<Painting::PaintableBox>(element.unsafe_paintable()))
         paintable_box = *paintable;
 
-    auto post_multiply_remaining_transformations = [&paintable_box](size_t start_index, Vector<NonnullRefPtr<TransformationStyleValue const>> const& transformations) {
+    auto post_multiply_remaining_transformations = [&paintable_box](size_t start_index, Vector<NonnullRefPtr<TransformationStyleValue const>> const& transformations) -> Optional<FloatMatrix4x4> {
         FloatMatrix4x4 result = FloatMatrix4x4::identity();
         for (auto index = start_index; index < transformations.size(); ++index) {
             auto transformation_matrix = transformations[index]->to_matrix(paintable_box);
-            if (transformation_matrix.is_error()) {
-                dbgln("Unable to interpret a transformation's matrix; bailing out of interpolation.");
-                break;
-            }
+            if (transformation_matrix.is_error())
+                return {};
             result = result * transformation_matrix.value();
         }
         return result;
@@ -1285,57 +1318,20 @@ RefPtr<StyleValue const> interpolate_transform(DOM::Element& element, Calculatio
     auto from_matrix = post_multiply_remaining_transformations(index, from_transformations);
     auto to_matrix = post_multiply_remaining_transformations(index, to_transformations);
 
-    auto maybe_interpolated_matrix = interpolate_matrices(from_matrix, to_matrix, delta);
-    if (maybe_interpolated_matrix.has_value()) {
-        result.append(TransformationStyleValue::create(PropertyID::Transform, TransformFunction::Matrix3d,
-            matrix_to_style_value_vector(maybe_interpolated_matrix.release_value())));
-    } else {
-        dbgln("Unable to interpolate matrices.");
-    }
+    // https://drafts.csswg.org/css-transforms-1/#interpolation-of-transforms
+    // If one of the matrices for interpolation is non-invertible, the used animation function must
+    // fall-back to a discrete animation according to the rules of the respective animation specification.
+    if (!from_matrix.has_value() || !to_matrix.has_value())
+        return interpolate_discrete(from, to, delta, allow_discrete);
+
+    auto maybe_interpolated_matrix = interpolate_matrices(from_matrix.value(), to_matrix.value(), delta);
+    if (!maybe_interpolated_matrix.has_value())
+        return interpolate_discrete(from, to, delta, allow_discrete);
+
+    result.append(TransformationStyleValue::create(PropertyID::Transform, TransformFunction::Matrix3d,
+        matrix_to_style_value_vector(maybe_interpolated_matrix.release_value())));
 
     return StyleValueList::create(move(result), StyleValueList::Separator::Space);
-}
-
-Color interpolate_color(Color from, Color to, float delta, ColorSyntax syntax)
-{
-    // https://drafts.csswg.org/css-color/#interpolation
-    // FIXME: Handle all interpolation methods.
-    // FIXME: Handle "analogous", "missing", and "powerless" components, somehow.
-    // FIXME: Remove duplicated code with Color::mixed_with(Color other, float weight)
-
-    // https://drafts.csswg.org/css-color/#interpolation-space
-    // If the host syntax does not define what color space interpolation should take place in, it defaults to Oklab.
-    // However, user agents must handle interpolation between legacy sRGB color formats (hex colors, named colors,
-    // rgb(), hsl() or hwb() and the equivalent alpha-including forms) in gamma-encoded sRGB space.  This provides
-    // Web compatibility; legacy sRGB content interpolates in the sRGB space by default.
-
-    Color result;
-    if (syntax == ColorSyntax::Modern) {
-        // 5. changing the color components to premultiplied form
-        auto from_oklab = from.to_premultiplied_oklab();
-        auto to_oklab = to.to_premultiplied_oklab();
-
-        // 6. linearly interpolating each component of the computed value of the color separately
-        // 7. undoing premultiplication
-        auto from_alpha = from.alpha() / 255.0f;
-        auto to_alpha = to.alpha() / 255.0f;
-        auto interpolated_alpha = interpolate_raw(from_alpha, to_alpha, delta);
-
-        result = Color::from_oklab(
-            interpolate_raw(from_oklab.L, to_oklab.L, delta) / interpolated_alpha,
-            interpolate_raw(from_oklab.a, to_oklab.a, delta) / interpolated_alpha,
-            interpolate_raw(from_oklab.b, to_oklab.b, delta) / interpolated_alpha,
-            interpolated_alpha);
-    } else {
-        result = Color {
-            interpolate_raw(from.red(), to.red(), delta),
-            interpolate_raw(from.green(), to.green(), delta),
-            interpolate_raw(from.blue(), to.blue(), delta),
-            interpolate_raw(from.alpha(), to.alpha(), delta)
-        };
-    }
-
-    return result;
 }
 
 RefPtr<StyleValue const> interpolate_box_shadow(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete allow_discrete)
@@ -1376,9 +1372,10 @@ RefPtr<StyleValue const> interpolate_box_shadow(DOM::Element& element, Calculati
     StyleValueVector result_shadows;
     result_shadows.ensure_capacity(from_shadows.size());
 
+    // NB: Called during style interpolation.
     ColorResolutionContext color_resolution_context {};
-    if (auto node = element.layout_node()) {
-        color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*element.layout_node());
+    if (auto node = element.unsafe_layout_node()) {
+        color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*element.unsafe_layout_node());
     }
 
     for (size_t i = 0; i < from_shadows.size(); i++) {
@@ -1391,25 +1388,13 @@ RefPtr<StyleValue const> interpolate_box_shadow(DOM::Element& element, Calculati
         if (!interpolated_offset_x || !interpolated_offset_y || !interpolated_blur_radius || !interpolated_spread_distance)
             return {};
 
-        auto color_syntax = ColorSyntax::Legacy;
-        if ((!from_shadow.color()->is_keyword() && from_shadow.color()->as_color().color_syntax() == ColorSyntax::Modern)
-            || (!to_shadow.color()->is_keyword() && to_shadow.color()->as_color().color_syntax() == ColorSyntax::Modern)) {
-            color_syntax = ColorSyntax::Modern;
-        }
-
-        // FIXME: If we aren't able to resolve the colors here, we should postpone interpolation until we can (perhaps
-        //        by creating something similar to a ColorMixStyleValue).
-        auto from_color = from_shadow.color()->to_color(color_resolution_context);
-        auto to_color = to_shadow.color()->to_color(color_resolution_context);
-
-        Color interpolated_color = Color::Black;
-
-        if (from_color.has_value() && to_color.has_value())
-            interpolated_color = interpolate_color(from_color.value(), to_color.value(), delta, color_syntax);
+        auto interpolated_color_value = interpolate_color(*from_shadow.color(), *to_shadow.color(), delta, {}, color_resolution_context);
+        if (!interpolated_color_value)
+            interpolated_color_value = ColorStyleValue::create_from_color(Color::Black, ColorSyntax::Modern);
 
         auto result_shadow = ShadowStyleValue::create(
             from_shadow.shadow_type(),
-            ColorStyleValue::create_from_color(interpolated_color, ColorSyntax::Modern),
+            interpolated_color_value.release_nonnull(),
             *interpolated_offset_x,
             *interpolated_offset_y,
             *interpolated_blur_radius,
@@ -1421,52 +1406,53 @@ RefPtr<StyleValue const> interpolate_box_shadow(DOM::Element& element, Calculati
     return StyleValueList::create(move(result_shadows), StyleValueList::Separator::Comma);
 }
 
+static Optional<ValueType> get_value_type_of_numeric_style_value(StyleValue const& value, CalculationContext const& calculation_context)
+{
+    switch (value.type()) {
+    case StyleValue::Type::Angle:
+        return ValueType::Angle;
+    case StyleValue::Type::Frequency:
+        return ValueType::Frequency;
+    case StyleValue::Type::Integer:
+        return ValueType::Integer;
+    case StyleValue::Type::Length:
+        return ValueType::Length;
+    case StyleValue::Type::Number:
+        return ValueType::Number;
+    case StyleValue::Type::Percentage:
+        return calculation_context.percentages_resolve_as.value_or(ValueType::Percentage);
+    case StyleValue::Type::Resolution:
+        return ValueType::Resolution;
+    case StyleValue::Type::Time:
+        return ValueType::Time;
+    case StyleValue::Type::Calculated: {
+        auto const& calculated = value.as_calculated();
+        if (calculated.resolves_to_angle_percentage())
+            return ValueType::Angle;
+        if (calculated.resolves_to_frequency_percentage())
+            return ValueType::Frequency;
+        if (calculated.resolves_to_length_percentage())
+            return ValueType::Length;
+        if (calculated.resolves_to_resolution())
+            return ValueType::Resolution;
+        if (calculated.resolves_to_number())
+            return calculation_context.resolve_numbers_as_integers ? ValueType::Integer : ValueType::Number;
+        if (calculated.resolves_to_percentage())
+            return calculation_context.percentages_resolve_as.value_or(ValueType::Percentage);
+        if (calculated.resolves_to_time_percentage())
+            return ValueType::Time;
+
+        return {};
+    }
+    default:
+        return {};
+    }
+}
+
 static RefPtr<StyleValue const> interpolate_mixed_value(CalculationContext const& calculation_context, StyleValue const& from, StyleValue const& to, float delta)
 {
-    auto get_value_type_of_numeric_style_value = [&calculation_context](StyleValue const& value) -> Optional<ValueType> {
-        switch (value.type()) {
-        case StyleValue::Type::Angle:
-            return ValueType::Angle;
-        case StyleValue::Type::Frequency:
-            return ValueType::Frequency;
-        case StyleValue::Type::Integer:
-            return ValueType::Integer;
-        case StyleValue::Type::Length:
-            return ValueType::Length;
-        case StyleValue::Type::Number:
-            return ValueType::Number;
-        case StyleValue::Type::Percentage:
-            return calculation_context.percentages_resolve_as.value_or(ValueType::Percentage);
-        case StyleValue::Type::Resolution:
-            return ValueType::Resolution;
-        case StyleValue::Type::Time:
-            return ValueType::Time;
-        case StyleValue::Type::Calculated: {
-            auto const& calculated = value.as_calculated();
-            if (calculated.resolves_to_angle_percentage())
-                return ValueType::Angle;
-            if (calculated.resolves_to_frequency_percentage())
-                return ValueType::Frequency;
-            if (calculated.resolves_to_length_percentage())
-                return ValueType::Length;
-            if (calculated.resolves_to_resolution())
-                return ValueType::Resolution;
-            if (calculated.resolves_to_number())
-                return calculation_context.resolve_numbers_as_integers ? ValueType::Integer : ValueType::Number;
-            if (calculated.resolves_to_percentage())
-                return calculation_context.percentages_resolve_as.value_or(ValueType::Percentage);
-            if (calculated.resolves_to_time_percentage())
-                return ValueType::Time;
-
-            return {};
-        }
-        default:
-            return {};
-        }
-    };
-
-    auto from_value_type = get_value_type_of_numeric_style_value(from);
-    auto to_value_type = get_value_type_of_numeric_style_value(to);
+    auto from_value_type = get_value_type_of_numeric_style_value(from, calculation_context);
+    auto to_value_type = get_value_type_of_numeric_style_value(to, calculation_context);
 
     if (from_value_type.has_value() && from_value_type == to_value_type) {
         // https://drafts.csswg.org/css-values-4/#combine-mixed
@@ -1526,37 +1512,6 @@ static NonnullRefPtr<StyleValue const> length_percentage_or_auto_to_style_value(
     VERIFY_NOT_REACHED();
 }
 
-Optional<LengthPercentage> interpolate_length_percentage(CalculationContext const& calculation_context, LengthPercentage const& from, LengthPercentage const& to, float delta)
-{
-    if (from.is_length() && to.is_length())
-        return Length::make_px(interpolate_raw(from.length().raw_value(), to.length().raw_value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Length)));
-    if (from.is_percentage() && to.is_percentage())
-        return Percentage(interpolate_raw(from.percentage().value(), to.percentage().value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Percentage)));
-    auto from_style_value = length_percentage_or_auto_to_style_value(from);
-    auto to_style_value = length_percentage_or_auto_to_style_value(to);
-    auto interpolated_style_value = interpolate_mixed_value(calculation_context, from_style_value, to_style_value, delta);
-    if (!interpolated_style_value)
-        return {};
-    return LengthPercentage::from_style_value(*interpolated_style_value);
-}
-
-Optional<LengthPercentageOrAuto> interpolate_length_percentage_or_auto(CalculationContext const& calculation_context, LengthPercentageOrAuto const& from, LengthPercentageOrAuto const& to, float delta)
-{
-    if (from.is_auto() && to.is_auto())
-        return LengthPercentageOrAuto::make_auto();
-    if (from.is_length() && to.is_length())
-        return Length::make_px(interpolate_raw(from.length().raw_value(), to.length().raw_value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Length)));
-    if (from.is_percentage() && to.is_percentage())
-        return Percentage(interpolate_raw(from.percentage().value(), to.percentage().value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Percentage)));
-
-    auto from_style_value = length_percentage_or_auto_to_style_value(from);
-    auto to_style_value = length_percentage_or_auto_to_style_value(to);
-    auto interpolated_style_value = interpolate_mixed_value(calculation_context, from_style_value, to_style_value, delta);
-    if (!interpolated_style_value)
-        return {};
-    return LengthPercentageOrAuto::from_style_value(*interpolated_style_value);
-}
-
 static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete allow_discrete)
 {
     if (from.type() != to.type() || from.is_calculated() || to.is_calculated()) {
@@ -1567,7 +1522,7 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
 
     switch (from.type()) {
     case StyleValue::Type::Angle: {
-        auto interpolated_value = interpolate_raw(from.as_angle().angle().to_degrees(), to.as_angle().angle().to_degrees(), delta, calculation_context.accepted_type_ranges.get(ValueType::Angle));
+        auto interpolated_value = interpolate_raw(from.as_angle().angle().to_degrees(), to.as_angle().angle().to_degrees(), delta, calculation_context.accepted_ranges_by_type.get(ValueType::Angle));
         return AngleStyleValue::create(Angle::make_degrees(interpolated_value));
     }
     case StyleValue::Type::BackgroundSize: {
@@ -1632,9 +1587,13 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
                 auto interpolated_right = interpolate_value(element, basic_shape_calculation_context, from_inset.right, to_inset.right, delta, allow_discrete);
                 auto interpolated_bottom = interpolate_value(element, basic_shape_calculation_context, from_inset.bottom, to_inset.bottom, delta, allow_discrete);
                 auto interpolated_left = interpolate_value(element, basic_shape_calculation_context, from_inset.left, to_inset.left, delta, allow_discrete);
-                if (!interpolated_top || !interpolated_right || !interpolated_bottom || !interpolated_left)
+
+                auto interpolated_border_radius = interpolate_value(element, basic_shape_calculation_context, from_inset.border_radius, to_inset.border_radius, delta, allow_discrete);
+
+                if (!interpolated_top || !interpolated_right || !interpolated_bottom || !interpolated_left || !interpolated_border_radius)
                     return {};
-                return Inset { interpolated_top.release_nonnull(), interpolated_right.release_nonnull(), interpolated_bottom.release_nonnull(), interpolated_left.release_nonnull() };
+
+                return Inset { interpolated_top.release_nonnull(), interpolated_right.release_nonnull(), interpolated_bottom.release_nonnull(), interpolated_left.release_nonnull(), interpolated_border_radius.release_nonnull() };
             },
             [&](Circle const& from_circle) -> Optional<BasicShape> {
                 // If both shapes are the same type, that type is ellipse() or circle(), and the radiuses are specified
@@ -1698,38 +1657,51 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
             return {};
         return BorderRadiusStyleValue::create(interpolated_horizontal_radius.release_nonnull(), interpolated_vertical_radius.release_nonnull());
     }
+    case StyleValue::Type::BorderRadiusRect: {
+        CalculationContext border_radius_rect_computation_context = {
+            .percentages_resolve_as = ValueType::Length,
+            .accepted_ranges_by_type = { { ValueType::Length, { 0, AK::NumericLimits<float>::max() } }, { ValueType::Percentage, { 0, AK::NumericLimits<float>::max() } } },
+        };
+
+        auto const& from_top_left = from.as_border_radius_rect().top_left();
+        auto const& to_top_left = to.as_border_radius_rect().top_left();
+
+        auto const& from_top_right = from.as_border_radius_rect().top_right();
+        auto const& to_top_right = to.as_border_radius_rect().top_right();
+
+        auto const& from_bottom_right = from.as_border_radius_rect().bottom_right();
+        auto const& to_bottom_right = to.as_border_radius_rect().bottom_right();
+
+        auto const& from_bottom_left = from.as_border_radius_rect().bottom_left();
+        auto const& to_bottom_left = to.as_border_radius_rect().bottom_left();
+
+        auto interpolated_top_left = interpolate_value_impl(element, border_radius_rect_computation_context, from_top_left, to_top_left, delta, allow_discrete);
+        auto interpolated_top_right = interpolate_value_impl(element, border_radius_rect_computation_context, from_top_right, to_top_right, delta, allow_discrete);
+        auto interpolated_bottom_right = interpolate_value_impl(element, border_radius_rect_computation_context, from_bottom_right, to_bottom_right, delta, allow_discrete);
+        auto interpolated_bottom_left = interpolate_value_impl(element, border_radius_rect_computation_context, from_bottom_left, to_bottom_left, delta, allow_discrete);
+
+        if (!interpolated_top_left || !interpolated_top_right || !interpolated_bottom_right || !interpolated_bottom_left)
+            return {};
+
+        return BorderRadiusRectStyleValue::create(interpolated_top_left.release_nonnull(), interpolated_top_right.release_nonnull(), interpolated_bottom_right.release_nonnull(), interpolated_bottom_left.release_nonnull());
+    }
     case StyleValue::Type::Color: {
+        // NB: Called during style interpolation.
         ColorResolutionContext color_resolution_context {};
-        if (auto node = element.layout_node()) {
-            color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*element.layout_node());
+        if (auto node = element.unsafe_layout_node()) {
+            color_resolution_context = ColorResolutionContext::for_layout_node_with_style(*element.unsafe_layout_node());
         }
 
-        auto color_syntax = ColorSyntax::Legacy;
-        if ((!from.is_keyword() && from.as_color().color_syntax() == ColorSyntax::Modern)
-            || (!to.is_keyword() && to.as_color().color_syntax() == ColorSyntax::Modern)) {
-            color_syntax = ColorSyntax::Modern;
-        }
-
-        // FIXME: If we aren't able to resolve the colors here, we should postpone interpolation until we can (perhaps
-        //        by creating something similar to a ColorMixStyleValue).
-        auto from_color = from.to_color(color_resolution_context);
-        auto to_color = to.to_color(color_resolution_context);
-
-        Color interpolated_color = Color::Black;
-
-        if (from_color.has_value() && to_color.has_value())
-            interpolated_color = interpolate_color(from_color.value(), to_color.value(), delta, color_syntax);
-
-        return ColorStyleValue::create_from_color(interpolated_color, ColorSyntax::Modern);
+        if (auto interpolated = interpolate_color(from, to, delta, {}, color_resolution_context))
+            return interpolated;
+        return ColorStyleValue::create_from_color(Color::Black, ColorSyntax::Modern);
     }
     case StyleValue::Type::Edge: {
-        auto resolved_from = from.as_edge().resolved_value(calculation_context);
-        auto resolved_to = to.as_edge().resolved_value(calculation_context);
-        auto const& edge = delta >= 0.5f ? resolved_to->edge() : resolved_from->edge();
-        auto const& from_offset = resolved_from->offset();
-        auto const& to_offset = resolved_to->offset();
-        if (auto interpolated_value = interpolate_length_percentage(calculation_context, from_offset, to_offset, delta); interpolated_value.has_value())
-            return EdgeStyleValue::create(edge, *interpolated_value);
+        auto const& from_offset = from.as_edge().offset();
+        auto const& to_offset = to.as_edge().offset();
+
+        if (auto interpolated_value = interpolate_value_impl(element, calculation_context, from_offset, to_offset, delta, allow_discrete))
+            return EdgeStyleValue::create({}, interpolated_value);
 
         return {};
     }
@@ -1740,30 +1712,51 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
         if (!interpolated_font_style)
             return {};
         if (from_font_style.angle() && to_font_style.angle()) {
-            auto interpolated_angle = interpolate_value(element, calculation_context, *from_font_style.angle(), *to_font_style.angle(), delta, allow_discrete);
+            auto interpolated_angle = interpolate_value(element, { .accepted_ranges_by_type = { { ValueType::Angle, { -90, 90 } } } }, *from_font_style.angle(), *to_font_style.angle(), delta, allow_discrete);
             if (!interpolated_angle)
                 return {};
-            return FontStyleStyleValue::create(*keyword_to_font_style(interpolated_font_style->to_keyword()), interpolated_angle);
+            return FontStyleStyleValue::create(*keyword_to_font_style_keyword(interpolated_font_style->to_keyword()), interpolated_angle);
         }
 
-        return FontStyleStyleValue::create(*keyword_to_font_style(interpolated_font_style->to_keyword()));
+        return FontStyleStyleValue::create(*keyword_to_font_style_keyword(interpolated_font_style->to_keyword()));
+    }
+    case StyleValue::Type::Flex: {
+        auto interpolated_value = interpolate_raw(from.as_flex().flex().to_fr(), to.as_flex().flex().to_fr(), delta, calculation_context.accepted_ranges_by_type.get(ValueType::Flex));
+        return FlexStyleValue::create(Flex::make_fr(interpolated_value));
+    }
+    case StyleValue::Type::Function: {
+        auto const& from_function = from.as_function();
+        auto const& to_function = to.as_function();
+
+        if (from_function.name() != to_function.name())
+            return {};
+
+        auto interpolated_value = interpolate_value(element, calculation_context, from_function.value(), to_function.value(), delta, allow_discrete);
+        if (!interpolated_value)
+            return {};
+
+        return FunctionStyleValue::create(from_function.name(), interpolated_value.release_nonnull());
     }
     case StyleValue::Type::Integer: {
         // https://drafts.csswg.org/css-values/#combine-integers
         // Interpolation of <integer> is defined as Vresult = round((1 - p) × VA + p × VB);
         // that is, interpolation happens in the real number space as for <number>s, and the result is converted to an <integer> by rounding to the nearest integer.
-        auto interpolated_value = interpolate_raw(from.as_integer().integer(), to.as_integer().integer(), delta, calculation_context.accepted_type_ranges.get(ValueType::Integer));
+        auto interpolated_value = interpolate_raw(from.as_integer().integer(), to.as_integer().integer(), delta, calculation_context.accepted_ranges_by_type.get(ValueType::Integer));
         return IntegerStyleValue::create(interpolated_value);
     }
     case StyleValue::Type::Length: {
         auto const& from_length = from.as_length().length();
         auto const& to_length = to.as_length().length();
-        auto interpolated_value = interpolate_raw(from_length.raw_value(), to_length.raw_value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Length));
+        auto interpolated_value = interpolate_raw(from_length.raw_value(), to_length.raw_value(), delta, calculation_context.accepted_ranges_by_type.get(ValueType::Length));
         return LengthStyleValue::create(Length(interpolated_value, from_length.unit()));
     }
     case StyleValue::Type::Number: {
-        auto interpolated_value = interpolate_raw(from.as_number().number(), to.as_number().number(), delta, calculation_context.accepted_type_ranges.get(ValueType::Number));
+        auto interpolated_value = interpolate_raw(from.as_number().number(), to.as_number().number(), delta, calculation_context.accepted_ranges_by_type.get(ValueType::Number));
         return NumberStyleValue::create(interpolated_value);
+    }
+    case StyleValue::Type::OpacityValue: {
+        auto interpolated_value = interpolate_raw(from.as_opacity_value().resolved(), to.as_opacity_value().resolved(), delta, NumericRange { .min = 0, .max = 1 });
+        return OpacityValueStyleValue::create(NumberStyleValue::create(interpolated_value));
     }
     case StyleValue::Type::OpenTypeTagged: {
         auto& from_open_type_tagged = from.as_open_type_tagged();
@@ -1776,7 +1769,7 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
         return OpenTypeTaggedStyleValue::create(OpenTypeTaggedStyleValue::Mode::FontVariationSettings, from_open_type_tagged.tag(), interpolated_value.release_nonnull());
     }
     case StyleValue::Type::Percentage: {
-        auto interpolated_value = interpolate_raw(from.as_percentage().percentage().value(), to.as_percentage().percentage().value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Percentage));
+        auto interpolated_value = interpolate_raw(from.as_percentage().percentage().value(), to.as_percentage().percentage().value(), delta, calculation_context.accepted_ranges_by_type.get(ValueType::Percentage));
         return PercentageStyleValue::create(Percentage(interpolated_value));
     }
     case StyleValue::Type::Position: {
@@ -1803,11 +1796,18 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
         if (any_of(from_components, is_radial_extent) || any_of(to_components, is_radial_extent))
             return {};
 
+        CalculationContext radial_size_calculation_context {
+            .percentages_resolve_as = ValueType::Length,
+            .accepted_ranges_by_type = {
+                { ValueType::Length, { 0, AK::NumericLimits<float>::max() } },
+            }
+        };
+
         if (from_components.size() == 1 && to_components.size() == 1) {
             auto const& from_component = from_components[0].get<NonnullRefPtr<StyleValue const>>();
             auto const& to_component = to_components[0].get<NonnullRefPtr<StyleValue const>>();
 
-            auto interpolated_value = interpolate_value(element, calculation_context, from_component, to_component, delta, allow_discrete);
+            auto interpolated_value = interpolate_value(element, radial_size_calculation_context, from_component, to_component, delta, allow_discrete);
 
             if (!interpolated_value)
                 return {};
@@ -1821,8 +1821,8 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
         auto const& to_horizontal_component = to_components[0].get<NonnullRefPtr<StyleValue const>>();
         auto const& to_vertical_component = to_components.size() > 1 ? to_components[1].get<NonnullRefPtr<StyleValue const>>() : to_horizontal_component;
 
-        auto interpolated_horizontal = interpolate_value(element, calculation_context, from_horizontal_component, to_horizontal_component, delta, allow_discrete);
-        auto interpolated_vertical = interpolate_value(element, calculation_context, from_vertical_component, to_vertical_component, delta, allow_discrete);
+        auto interpolated_horizontal = interpolate_value(element, radial_size_calculation_context, from_horizontal_component, to_horizontal_component, delta, allow_discrete);
+        auto interpolated_vertical = interpolate_value(element, radial_size_calculation_context, from_vertical_component, to_vertical_component, delta, allow_discrete);
 
         if (!interpolated_horizontal || !interpolated_vertical)
             return {};
@@ -1830,8 +1830,8 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
         return RadialSizeStyleValue::create({ interpolated_horizontal.release_nonnull(), interpolated_vertical.release_nonnull() });
     }
     case StyleValue::Type::Ratio: {
-        auto from_ratio = from.as_ratio().ratio();
-        auto to_ratio = to.as_ratio().ratio();
+        auto from_ratio = from.as_ratio().resolved();
+        auto to_ratio = to.as_ratio().resolved();
 
         // https://drafts.csswg.org/css-values/#combine-ratio
         // If either <ratio> is degenerate, the values cannot be interpolated.
@@ -1845,30 +1845,22 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
         // result as the first value and 1 as the second value.
         auto from_number = log(from_ratio.value());
         auto to_number = log(to_ratio.value());
-        auto interpolated_value = interpolate_raw(from_number, to_number, delta, calculation_context.accepted_type_ranges.get(ValueType::Ratio));
-        return RatioStyleValue::create(Ratio(pow(M_E, interpolated_value)));
+        auto interpolated_value = interpolate_raw(from_number, to_number, delta, calculation_context.accepted_ranges_by_type.get(ValueType::Ratio));
+        return RatioStyleValue::create(NumberStyleValue::create(pow(M_E, interpolated_value)), NumberStyleValue::create(1));
     }
     case StyleValue::Type::Rect: {
-        auto from_rect = from.as_rect().rect();
-        auto to_rect = to.as_rect().rect();
+        auto const& from_rect = from.as_rect();
+        auto const& to_rect = to.as_rect();
 
-        if (from_rect.top_edge.is_auto() != to_rect.top_edge.is_auto() || from_rect.right_edge.is_auto() != to_rect.right_edge.is_auto() || from_rect.bottom_edge.is_auto() != to_rect.bottom_edge.is_auto() || from_rect.left_edge.is_auto() != to_rect.left_edge.is_auto())
+        auto interpolated_top = interpolate_value_impl(element, calculation_context, from_rect.top(), to_rect.top(), delta, allow_discrete);
+        auto interpolated_right = interpolate_value_impl(element, calculation_context, from_rect.right(), to_rect.right(), delta, allow_discrete);
+        auto interpolated_bottom = interpolate_value_impl(element, calculation_context, from_rect.bottom(), to_rect.bottom(), delta, allow_discrete);
+        auto interpolated_left = interpolate_value_impl(element, calculation_context, from_rect.left(), to_rect.left(), delta, allow_discrete);
+
+        if (!interpolated_top || !interpolated_right || !interpolated_bottom || !interpolated_left)
             return {};
 
-        auto interpolate_length_or_auto = [](LengthOrAuto const& from, LengthOrAuto const& to, CalculationContext const& calculation_context, float delta) {
-            if (from.is_auto() && to.is_auto())
-                return LengthOrAuto::make_auto();
-            // FIXME: Actually handle the units not matching.
-            auto interpolated_value = interpolate_raw(from.length().raw_value(), to.length().raw_value(), delta, calculation_context.accepted_type_ranges.get(ValueType::Rect));
-            return LengthOrAuto { Length { interpolated_value, from.length().unit() } };
-        };
-
-        return RectStyleValue::create({
-            interpolate_length_or_auto(from_rect.top_edge, to_rect.top_edge, calculation_context, delta),
-            interpolate_length_or_auto(from_rect.right_edge, to_rect.right_edge, calculation_context, delta),
-            interpolate_length_or_auto(from_rect.bottom_edge, to_rect.bottom_edge, calculation_context, delta),
-            interpolate_length_or_auto(from_rect.left_edge, to_rect.left_edge, calculation_context, delta),
-        });
+        return RectStyleValue::create(interpolated_top.release_nonnull(), interpolated_right.release_nonnull(), interpolated_bottom.release_nonnull(), interpolated_left.release_nonnull());
     }
     case StyleValue::Type::TextIndent: {
         auto& from_text_indent = from.as_text_indent();
@@ -1962,7 +1954,7 @@ static RefPtr<StyleValue const> interpolate_value_impl(DOM::Element& element, Ca
         auto from_normalized_value = normalized_super_ellipse_half_corner(from.as_superellipse().parameter());
         auto to_normalized_value = normalized_super_ellipse_half_corner(to.as_superellipse().parameter());
 
-        auto interpolated_value = interpolate_raw(from_normalized_value, to_normalized_value, delta, AcceptedTypeRange { .min = 0, .max = 1 });
+        auto interpolated_value = interpolate_raw(from_normalized_value, to_normalized_value, delta, NumericRange { .min = 0, .max = 1 });
 
         return SuperellipseStyleValue::create(NumberStyleValue::create(interpolation_value_to_super_ellipse_parameter(interpolated_value)));
     }
@@ -2039,6 +2031,177 @@ RefPtr<StyleValue const> interpolate_repeatable_list(DOM::Element& element, Calc
     return StyleValueList::create(move(interpolated_values), from_list->as_value_list().separator());
 }
 
+// https://drafts.csswg.org/filter-effects/#accumulation
+Vector<FilterValue> accumulate_filter_function(FilterValueListStyleValue const& underlying_list, FilterValueListStyleValue const& animated_list)
+{
+    // Accumulation of <filter-value-list>s follows the same matching and extending rules as interpolation, falling
+    // back to replace behavior if the lists do not match. However instead of interpolating the matching
+    // <filter-function> pairs, their arguments are arithmetically added together - except in the case of
+    // <filter-function>s whose initial value for interpolation is 1, which combine using one-based addition:
+    // Vresult = Va + Vb - 1
+
+    auto initial_value_for = [](FilterValue const& value) {
+        return value.visit(
+            [&](FilterOperation::Blur const&) -> FilterValue { return FilterOperation::Blur { LengthStyleValue::create(Length::make_px(0)) }; },
+            [&](FilterOperation::DropShadow const&) -> FilterValue {
+                return FilterOperation::DropShadow {
+                    .offset_x = LengthStyleValue::create(Length::make_px(0)),
+                    .offset_y = LengthStyleValue::create(Length::make_px(0)),
+                    .radius = LengthStyleValue::create(Length::make_px(0)),
+                    .color = nullptr
+                };
+            },
+            [&](FilterOperation::HueRotate const&) -> FilterValue {
+                return FilterOperation::HueRotate { AngleStyleValue::create(Angle::make_degrees(0)) };
+            },
+            [&](FilterOperation::Color const& color) -> FilterValue {
+                auto default_value_for_accumulation = [&]() {
+                    switch (color.operation) {
+                    case Gfx::ColorFilterType::Grayscale:
+                    case Gfx::ColorFilterType::Invert:
+                    case Gfx::ColorFilterType::Sepia:
+                        return 0.0;
+                    case Gfx::ColorFilterType::Brightness:
+                    case Gfx::ColorFilterType::Contrast:
+                    case Gfx::ColorFilterType::Opacity:
+                    case Gfx::ColorFilterType::Saturate:
+                        return 1.0;
+                    }
+                    VERIFY_NOT_REACHED();
+                }();
+                return FilterOperation::Color { .operation = color.operation, .amount = NumberStyleValue::create(default_value_for_accumulation) };
+            },
+            [&](auto&) -> FilterValue {
+                VERIFY_NOT_REACHED();
+            });
+    };
+
+    auto accumulate_filter = [](FilterValue const& underlying, FilterValue const& animated) -> Optional<FilterValue> {
+        return underlying.visit(
+            [&](FilterOperation::Blur const& underlying_blur) -> Optional<FilterValue> {
+                if (!animated.has<FilterOperation::Blur>())
+                    return {};
+                auto const& animated_blur = animated.get<FilterOperation::Blur>();
+
+                return FilterOperation::Blur { .radius = LengthStyleValue::create(Length::make_px(underlying_blur.resolved_radius() + animated_blur.resolved_radius())) };
+            },
+            [&](FilterOperation::HueRotate const& underlying_rotate) -> Optional<FilterValue> {
+                if (!animated.has<FilterOperation::HueRotate>())
+                    return {};
+                auto const& animated_rotate = animated.get<FilterOperation::HueRotate>();
+
+                return FilterOperation::HueRotate { .angle = AngleStyleValue::create(Angle::make_degrees(underlying_rotate.angle_degrees() + animated_rotate.angle_degrees())) };
+            },
+            [&](FilterOperation::Color const& underlying_color) -> Optional<FilterValue> {
+                if (!animated.has<FilterOperation::Color>())
+                    return {};
+                auto const& animated_color = animated.get<FilterOperation::Color>();
+                if (underlying_color.operation != animated_color.operation)
+                    return {};
+
+                auto underlying_amount = underlying_color.resolved_amount();
+                auto animated_amount = animated_color.resolved_amount();
+
+                double accumulated;
+                switch (underlying_color.operation) {
+                case Gfx::ColorFilterType::Brightness:
+                case Gfx::ColorFilterType::Contrast:
+                case Gfx::ColorFilterType::Opacity:
+                case Gfx::ColorFilterType::Saturate:
+                    accumulated = underlying_amount + animated_amount - 1.0;
+                    break;
+                case Gfx::ColorFilterType::Grayscale:
+                case Gfx::ColorFilterType::Invert:
+                case Gfx::ColorFilterType::Sepia:
+                    accumulated = underlying_amount + animated_amount;
+                    break;
+                default:
+                    VERIFY_NOT_REACHED();
+                }
+
+                return FilterOperation::Color {
+                    .operation = underlying_color.operation,
+                    .amount = NumberStyleValue::create(accumulated)
+                };
+            },
+            [&](FilterOperation::DropShadow const& underlying_shadow) -> Optional<FilterValue> {
+                if (!animated.has<FilterOperation::DropShadow>())
+                    return {};
+                auto const& animated_shadow = animated.get<FilterOperation::DropShadow>();
+
+                auto add_lengths = [](NonnullRefPtr<StyleValue const> const& a, NonnullRefPtr<StyleValue const> const& b) -> NonnullRefPtr<StyleValue const> {
+                    auto a_value = Length::from_style_value(a, {}).absolute_length_to_px_without_rounding();
+                    auto b_value = Length::from_style_value(b, {}).absolute_length_to_px_without_rounding();
+
+                    return LengthStyleValue::create(Length::make_px(a_value + b_value));
+                };
+
+                auto offset_x = add_lengths(underlying_shadow.offset_x, animated_shadow.offset_x);
+                auto offset_y = add_lengths(underlying_shadow.offset_y, animated_shadow.offset_y);
+                RefPtr<StyleValue const> accumulated_radius;
+                if (underlying_shadow.radius || animated_shadow.radius) {
+                    auto underlying_radius = underlying_shadow.radius ? Length::from_style_value(*underlying_shadow.radius, {}).absolute_length_to_px_without_rounding() : 0;
+                    auto animated_radius = animated_shadow.radius ? Length::from_style_value(*animated_shadow.radius, {}).absolute_length_to_px_without_rounding() : 0;
+                    accumulated_radius = LengthStyleValue::create(Length::make_px(underlying_radius + animated_radius));
+                }
+
+                RefPtr<StyleValue const> accumulated_color = animated_shadow.color;
+                if (underlying_shadow.color && animated_shadow.color) {
+                    ColorResolutionContext color_resolution_context {};
+                    auto underlying_color = underlying_shadow.color->to_color(color_resolution_context);
+                    auto animated_color = animated_shadow.color->to_color(color_resolution_context);
+                    if (underlying_color.has_value() && animated_color.has_value()) {
+                        auto accumulated = Color(
+                            min(255, underlying_color->red() + animated_color->red()),
+                            min(255, underlying_color->green() + animated_color->green()),
+                            min(255, underlying_color->blue() + animated_color->blue()),
+                            min(255, underlying_color->alpha() + animated_color->alpha()));
+                        accumulated_color = ColorStyleValue::create_from_color(accumulated, ColorSyntax::Legacy);
+                    }
+                }
+
+                return FilterOperation::DropShadow {
+                    .offset_x = offset_x,
+                    .offset_y = offset_y,
+                    .radius = accumulated_radius,
+                    .color = accumulated_color
+                };
+            },
+            [&](URL const&) -> Optional<FilterValue> {
+                return {};
+            });
+    };
+
+    // Extend shorter list with initial values
+    size_t max_size = max(underlying_list.size(), animated_list.size());
+    Vector<FilterValue> extended_underlying;
+    Vector<FilterValue> extended_animated;
+
+    for (size_t i = 0; i < max_size; ++i) {
+        if (i < underlying_list.size()) {
+            extended_underlying.append(underlying_list.filter_value_list()[i]);
+        } else {
+            extended_underlying.append(initial_value_for(animated_list.filter_value_list()[i]));
+        }
+
+        if (i < animated_list.size()) {
+            extended_animated.append(animated_list.filter_value_list()[i]);
+        } else {
+            extended_animated.append(initial_value_for(underlying_list.filter_value_list()[i]));
+        }
+    }
+
+    Vector<FilterValue> result;
+    result.ensure_capacity(max_size);
+    for (size_t i = 0; i < max_size; ++i) {
+        auto accumulated = accumulate_filter(extended_underlying[i], extended_animated[i]);
+        if (!accumulated.has_value())
+            return {};
+        result.unchecked_append(accumulated.release_value());
+    }
+    return result;
+}
+
 RefPtr<StyleValue const> interpolate_value(DOM::Element& element, CalculationContext const& calculation_context, StyleValue const& from, StyleValue const& to, float delta, AllowDiscrete allow_discrete)
 {
     if (auto result = interpolate_value_impl(element, calculation_context, from, to, delta, allow_discrete))
@@ -2052,8 +2215,113 @@ static T composite_raw_values(T underlying_raw_value, T animated_raw_value)
     return underlying_raw_value + animated_raw_value;
 }
 
-RefPtr<StyleValue const> composite_value(StyleValue const& underlying_value, StyleValue const& animated_value, Bindings::CompositeOperation composite_operation)
+static Optional<GridTrackSizeList> composite_grid_track_size_list(PropertyID property_id, CalculationContext const& calculation_context, GridTrackSizeList const& underlying, GridTrackSizeList const& animated, Bindings::CompositeOperation composite_operation)
 {
+    auto composite_grid_size = [&](GridSize const& underlying_grid_size, GridSize const& animated_grid_size) -> Optional<GridSize> {
+        if (auto composited_value = composite_value(property_id, underlying_grid_size.style_value(), animated_grid_size.style_value(), composite_operation))
+            return GridSize { *composited_value };
+
+        return {};
+    };
+
+    auto expanded_underlying = expand_grid_tracks_and_lines(underlying);
+    auto expanded_animated = expand_grid_tracks_and_lines(animated);
+
+    if (expanded_underlying.tracks.size() != expanded_animated.tracks.size())
+        return {};
+
+    GridTrackSizeList result;
+    for (size_t i = 0; i < expanded_underlying.tracks.size(); ++i) {
+        auto& underlying_track = expanded_underlying.tracks[i];
+        auto& animated_track = expanded_animated.tracks[i];
+        auto composited_line_names = move(expanded_animated.line_names[i]);
+
+        if (underlying_track.is_repeat() || animated_track.is_repeat()) {
+            if (!underlying_track.is_repeat() || !animated_track.is_repeat())
+                return {};
+
+            auto underlying_repeat = underlying_track.repeat();
+            auto animated_repeat = animated_track.repeat();
+            if (!underlying_repeat.is_fixed() || !animated_repeat.is_fixed())
+                return {};
+            if (underlying_repeat.repeat_count() != animated_repeat.repeat_count() || underlying_repeat.grid_track_size_list().track_list().size() != animated_repeat.grid_track_size_list().track_list().size())
+                return {};
+
+            auto composited_repeat_grid_tracks = composite_grid_track_size_list(property_id, calculation_context, underlying_repeat.grid_track_size_list(), animated_repeat.grid_track_size_list(), composite_operation);
+            if (!composited_repeat_grid_tracks.has_value())
+                return {};
+
+            ExplicitGridTrack composited_grid_track { GridRepeat { underlying_repeat.type(), move(*composited_repeat_grid_tracks), IntegerStyleValue::create(underlying_repeat.repeat_count()) } };
+            append_grid_track_with_line_names(result, move(composited_grid_track), move(composited_line_names));
+            continue;
+        }
+
+        if (underlying_track.is_minmax() && animated_track.is_minmax()) {
+            auto underlying_minmax = underlying_track.minmax();
+            auto animated_minmax = animated_track.minmax();
+            auto composited_min = composite_grid_size(underlying_minmax.min_grid_size(), animated_minmax.min_grid_size());
+            auto composited_max = composite_grid_size(underlying_minmax.max_grid_size(), animated_minmax.max_grid_size());
+            ExplicitGridTrack composited_grid_track { GridMinMax {
+                composited_min.value_or(animated_minmax.min_grid_size()),
+                composited_max.value_or(animated_minmax.max_grid_size()) } };
+            append_grid_track_with_line_names(result, move(composited_grid_track), move(composited_line_names));
+            continue;
+        }
+        if (underlying_track.is_default() && animated_track.is_default()) {
+            auto const& underlying_grid_size = underlying_track.grid_size();
+            auto const& animated_grid_size = animated_track.grid_size();
+            auto composited_grid_size_result = composite_grid_size(underlying_grid_size, animated_grid_size);
+            if (composited_grid_size_result.has_value()) {
+                ExplicitGridTrack composited_grid_track { move(*composited_grid_size_result) };
+                append_grid_track_with_line_names(result, move(composited_grid_track), move(composited_line_names));
+                continue;
+            }
+        }
+        append_grid_track_with_line_names(result, animated_track, move(composited_line_names));
+    }
+    return result;
+}
+
+static RefPtr<StyleValue const> composite_mixed_value(StyleValue const& underlying_value, StyleValue const& animated_value, CalculationContext const& calculation_context)
+{
+    // https://drafts.csswg.org/css-values-4/#combine-mixed
+    // Addition of <percentage> is defined the same as interpolation except by adding each component rather than interpolating it.
+    auto underlying_value_type = get_value_type_of_numeric_style_value(underlying_value, calculation_context);
+    auto animated_value_type = get_value_type_of_numeric_style_value(animated_value, calculation_context);
+
+    if (underlying_value_type.has_value() && underlying_value_type == animated_value_type) {
+        // The computed value of a percentage-dimension mix is defined as
+        // FIXME: a computed dimension if the percentage component is zero or is defined specifically to compute to a dimension value
+        // a computed percentage if the dimension component is zero
+        // a computed calc() expression otherwise
+        if (auto const* from_dimension_value = as_if<DimensionStyleValue>(underlying_value); from_dimension_value && animated_value.type() == StyleValue::Type::Percentage) {
+            auto dimension_component = from_dimension_value->raw_value();
+            auto percentage_component = animated_value.as_percentage().raw_value();
+            if (dimension_component == 0.f)
+                return PercentageStyleValue::create(Percentage { percentage_component });
+        } else if (auto const* to_dimension_value = as_if<DimensionStyleValue>(animated_value); to_dimension_value && underlying_value.type() == StyleValue::Type::Percentage) {
+            auto dimension_component = to_dimension_value->raw_value();
+            auto percentage_component = underlying_value.as_percentage().raw_value();
+            if (dimension_component == 0)
+                return PercentageStyleValue::create(Percentage { percentage_component });
+        }
+
+        auto underlying_node = CalculationNode::from_style_value(underlying_value, calculation_context);
+        auto animated_node = CalculationNode::from_style_value(animated_value, calculation_context);
+
+        return CalculatedStyleValue::create(
+            simplify_a_calculation_tree(SumCalculationNode::create({ underlying_node, animated_node }), calculation_context, {}),
+            *underlying_node->numeric_type()->added_to(*animated_node->numeric_type()),
+            calculation_context);
+    }
+
+    return {};
+}
+
+RefPtr<StyleValue const> composite_value(PropertyID property_id, StyleValue const& underlying_value, StyleValue const& animated_value, Bindings::CompositeOperation composite_operation)
+{
+    auto calculation_context = CalculationContext::for_property(PropertyNameAndID::from_id(property_id));
+
     auto composite_dimension_value = [](StyleValue const& underlying_value, StyleValue const& animated_value) -> Optional<double> {
         auto const& underlying_dimension = as<DimensionStyleValue>(underlying_value);
         auto const& animated_dimension = as<DimensionStyleValue>(animated_value);
@@ -2063,9 +2331,8 @@ RefPtr<StyleValue const> composite_value(StyleValue const& underlying_value, Sty
     if (composite_operation == Bindings::CompositeOperation::Replace)
         return {};
 
-    // FIXME: Composite mixed values where possible
-    if (underlying_value.type() != animated_value.type())
-        return {};
+    if (underlying_value.type() != animated_value.type() || underlying_value.is_calculated() || animated_value.is_calculated())
+        return composite_mixed_value(underlying_value, animated_value, calculation_context);
 
     switch (underlying_value.type()) {
     case StyleValue::Type::Angle: {
@@ -2075,25 +2342,174 @@ RefPtr<StyleValue const> composite_value(StyleValue const& underlying_value, Sty
         VERIFY(underlying_value.as_angle().angle().unit() == animated_value.as_angle().angle().unit());
         return AngleStyleValue::create({ *result, underlying_value.as_angle().angle().unit() });
     }
+    case StyleValue::Type::BasicShape: {
+        auto const& underlying_basic_shape = underlying_value.as_basic_shape();
+        auto const& animated_basic_shape = animated_value.as_basic_shape();
+
+        if (underlying_basic_shape.basic_shape().index() != animated_basic_shape.basic_shape().index())
+            return {};
+
+        return underlying_basic_shape.basic_shape().visit(
+            [&](Inset const& underlying_inset) -> RefPtr<StyleValue const> {
+                auto const& animated_inset = animated_basic_shape.basic_shape().get<Inset>();
+                auto composited_top = composite_value(property_id, underlying_inset.top, animated_inset.top, composite_operation);
+                auto composited_right = composite_value(property_id, underlying_inset.right, animated_inset.right, composite_operation);
+                auto composited_bottom = composite_value(property_id, underlying_inset.bottom, animated_inset.bottom, composite_operation);
+                auto composited_left = composite_value(property_id, underlying_inset.left, animated_inset.left, composite_operation);
+                auto composited_border_radius = composite_value(property_id, underlying_inset.border_radius, animated_inset.border_radius, composite_operation);
+                if (!composited_top || !composited_right || !composited_bottom || !composited_left || !composited_border_radius)
+                    return {};
+
+                return BasicShapeStyleValue::create(Inset { composited_top.release_nonnull(), composited_right.release_nonnull(), composited_bottom.release_nonnull(), composited_left.release_nonnull(), composited_border_radius.release_nonnull() });
+            },
+            [&](Circle const& underlying_circle) -> RefPtr<StyleValue const> {
+                auto const& animated_circle = animated_basic_shape.basic_shape().get<Circle>();
+                auto composited_radius = composite_value(property_id, underlying_circle.radius, animated_circle.radius, composite_operation);
+                if (!composited_radius)
+                    return {};
+
+                RefPtr<StyleValue const> composited_position;
+                if (underlying_circle.position || animated_circle.position) {
+                    auto const& underlying_position_with_default = underlying_circle.position ? ValueComparingNonnullRefPtr<StyleValue const> { *underlying_circle.position } : PositionStyleValue::create_computed_center();
+                    auto const& animated_position_with_default = animated_circle.position ? ValueComparingNonnullRefPtr<StyleValue const> { *animated_circle.position } : PositionStyleValue::create_computed_center();
+
+                    composited_position = composite_value(property_id, underlying_position_with_default, animated_position_with_default, composite_operation);
+
+                    if (!composited_position)
+                        return {};
+                }
+
+                return BasicShapeStyleValue::create(Circle { composited_radius.release_nonnull(), composited_position });
+            },
+            [&](Ellipse const& underlying_ellipse) -> RefPtr<StyleValue const> {
+                auto const& animated_ellipse = animated_basic_shape.basic_shape().get<Ellipse>();
+                auto composited_radius = composite_value(property_id, underlying_ellipse.radius, animated_ellipse.radius, composite_operation);
+                if (!composited_radius)
+                    return {};
+
+                RefPtr<StyleValue const> composited_position;
+                if (underlying_ellipse.position || animated_ellipse.position) {
+                    auto const& underlying_position_with_default = underlying_ellipse.position ? ValueComparingNonnullRefPtr<StyleValue const> { *underlying_ellipse.position } : PositionStyleValue::create_computed_center();
+                    auto const& animated_position_with_default = animated_ellipse.position ? ValueComparingNonnullRefPtr<StyleValue const> { *animated_ellipse.position } : PositionStyleValue::create_computed_center();
+
+                    composited_position = composite_value(property_id, underlying_position_with_default, animated_position_with_default, composite_operation);
+
+                    if (!composited_position)
+                        return {};
+                }
+
+                return BasicShapeStyleValue::create(Ellipse { composited_radius.release_nonnull(), composited_position });
+            },
+            [&](Polygon const& underlying_polygon) -> RefPtr<StyleValue const> {
+                auto const& animated_polygon = animated_basic_shape.basic_shape().get<Polygon>();
+                if (underlying_polygon.fill_rule != animated_polygon.fill_rule)
+                    return {};
+
+                if (underlying_polygon.points.size() != animated_polygon.points.size())
+                    return {};
+
+                Vector<Polygon::Point> composited_points;
+                composited_points.ensure_capacity(underlying_polygon.points.size());
+                for (size_t i = 0; i < underlying_polygon.points.size(); i++) {
+                    auto const& underlying_point = underlying_polygon.points[i];
+                    auto const& animated_point = animated_polygon.points[i];
+                    auto composited_point_x = composite_value(property_id, underlying_point.x, animated_point.x, composite_operation);
+                    auto composited_point_y = composite_value(property_id, underlying_point.y, animated_point.y, composite_operation);
+                    if (!composited_point_x || !composited_point_y)
+                        return {};
+                    composited_points.unchecked_append(Polygon::Point { *composited_point_x, *composited_point_y });
+                }
+
+                return BasicShapeStyleValue::create(Polygon { underlying_polygon.fill_rule, move(composited_points) });
+            },
+            [&](Xywh const&) -> RefPtr<StyleValue const> {
+                // xywh() should have been absolutized into inset() before now
+                VERIFY_NOT_REACHED();
+            },
+            [&](Rect const&) -> RefPtr<StyleValue const> {
+                // rect() should have been absolutized into inset() before now
+                VERIFY_NOT_REACHED();
+            },
+            [&](Path const&) -> RefPtr<StyleValue const> {
+                // FIXME: Implement composition for path()
+                return {};
+            });
+    }
     case StyleValue::Type::BorderImageSlice: {
         auto& underlying_border_image_slice_value = underlying_value.as_border_image_slice();
         auto& animated_border_image_slice_value = animated_value.as_border_image_slice();
         if (underlying_border_image_slice_value.fill() != animated_border_image_slice_value.fill())
             return {};
-        auto composited_top = composite_value(underlying_border_image_slice_value.top(), animated_border_image_slice_value.top(), composite_operation);
-        auto composited_right = composite_value(underlying_border_image_slice_value.right(), animated_border_image_slice_value.right(), composite_operation);
-        auto composited_bottom = composite_value(underlying_border_image_slice_value.bottom(), animated_border_image_slice_value.bottom(), composite_operation);
-        auto composited_left = composite_value(underlying_border_image_slice_value.left(), animated_border_image_slice_value.left(), composite_operation);
+        auto composited_top = composite_value(property_id, underlying_border_image_slice_value.top(), animated_border_image_slice_value.top(), composite_operation);
+        auto composited_right = composite_value(property_id, underlying_border_image_slice_value.right(), animated_border_image_slice_value.right(), composite_operation);
+        auto composited_bottom = composite_value(property_id, underlying_border_image_slice_value.bottom(), animated_border_image_slice_value.bottom(), composite_operation);
+        auto composited_left = composite_value(property_id, underlying_border_image_slice_value.left(), animated_border_image_slice_value.left(), composite_operation);
         if (!composited_top || !composited_right || !composited_bottom || !composited_left)
             return {};
         return BorderImageSliceStyleValue::create(composited_top.release_nonnull(), composited_right.release_nonnull(), composited_bottom.release_nonnull(), composited_left.release_nonnull(), underlying_border_image_slice_value.fill());
     }
     case StyleValue::Type::BorderRadius: {
-        auto composited_horizontal_radius = composite_value(underlying_value.as_border_radius().horizontal_radius(), animated_value.as_border_radius().horizontal_radius(), composite_operation);
-        auto composited_vertical_radius = composite_value(underlying_value.as_border_radius().vertical_radius(), animated_value.as_border_radius().vertical_radius(), composite_operation);
+        auto composited_horizontal_radius = composite_value(property_id, underlying_value.as_border_radius().horizontal_radius(), animated_value.as_border_radius().horizontal_radius(), composite_operation);
+        auto composited_vertical_radius = composite_value(property_id, underlying_value.as_border_radius().vertical_radius(), animated_value.as_border_radius().vertical_radius(), composite_operation);
         if (!composited_horizontal_radius || !composited_vertical_radius)
             return {};
         return BorderRadiusStyleValue::create(composited_horizontal_radius.release_nonnull(), composited_vertical_radius.release_nonnull());
+    }
+    case StyleValue::Type::BorderRadiusRect: {
+        auto const& underlying_top_left = underlying_value.as_border_radius_rect().top_left();
+        auto const& animated_top_left = animated_value.as_border_radius_rect().top_left();
+
+        auto const& underlying_top_right = underlying_value.as_border_radius_rect().top_right();
+        auto const& animated_top_right = animated_value.as_border_radius_rect().top_right();
+        auto const& underlying_bottom_right = underlying_value.as_border_radius_rect().bottom_right();
+        auto const& animated_bottom_right = animated_value.as_border_radius_rect().bottom_right();
+
+        auto const& underlying_bottom_left = underlying_value.as_border_radius_rect().bottom_left();
+        auto const& animated_bottom_left = animated_value.as_border_radius_rect().bottom_left();
+
+        auto composited_top_left = composite_value(property_id, underlying_top_left, animated_top_left, composite_operation);
+        auto composited_top_right = composite_value(property_id, underlying_top_right, animated_top_right, composite_operation);
+        auto composited_bottom_right = composite_value(property_id, underlying_bottom_right, animated_bottom_right, composite_operation);
+        auto composited_bottom_left = composite_value(property_id, underlying_bottom_left, animated_bottom_left, composite_operation);
+
+        if (!composited_top_left || !composited_top_right || !composited_bottom_right || !composited_bottom_left)
+            return {};
+
+        return BorderRadiusRectStyleValue::create(composited_top_left.release_nonnull(), composited_top_right.release_nonnull(), composited_bottom_right.release_nonnull(), composited_bottom_left.release_nonnull());
+    }
+    case StyleValue::Type::Edge: {
+        auto const& underlying_offset = underlying_value.as_edge().offset();
+        auto const& animated_offset = animated_value.as_edge().offset();
+
+        if (auto composited_value = composite_value(property_id, underlying_offset, animated_offset, composite_operation))
+            return EdgeStyleValue::create({}, composited_value);
+
+        return {};
+    }
+    case StyleValue::Type::Flex: {
+        auto result = composite_raw_values(underlying_value.as_flex().flex().to_fr(), animated_value.as_flex().flex().to_fr());
+        return FlexStyleValue::create(Flex::make_fr(result));
+    }
+    case StyleValue::Type::Function: {
+        auto const& underlying_function = underlying_value.as_function();
+        auto const& animated_function = animated_value.as_function();
+
+        if (underlying_function.name() != animated_function.name())
+            return {};
+
+        auto composited_value = composite_value(property_id, underlying_function.value(), animated_function.value(), composite_operation);
+        if (!composited_value)
+            return {};
+
+        return FunctionStyleValue::create(underlying_function.name(), composited_value.release_nonnull());
+    }
+    case StyleValue::Type::GridTrackSizeList: {
+        auto underlying_list = underlying_value.as_grid_track_size_list().grid_track_size_list();
+        auto animated_list = animated_value.as_grid_track_size_list().grid_track_size_list();
+        auto composited_list = composite_grid_track_size_list(property_id, calculation_context, underlying_list, animated_list, composite_operation);
+        if (!composited_list.has_value())
+            return {};
+        return GridTrackSizeListStyleValue::create(composited_list.release_value());
     }
     case StyleValue::Type::Integer: {
         auto result = composite_raw_values(underlying_value.as_integer().integer(), animated_value.as_integer().integer());
@@ -2115,7 +2531,7 @@ RefPtr<StyleValue const> composite_value(StyleValue const& underlying_value, Sty
         auto& animated_open_type_tagged = animated_value.as_open_type_tagged();
         if (underlying_open_type_tagged.tag() != animated_open_type_tagged.tag())
             return {};
-        auto composited_value = composite_value(underlying_open_type_tagged.value(), animated_open_type_tagged.value(), composite_operation);
+        auto composited_value = composite_value(property_id, underlying_open_type_tagged.value(), animated_open_type_tagged.value(), composite_operation);
         if (!composited_value)
             return {};
         return OpenTypeTaggedStyleValue::create(OpenTypeTaggedStyleValue::Mode::FontVariationSettings, underlying_open_type_tagged.tag(), composited_value.release_nonnull());
@@ -2127,12 +2543,49 @@ RefPtr<StyleValue const> composite_value(StyleValue const& underlying_value, Sty
     case StyleValue::Type::Position: {
         auto& underlying_position = underlying_value.as_position();
         auto& animated_position = animated_value.as_position();
-        auto composited_edge_x = composite_value(underlying_position.edge_x(), animated_position.edge_x(), composite_operation);
-        auto composited_edge_y = composite_value(underlying_position.edge_y(), animated_position.edge_y(), composite_operation);
+        auto composited_edge_x = composite_value(property_id, underlying_position.edge_x(), animated_position.edge_x(), composite_operation);
+        auto composited_edge_y = composite_value(property_id, underlying_position.edge_y(), animated_position.edge_y(), composite_operation);
         if (!composited_edge_x || !composited_edge_y)
             return {};
 
         return PositionStyleValue::create(composited_edge_x->as_edge(), composited_edge_y->as_edge());
+    }
+    case StyleValue::Type::RadialSize: {
+        auto const& underlying_components = underlying_value.as_radial_size().components();
+        auto const& animated_components = animated_value.as_radial_size().components();
+
+        auto const is_radial_extent = [](auto const& component) { return component.template has<RadialExtent>(); };
+
+        // https://drafts.csswg.org/css-images-4/#interpolating-gradients
+        // https://drafts.csswg.org/css-shapes-1/#basic-shape-interpolation
+        // FIXME: Radial extents should disallow composition for basic-shape values but should be converted into their
+        //        equivalent length-percentage values for radial gradients
+        if (any_of(underlying_components, is_radial_extent) || any_of(animated_components, is_radial_extent))
+            return {};
+
+        if (underlying_components.size() == 1 && animated_components.size() == 1) {
+            auto const& underlying_component = underlying_components[0].get<NonnullRefPtr<StyleValue const>>();
+            auto const& animated_component = animated_components[0].get<NonnullRefPtr<StyleValue const>>();
+
+            auto interpolated_value = composite_value(property_id, underlying_component, animated_component, composite_operation);
+            if (!interpolated_value)
+                return {};
+
+            return RadialSizeStyleValue::create({ interpolated_value.release_nonnull() });
+        }
+
+        auto const& underlying_horizontal_component = underlying_components[0].get<NonnullRefPtr<StyleValue const>>();
+        auto const& underlying_vertical_component = underlying_components.size() > 1 ? underlying_components[1].get<NonnullRefPtr<StyleValue const>>() : underlying_horizontal_component;
+
+        auto const& animated_horizontal_component = animated_components[0].get<NonnullRefPtr<StyleValue const>>();
+        auto const& animated_vertical_component = animated_components.size() > 1 ? animated_components[1].get<NonnullRefPtr<StyleValue const>>() : animated_horizontal_component;
+        auto composited_horizontal = composite_value(property_id, underlying_horizontal_component, animated_horizontal_component, composite_operation);
+        auto composited_vertical = composite_value(property_id, underlying_vertical_component, animated_vertical_component, composite_operation);
+
+        if (!composited_horizontal || !composited_vertical)
+            return {};
+
+        return RadialSizeStyleValue::create({ composited_horizontal.release_nonnull(), composited_vertical.release_nonnull() });
     }
     case StyleValue::Type::Ratio: {
         // https://drafts.csswg.org/css-values/#combine-ratio
@@ -2147,12 +2600,32 @@ RefPtr<StyleValue const> composite_value(StyleValue const& underlying_value, Sty
         StyleValueVector values;
         values.ensure_capacity(underlying_list.size());
         for (size_t i = 0; i < underlying_list.size(); ++i) {
-            auto composited_value = composite_value(underlying_list.values()[i], animated_list.values()[i], composite_operation);
+            auto composited_value = composite_value(property_id, underlying_list.values()[i], animated_list.values()[i], composite_operation);
             if (!composited_value)
                 return {};
             values.unchecked_append(*composited_value);
         }
         return StyleValueList::create(move(values), underlying_list.separator());
+    }
+    case StyleValue::Type::FilterValueList: {
+        auto& underlying_list = underlying_value.as_filter_value_list();
+        auto& animated_list = animated_value.as_filter_value_list();
+
+        // https://drafts.csswg.org/filter-effects/#addition
+        // Given two filter values representing an base value (base filter list) and a value to add (added filter list),
+        // returns the concatenation of the the two lists: ‘base filter list added filter list’.
+        if (composite_operation == Bindings::CompositeOperation::Add) {
+            Vector<FilterValue> result = underlying_list.filter_value_list();
+            result.extend(animated_list.filter_value_list());
+            return FilterValueListStyleValue::create(move(result));
+        }
+
+        VERIFY(composite_operation == Bindings::CompositeOperation::Accumulate);
+        auto result = accumulate_filter_function(underlying_list, animated_list);
+        if (result.is_empty())
+            return {};
+
+        return FilterValueListStyleValue::create(move(result));
     }
     default:
         // FIXME: Implement compositing for missing types

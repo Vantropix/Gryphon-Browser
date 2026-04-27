@@ -1,11 +1,12 @@
 /*
- * Copyright (c) 2025, Gregory Bertilson <zaggy1024@gmail.com>
+ * Copyright (c) 2025-2026, Gregory Bertilson <zaggy1024@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #pragma once
 
+#include <AK/HashTable.h>
 #include <AK/Time.h>
 #include <LibMedia/PlaybackManager.h>
 #include <LibMedia/PlaybackStates/Forward.h>
@@ -34,6 +35,12 @@ public:
         begin_seek();
     }
 
+    virtual void on_exit() override
+    {
+        VERIFY(m_video_seeks_pending.is_empty());
+        VERIFY(m_audio_seeks_pending.is_empty());
+    }
+
     virtual void seek(AK::Duration timestamp, SeekMode mode) override
     {
         m_target_timestamp = timestamp;
@@ -45,125 +52,150 @@ public:
     {
         return PlaybackState::Seeking;
     }
+    virtual AvailableData available_data() override
+    {
+        return AvailableData::Current;
+    }
 
     virtual void enter_buffering() override { }
     virtual void exit_buffering() override { }
 
-private:
-    struct SeekData : public RefCounted<SeekData> {
-        SeekData(PlaybackManager& manager)
-            : manager(manager)
-        {
+    virtual void on_track_enabled(Track const& track) override
+    {
+        if (track.type() == TrackType::Video) {
+            start_video_seek(track);
+            return;
         }
 
-        NonnullRefPtr<PlaybackManager> manager;
+        VERIFY(track.type() == TrackType::Audio);
+        if (m_mode == SeekMode::Accurate || m_audio_seeks_started)
+            start_audio_seek(track);
+    }
 
-        size_t id { 0 };
-
-        AK::Duration chosen_timestamp { AK::Duration::zero() };
-
-        size_t video_seeks_in_flight { 0 };
-        size_t video_seeks_completed { 0 };
-
-        size_t audio_seeks_in_flight { 0 };
-        size_t audio_seeks_completed { 0 };
-    };
-
-    static void possibly_complete_seek(SeekData& seek_data)
+    virtual void on_track_disabled(Track const& track) override
     {
-        if (seek_data.video_seeks_completed != seek_data.video_seeks_in_flight)
+        if (track.type() == TrackType::Video) {
+            auto& track_data = manager().get_video_data_for_track(track);
+            track_data.provider->seek(m_target_timestamp, SeekMode::Accurate, nullptr);
+            end_video_seek(track);
             return;
-        if (seek_data.audio_seeks_completed != seek_data.audio_seeks_in_flight)
+        }
+
+        VERIFY(track.type() == TrackType::Audio);
+        auto& track_data = manager().get_audio_data_for_track(track);
+        track_data.provider->seek(m_target_timestamp, nullptr);
+        end_audio_seek(track);
+    }
+
+private:
+    void possibly_complete_seek()
+    {
+        if (!m_video_seeks_pending.is_empty())
             return;
 
-        auto& seek_handler = as<SeekingStateHandler>(*seek_data.manager->m_handler);
+        if (!m_audio_seeks_started) {
+            begin_audio_seeks();
+            return;
+        }
 
-        // Providers guarantee that their callbacks don't get called if a new seek is started, but we
-        // can end up with video seeks in flight while an audio seek is completing. Ensure that the
-        // old audio seek doesn't cause us to exit the seeking state before the current seek completes.
-        if (seek_handler.m_current_seek_id != seek_data.id)
+        if (!m_audio_seeks_pending.is_empty())
             return;
 
-        seek_data.manager->m_time_provider->set_time(seek_data.chosen_timestamp);
+        manager().m_time_provider->set_time(m_chosen_timestamp);
 
-        for (auto& video_track_data : seek_data.manager->m_video_track_datas) {
+        for (auto& video_track_data : manager().m_video_track_datas) {
             if (video_track_data.display == nullptr)
                 continue;
             video_track_data.display->resume_updates();
         }
 
-        seek_handler.resume();
+        resume();
     }
 
-    static size_t count_audio_tracks(PlaybackManager& manager)
+    void start_video_seek(Track const& track)
     {
-        size_t count = 0;
-        for (auto const& audio_track_data : manager.m_audio_track_datas) {
-            if (manager.m_audio_sink->provider(audio_track_data.track) == nullptr)
-                continue;
-            count++;
-        }
-        return count;
-    }
-
-    static void begin_audio_seeks(SeekData& seek_data)
-    {
-        seek_data.audio_seeks_in_flight = count_audio_tracks(seek_data.manager);
-
-        if (seek_data.audio_seeks_in_flight == 0) {
-            possibly_complete_seek(seek_data);
+        auto& track_data = manager().get_video_data_for_track(track);
+        if (track_data.display == nullptr)
             return;
-        }
 
-        for (auto const& audio_track_data : seek_data.manager->m_audio_track_datas) {
-            if (seek_data.manager->m_audio_sink->provider(audio_track_data.track) == nullptr)
-                continue;
-            audio_track_data.provider->seek(seek_data.chosen_timestamp, [seek_data = NonnullRefPtr(seek_data)]() {
-                seek_data->audio_seeks_completed++;
-                possibly_complete_seek(seek_data);
-            });
+        m_video_seeks_pending.set(track);
+        track_data.display->pause_updates();
+        track_data.provider->seek(m_target_timestamp, m_mode, [this, weak_manager = manager().weak(), track](AK::Duration provider_timestamp) {
+            if (!weak_manager)
+                return;
+            m_chosen_timestamp = max(m_chosen_timestamp, provider_timestamp);
+            end_video_seek(track);
+        });
+    }
+
+    void end_video_seek(Track const& track)
+    {
+        m_video_seeks_pending.remove(track);
+        possibly_complete_seek();
+    }
+
+    void start_audio_seek(Track const& track)
+    {
+        if (!manager().m_audio_sink)
+            return;
+
+        auto& track_data = manager().get_audio_data_for_track(track);
+        if (!track_data.enabled)
+            return;
+
+        m_audio_seeks_pending.set(track);
+
+        track_data.provider->seek(m_chosen_timestamp, [this, weak_manager = manager().weak(), track]() {
+            if (!weak_manager)
+                return;
+            end_audio_seek(track);
+        });
+    }
+
+    void end_audio_seek(Track const& track)
+    {
+        m_audio_seeks_pending.remove(track);
+        possibly_complete_seek();
+    }
+
+    void begin_audio_seeks()
+    {
+        VERIFY(!m_audio_seeks_started);
+        m_audio_seeks_started = true;
+
+        for (auto const& track : manager().audio_tracks())
+            start_audio_seek(track);
+
+        if (m_audio_seeks_pending.is_empty()) {
+            possibly_complete_seek();
+            return;
         }
     }
 
     void begin_seek()
     {
-        auto seek_data = make_ref_counted<SeekData>(manager());
-        seek_data->id = ++m_current_seek_id;
+        m_chosen_timestamp = AK::Duration::zero();
+        m_audio_seeks_started = false;
+        m_video_seeks_pending.clear();
+        m_audio_seeks_pending.clear();
 
-        for (auto const& video_track_data : manager().m_video_track_datas) {
-            if (video_track_data.display == nullptr)
-                continue;
-            seek_data->video_seeks_in_flight++;
-            video_track_data.display->pause_updates();
-        }
+        for (auto const& track : manager().video_tracks())
+            start_video_seek(track);
 
-        seek_data->audio_seeks_in_flight = count_audio_tracks(manager());
-
-        if (m_mode == SeekMode::Accurate || seek_data->video_seeks_in_flight == 0) {
-            seek_data->chosen_timestamp = m_target_timestamp;
-            begin_audio_seeks(seek_data);
-            if (m_mode != SeekMode::Accurate)
-                return;
-        }
-
-        for (auto const& video_track_data : manager().m_video_track_datas) {
-            if (video_track_data.display == nullptr)
-                continue;
-            video_track_data.provider->seek(m_target_timestamp, m_mode, [seek_data, seek_mode = m_mode](AK::Duration provider_timestamp) {
-                seek_data->chosen_timestamp = max(seek_data->chosen_timestamp, provider_timestamp);
-                seek_data->video_seeks_completed++;
-
-                if (seek_mode == SeekMode::Accurate)
-                    possibly_complete_seek(seek_data);
-                else if (seek_data->video_seeks_completed == seek_data->video_seeks_in_flight)
-                    begin_audio_seeks(seek_data);
-            });
+        if (m_mode == SeekMode::Accurate) {
+            m_chosen_timestamp = m_target_timestamp;
+            begin_audio_seeks();
+        } else {
+            possibly_complete_seek();
         }
     }
 
     AK::Duration m_target_timestamp;
     SeekMode m_mode { SeekMode::Accurate };
-    size_t m_current_seek_id { 0 };
+    AK::Duration m_chosen_timestamp { AK::Duration::zero() };
+    bool m_audio_seeks_started { false };
+    HashTable<Track> m_video_seeks_pending;
+    HashTable<Track> m_audio_seeks_pending;
 };
 
 }

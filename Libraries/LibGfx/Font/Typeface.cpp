@@ -13,27 +13,27 @@
 
 namespace Gfx {
 
-ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_resource(Core::Resource const& resource, int ttc_index)
+ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_resource(Core::Resource const& resource, u32 ttc_index)
 {
     auto font_data = Gfx::FontData::create_from_resource(resource);
     return try_load_from_font_data(move(font_data), ttc_index);
 }
 
-ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_font_data(NonnullOwnPtr<Gfx::FontData> font_data, int ttc_index)
+ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_font_data(NonnullOwnPtr<Gfx::FontData> font_data, u32 ttc_index)
 {
     auto typeface = TRY(try_load_from_externally_owned_memory(font_data->bytes(), ttc_index));
     typeface->m_font_data = move(font_data);
     return typeface;
 }
 
-ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_temporary_memory(ReadonlyBytes bytes, int ttc_index)
+ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_temporary_memory(ReadonlyBytes bytes, u32 ttc_index)
 {
     auto buffer = TRY(ByteBuffer::copy(bytes));
     auto font_data = FontData::create_from_byte_buffer(move(buffer));
     return try_load_from_font_data(move(font_data), ttc_index);
 }
 
-ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_externally_owned_memory(ReadonlyBytes bytes, int ttc_index)
+ErrorOr<NonnullRefPtr<Typeface>> Typeface::try_load_from_externally_owned_memory(ReadonlyBytes bytes, u32 ttc_index)
 {
     return TypefaceSkia::load_from_buffer(bytes, ttc_index);
 }
@@ -48,9 +48,9 @@ Typeface::~Typeface()
         hb_blob_destroy(m_harfbuzz_blob);
 }
 
-NonnullRefPtr<Font> Typeface::font(float point_size, FontVariationSettings const& variations) const
+NonnullRefPtr<Font> Typeface::font(float point_size, FontVariationSettings const& variations, Gfx::ShapeFeatures const& shape_features) const
 {
-    FontCacheKey key { point_size, variations.to_sorted_list() };
+    FontCacheKey key { point_size, variations.to_sorted_list(), shape_features };
 
     if (auto it = m_fonts.find(key); it != m_fonts.end())
         return *it->value;
@@ -68,7 +68,7 @@ NonnullRefPtr<Font> Typeface::font(float point_size, FontVariationSettings const
                 used_typeface = move(derived);
     }
 
-    auto font = adopt_ref(*new Font(*used_typeface, point_size, point_size, DEFAULT_DPI, DEFAULT_DPI, variations));
+    auto font = adopt_ref(*new Font(*used_typeface, point_size, point_size, DEFAULT_DPI, DEFAULT_DPI, variations, shape_features));
     m_fonts.set(key, font);
     return font;
 }

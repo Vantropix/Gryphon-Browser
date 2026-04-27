@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/ARIA/Roles.h>
-#include <LibWeb/Bindings/HTMLAreaElementPrototype.h>
+#include <LibWeb/Bindings/HTMLAreaElement.h>
 #include <LibWeb/DOM/DOMTokenList.h>
 #include <LibWeb/HTML/HTMLAreaElement.h>
 #include <LibWeb/HTML/Window.h>
@@ -52,21 +52,6 @@ GC::Ref<DOM::DOMTokenList> HTMLAreaElement::rel_list()
     if (!m_rel_list)
         m_rel_list = DOM::DOMTokenList::create(*this, HTML::AttributeNames::rel);
     return *m_rel_list;
-}
-
-Optional<String> HTMLAreaElement::hyperlink_element_utils_href() const
-{
-    return attribute(HTML::AttributeNames::href);
-}
-
-void HTMLAreaElement::set_hyperlink_element_utils_href(String href)
-{
-    set_attribute_value(HTML::AttributeNames::href, move(href));
-}
-
-Optional<String> HTMLAreaElement::hyperlink_element_utils_referrerpolicy() const
-{
-    return attribute(HTML::AttributeNames::referrerpolicy);
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-tabindex

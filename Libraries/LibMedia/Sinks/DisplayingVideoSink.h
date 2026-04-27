@@ -8,7 +8,7 @@
 
 #include <AK/NonnullRefPtr.h>
 #include <AK/Time.h>
-#include <LibGfx/Bitmap.h>
+#include <LibGfx/ImmutableBitmap.h>
 #include <LibMedia/Export.h>
 #include <LibMedia/Forward.h>
 #include <LibMedia/Sinks/VideoSink.h>
@@ -29,6 +29,8 @@ public:
     DisplayingVideoSink(NonnullRefPtr<MediaTimeProvider> const&);
     virtual ~DisplayingVideoSink() override;
 
+    void set_time_provider(NonnullRefPtr<MediaTimeProvider> const&);
+
     virtual void set_provider(Track const&, RefPtr<VideoDataProvider> const&) override;
     RefPtr<VideoDataProvider> provider(Track const&) const override;
 
@@ -36,7 +38,8 @@ public:
     //
     // Note that push_frame may block until update() is called, so do not call them from the same thread.
     DisplayingVideoSinkUpdateResult update();
-    RefPtr<Gfx::Bitmap> current_frame();
+    void prepare_current_frame_for_next_update();
+    RefPtr<Gfx::ImmutableBitmap> current_frame();
 
     void pause_updates();
     void resume_updates();
@@ -53,9 +56,9 @@ private:
     Optional<Track> m_track;
 
     TimedImage m_next_frame;
-    RefPtr<Gfx::Bitmap> m_current_frame;
+    RefPtr<Gfx::ImmutableBitmap> m_current_frame;
     bool m_pause_updates { false };
-    bool m_cleared_current_frame { false };
+    bool m_has_new_current_frame { false };
 };
 
 }

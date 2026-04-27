@@ -5,11 +5,25 @@
  */
 
 #include <LibCore/EventLoop.h>
+#include <LibWeb/HTML/BroadcastChannel.h>
+#include <LibWeb/Worker/WebWorkerClient.h>
 #include <WebWorker/ConnectionFromClient.h>
 #include <WebWorker/PageHost.h>
 #include <WebWorker/WorkerHost.h>
 
 namespace WebWorker {
+
+void ConnectionFromClient::connect_to_request_server(IPC::TransportHandle handle)
+{
+    if (on_request_server_connection)
+        on_request_server_connection(handle);
+}
+
+void ConnectionFromClient::connect_to_image_decoder(IPC::TransportHandle handle)
+{
+    if (on_image_decoder_connection)
+        on_image_decoder_connection(handle);
+}
 
 void ConnectionFromClient::close_worker()
 {
@@ -83,6 +97,17 @@ void ConnectionFromClient::handle_file_return(i32 error, Optional<IPC::File> fil
     VERIFY(file_request.value().on_file_request_finish);
 
     file_request.value().on_file_request_finish(error != 0 ? Error::from_errno(error) : ErrorOr<i32> { file->take_fd() });
+}
+
+void ConnectionFromClient::broadcast_channel_message(Web::HTML::BroadcastChannelMessage message)
+{
+    Web::HTML::BroadcastChannel::deliver_message_locally(message);
+    Web::HTML::WebWorkerClient::for_each_client([&](auto& client) {
+        if (client.pid() == message.source_process_id)
+            return IterationDecision::Continue;
+        client.async_broadcast_channel_message(message);
+        return IterationDecision::Continue;
+    });
 }
 
 }

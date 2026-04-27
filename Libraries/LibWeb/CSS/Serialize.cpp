@@ -10,6 +10,7 @@
 #include <LibWeb/CSS/Parser/ComponentValue.h>
 #include <LibWeb/CSS/Parser/TokenStream.h>
 #include <LibWeb/CSS/Serialize.h>
+#include <LibWeb/CSS/StyleValues/StyleValue.h>
 #include <LibWeb/Infra/Strings.h>
 
 namespace Web::CSS {
@@ -245,10 +246,10 @@ static bool needs_comment_between(Parser::ComponentValue const& first, Parser::C
             return true;
         if (!second.is_token())
             return false;
-        if (second.token().type() == Parser::Token::Type::Delim)
-            return second.is_delim('-') || second.is_delim('(');
+        if (second.is_delim('-'))
+            return true;
         return first_is_one_of(second.token().type(),
-            Parser::Token::Type::Ident, Parser::Token::Type::Url, Parser::Token::Type::BadUrl, Parser::Token::Type::Number, Parser::Token::Type::Percentage, Parser::Token::Type::Dimension, Parser::Token::Type::CDC);
+            Parser::Token::Type::Ident, Parser::Token::Type::Url, Parser::Token::Type::BadUrl, Parser::Token::Type::Number, Parser::Token::Type::Percentage, Parser::Token::Type::Dimension, Parser::Token::Type::CDC, Parser::Token::Type::OpenParen);
     }
 
     if (first.is(Parser::Token::Type::AtKeyword)
@@ -314,6 +315,40 @@ String serialize_a_series_of_component_values(ReadonlySpan<Parser::ComponentValu
     }
 
     return builder.to_string_without_validation();
+}
+
+String serialize_a_positional_value_list(StyleValueVector const& values, SerializationMode mode)
+{
+    switch (values.size()) {
+    case 2: {
+        auto first_property_serialized = values[0]->to_string(mode);
+        auto second_property_serialized = values[1]->to_string(mode);
+
+        if (first_property_serialized == second_property_serialized)
+            return first_property_serialized;
+
+        return MUST(String::formatted("{} {}", first_property_serialized, second_property_serialized));
+    }
+    case 4: {
+        auto first_property_serialized = values[0]->to_string(mode);
+        auto second_property_serialized = values[1]->to_string(mode);
+        auto third_property_serialized = values[2]->to_string(mode);
+        auto fourth_property_serialized = values[3]->to_string(mode);
+
+        if (first_is_equal_to_all_of(first_property_serialized, second_property_serialized, third_property_serialized, fourth_property_serialized))
+            return first_property_serialized;
+
+        if (first_property_serialized == third_property_serialized && second_property_serialized == fourth_property_serialized)
+            return MUST(String::formatted("{} {}", first_property_serialized, second_property_serialized));
+
+        if (second_property_serialized == fourth_property_serialized)
+            return MUST(String::formatted("{} {} {}", first_property_serialized, second_property_serialized, third_property_serialized));
+
+        return MUST(String::formatted("{} {} {} {}", first_property_serialized, second_property_serialized, third_property_serialized, fourth_property_serialized));
+    }
+    default:
+        VERIFY_NOT_REACHED();
+    }
 }
 
 }

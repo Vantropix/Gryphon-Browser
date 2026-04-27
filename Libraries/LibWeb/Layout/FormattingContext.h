@@ -21,7 +21,45 @@ template<typename T>
     return ::max(min, ::min(value, max));
 }
 
+enum class Alignment {
+    Baseline,
+    Center,
+    End,
+    Normal,
+    Safe,
+    SelfEnd,
+    SelfStart,
+    SpaceAround,
+    SpaceBetween,
+    SpaceEvenly,
+    Start,
+    Stretch,
+    Unsafe,
+};
+
+enum class AbsposAxisMode {
+    // Both insets auto: offset = static_position + margin
+    StaticPosition,
+    // At least one explicit inset: offset = rect.origin + inset + margin
+    InsetFromRect,
+};
+
+struct AbsposContainingBlockInfo {
+    // Containing block rect in CB Box's content-edge coordinates.
+    CSSPixelRect rect;
+    AbsposAxisMode horizontal_axis_mode;
+    AbsposAxisMode vertical_axis_mode;
+    // Grid alignment for axes with auto CSS insets.
+    // When set, the base method applies alignment-driven insets after sizing.
+    Optional<Alignment> horizontal_alignment;
+    Optional<Alignment> vertical_alignment;
+};
+
 class FormattingContext {
+#if FORMATTING_CONTEXT_TRACE_DEBUG
+    friend class FormattingContextTracer;
+#endif
+
 public:
     virtual ~FormattingContext();
 
@@ -32,9 +70,35 @@ public:
         Grid,
         Table,
         SVG,
+        ReplacedWithChildren,
         InternalReplaced, // Internal hack formatting context for replaced elements. FIXME: Get rid of this.
         InternalDummy,    // Internal hack formatting context for unimplemented things. FIXME: Get rid of this.
     };
+
+    static constexpr StringView type_name(Type type)
+    {
+        switch (type) {
+        case Type::Block:
+            return "BFC"sv;
+        case Type::Inline:
+            return "IFC"sv;
+        case Type::Flex:
+            return "FFC"sv;
+        case Type::Grid:
+            return "GFC"sv;
+        case Type::Table:
+            return "TFC"sv;
+        case Type::SVG:
+            return "SVG"sv;
+        case Type::ReplacedWithChildren:
+            return "Replaced, with children"sv;
+        case Type::InternalReplaced:
+            return "Replaced"sv;
+        case Type::InternalDummy:
+            return "Dummy"sv;
+        }
+        VERIFY_NOT_REACHED();
+    }
 
     virtual void run(AvailableSpace const&) = 0;
 
@@ -86,8 +150,6 @@ public:
     [[nodiscard]] CSSPixelRect content_box_rect(LayoutState::UsedValues const&) const;
     [[nodiscard]] CSSPixelRect content_box_rect_in_ancestor_coordinate_space(LayoutState::UsedValues const&, Box const& ancestor_box) const;
     [[nodiscard]] CSSPixels box_baseline(Box const&) const;
-    [[nodiscard]] CSSPixelRect content_box_rect_in_static_position_ancestor_coordinate_space(Box const&) const;
-
     [[nodiscard]] CSSPixels containing_block_width_for(NodeWithStyleAndBoxModelMetrics const&) const;
 
     [[nodiscard]] CSSPixels calculate_stretch_fit_width(Box const&, AvailableSize const&) const;
@@ -135,12 +197,19 @@ protected:
     CSSPixels tentative_width_for_replaced_element(Box const&, CSS::Size const& computed_width, AvailableSpace const&) const;
     CSSPixels tentative_height_for_replaced_element(Box const&, CSS::Size const& computed_height, AvailableSpace const&) const;
     CSSPixels compute_auto_height_for_block_formatting_context_root(Box const&) const;
+    static CSSPixels line_box_physical_width(Box const&, LineBox const&);
 
     [[nodiscard]] CSSPixelSize solve_replaced_size_constraint(CSSPixels input_width, CSSPixels input_height, Box const&, AvailableSpace const&) const;
 
     ShrinkToFitResult calculate_shrink_to_fit_widths(Box const&);
 
-    void layout_absolutely_positioned_element(Box const&, AvailableSpace const&);
+    void layout_absolutely_positioned_element(Box&);
+
+    CSSPixels gap_to_px(Variant<CSS::LengthPercentage, CSS::NormalGap> const& gap, CSSPixels reference_value) const;
+
+    void layout_absolutely_positioned_children();
+    virtual AbsposContainingBlockInfo resolve_abspos_containing_block_info(Box const&);
+    void resolve_anchor_insets(Box&) const;
     void compute_width_for_absolutely_positioned_element(Box const&, AvailableSpace const&);
     void compute_width_for_absolutely_positioned_non_replaced_element(Box const&, AvailableSpace const&);
     void compute_width_for_absolutely_positioned_replaced_element(Box const&, AvailableSpace const&);
@@ -165,5 +234,32 @@ protected:
 
     LayoutState& m_state;
 };
+
+#if FORMATTING_CONTEXT_TRACE_DEBUG
+class FormattingContextTracer {
+public:
+    FormattingContextTracer(FormattingContext const& fc, AvailableSpace const& available_space)
+    {
+        StringBuilder indent_builder;
+        for (int i = 0; i < s_depth; ++i)
+            indent_builder.append("| "sv);
+        auto intrinsic_marker = fc.m_layout_mode == LayoutMode::IntrinsicSizing ? " [intrinsic]"sv : ""sv;
+        dbgln("{}|- {} <{}> run({}){}", indent_builder.string_view(), FormattingContext::type_name(fc.m_type), fc.m_context_box->debug_description(), available_space, intrinsic_marker);
+        ++s_depth;
+    }
+
+    ~FormattingContextTracer()
+    {
+        --s_depth;
+    }
+
+private:
+    inline static int s_depth = 0;
+};
+
+#    define FORMATTING_CONTEXT_TRACE() FormattingContextTracer _formatting_context_tracer(*this, available_space)
+#else
+#    define FORMATTING_CONTEXT_TRACE()
+#endif
 
 }

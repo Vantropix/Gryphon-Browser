@@ -7,13 +7,16 @@
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/ImmutableBitmap.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
 #include <LibWeb/Fetch/Infrastructure/FetchAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/FetchController.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
+#include <LibWeb/Fetch/Infrastructure/HTTP/Requests.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Responses.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/Statuses.h>
-#include <LibWeb/HTML/AnimatedBitmapDecodedImageData.h>
+#include <LibWeb/HTML/AnimatedDecodedImageData.h>
+#include <LibWeb/HTML/BitmapDecodedImageData.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
 #include <LibWeb/Page/Page.h>
@@ -107,6 +110,7 @@ void SharedResourceRequest::fetch_resource(JS::Realm& realm, GC::Ref<Fetch::Infr
     };
 
     m_state = State::Fetching;
+    m_load_event_delayer.emplace(*m_document);
 
     auto fetch_controller = Fetch::Fetching::fetch(
         realm,
@@ -144,7 +148,8 @@ void SharedResourceRequest::handle_successful_fetch(URL::URL const& url_string, 
     // AD-HOC: At this point, things gets very ad-hoc.
     // FIXME: Bring this closer to spec.
 
-    bool const is_svg_image = mime_type == "image/svg+xml"sv || url_string.basename().ends_with(".svg"sv);
+    bool const is_svg_image = mime_type == "image/svg+xml"sv
+        || (mime_type.is_empty() && url_string.basename().ends_with(".svg"sv));
 
     if (is_svg_image) {
         auto result = SVG::SVGDecodedImageData::create(m_document->realm(), m_page, url_string, data);
@@ -158,14 +163,36 @@ void SharedResourceRequest::handle_successful_fetch(URL::URL const& url_string, 
     }
 
     auto handle_successful_bitmap_decode = [strong_this = GC::Root(*this)](Web::Platform::DecodedImage& result) -> ErrorOr<void> {
-        Vector<AnimatedBitmapDecodedImageData::Frame> frames;
-        for (auto& frame : result.frames) {
-            frames.append(AnimatedBitmapDecodedImageData::Frame {
-                .bitmap = Gfx::ImmutableBitmap::create(*frame.bitmap, result.color_space),
-                .duration = static_cast<int>(frame.duration),
-            });
+        if (result.session_id != 0) {
+            // Streaming animated decode: create AnimatedDecodedImageData.
+            Vector<NonnullRefPtr<Gfx::Bitmap>> initial_bitmaps;
+            initial_bitmaps.ensure_capacity(result.frames.size());
+            for (auto& frame : result.frames)
+                initial_bitmaps.unchecked_append(*frame.bitmap);
+
+            auto first_bitmap = result.frames.first().bitmap;
+            auto size = first_bitmap->size();
+
+            strong_this->m_image_data = AnimatedDecodedImageData::create(
+                strong_this->m_document->realm(),
+                result.session_id,
+                result.frame_count,
+                result.loop_count,
+                size,
+                result.color_space,
+                move(result.all_durations),
+                move(initial_bitmaps));
+        } else {
+            // Single-shot decode: create BitmapDecodedImageData as before.
+            Vector<BitmapDecodedImageData::Frame> frames;
+            for (auto& frame : result.frames) {
+                frames.append(BitmapDecodedImageData::Frame {
+                    .bitmap = Gfx::ImmutableBitmap::create(*frame.bitmap, result.color_space),
+                    .duration = static_cast<int>(frame.duration),
+                });
+            }
+            strong_this->m_image_data = BitmapDecodedImageData::create(strong_this->m_document->realm(), move(frames), result.loop_count, result.is_animated).release_value_but_fixme_should_propagate_errors();
         }
-        strong_this->m_image_data = AnimatedBitmapDecodedImageData::create(strong_this->m_document->realm(), move(frames), result.loop_count, result.is_animated).release_value_but_fixme_should_propagate_errors();
         strong_this->handle_successful_resource_load();
         return {};
     };
@@ -180,6 +207,7 @@ void SharedResourceRequest::handle_successful_fetch(URL::URL const& url_string, 
 void SharedResourceRequest::handle_failed_fetch()
 {
     m_state = State::Failed;
+    m_load_event_delayer.clear();
     for (auto& callback : m_callbacks) {
         if (callback.on_fail)
             callback.on_fail->function()();
@@ -190,6 +218,7 @@ void SharedResourceRequest::handle_failed_fetch()
 void SharedResourceRequest::handle_successful_resource_load()
 {
     m_state = State::Finished;
+    m_load_event_delayer.clear();
     for (auto& callback : m_callbacks) {
         if (callback.on_finish)
             callback.on_finish->function()();

@@ -7,6 +7,7 @@
 #include <AK/ConstrainedStream.h>
 #include <AK/Debug.h>
 #include <AK/Endian.h>
+#include <AK/Enumerate.h>
 #include <AK/LEB128.h>
 #include <AK/MemoryStream.h>
 #include <AK/ScopeLogger.h>
@@ -98,6 +99,48 @@ static ParseResult<ByteString> parse_name(ConstrainedStream& stream)
     return string;
 }
 
+static ParseResult<ValueType> parse_reference_type(Stream& stream, u8 tag)
+{
+    switch (tag) {
+    case Constants::function_reference_tag:
+        return ValueType(ValueType::FunctionReference);
+    case Constants::extern_reference_tag:
+        return ValueType(ValueType::ExternReference);
+    case Constants::array_reference_tag:
+    case Constants::struct_reference_tag:
+    case Constants::i31_reference_tag:
+    case Constants::eq_reference_tag:
+    case Constants::any_reference_tag:
+    case Constants::none_reference_tag:
+    case Constants::noextern_reference_tag:
+    case Constants::nofunc_reference_tag:
+    case Constants::noexn_heap_reference_tag:
+        // FIXME: Implement these when we support wasm-gc properly.
+        return ValueType(ValueType::UnsupportedHeapReference);
+    case Constants::nullable_reference_tag_tag:
+    case Constants::non_nullable_reference_tag_tag: {
+        bool nullable = tag == Constants::nullable_reference_tag_tag;
+        tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+        auto type = TRY(parse_reference_type(stream, tag));
+        type.set_nullable(nullable);
+        return type;
+    }
+    default: {
+        ReconsumableStream new_stream { stream };
+        new_stream.unread({ &tag, 1 });
+
+        // FIXME: should be an i33. Right now, we're missing a potential last bit at
+        // the end. See https://webassembly.github.io/spec/core/bikeshed/#heap-types%E2%91%A6
+        i32 type_index = TRY_READ(new_stream, LEB128<i32>, ParseError::ExpectedIndex);
+        if (type_index < 0) {
+            return with_eof_check(stream, ParseError::InvalidIndex);
+        }
+
+        return ValueType(ValueType::TypeUseReference, TypeIndex(type_index));
+    }
+    }
+}
+
 ParseResult<ValueType> ValueType::parse(Stream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("ValueType"sv);
@@ -114,28 +157,8 @@ ParseResult<ValueType> ValueType::parse(Stream& stream)
         return ValueType(F64);
     case Constants::v128_tag:
         return ValueType(V128);
-    case Constants::function_reference_tag:
-        return ValueType(FunctionReference);
-    case Constants::extern_reference_tag:
-        return ValueType(ExternReference);
-    case Constants::array_reference_tag:
-    case Constants::struct_reference_tag:
-    case Constants::i31_reference_tag:
-    case Constants::eq_reference_tag:
-    case Constants::any_reference_tag:
-    case Constants::none_reference_tag:
-    case Constants::noextern_reference_tag:
-    case Constants::nofunc_reference_tag:
-    case Constants::noexn_heap_reference_tag:
-        // FIXME: Implement these when we support wasm-gc properly.
-        return ValueType(UnsupportedHeapReference);
-    case Constants::nullable_reference_tag_tag:
-    case Constants::non_nullable_reference_tag_tag:
-        tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
-        (void)tag;
-        return ValueType(UnsupportedHeapReference);
     default:
-        return ParseError::InvalidTag;
+        return parse_reference_type(stream, tag);
     }
 }
 
@@ -149,17 +172,42 @@ ParseResult<ResultType> ResultType::parse(ConstrainedStream& stream)
 ParseResult<FunctionType> FunctionType::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("FunctionType"sv);
-    auto tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
-
-    if (tag != Constants::function_signature_tag) {
-        dbgln("Expected 0x60, but found {:#x}", tag);
-        return with_eof_check(stream, ParseError::InvalidTag);
-    }
 
     auto parameters_result = TRY(parse_vector<ValueType>(stream));
     auto results_result = TRY(parse_vector<ValueType>(stream));
 
     return FunctionType { parameters_result, results_result };
+}
+
+ParseResult<FieldType> FieldType::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("FieldType"sv);
+
+    auto type_ = TRY(ValueType::parse(stream));
+
+    auto mutable_ = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+    if (mutable_ > 1)
+        return with_eof_check(stream, ParseError::InvalidTag);
+
+    return FieldType { mutable_ == 0x01, type_ };
+}
+
+ParseResult<StructType> StructType::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("StructType"sv);
+
+    auto fields = TRY(parse_vector<FieldType>(stream));
+
+    return StructType { fields };
+}
+
+ParseResult<ArrayType> ArrayType::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("ArrayType"sv);
+
+    auto type = TRY(FieldType::parse(stream));
+
+    return ArrayType { type };
 }
 
 ParseResult<Limits> Limits::parse(ConstrainedStream& stream)
@@ -236,25 +284,14 @@ ParseResult<BlockType> BlockType::parse(ConstrainedStream& stream)
     if (kind == Constants::empty_block_tag)
         return BlockType {};
 
-    {
-        FixedMemoryStream value_stream { ReadonlyBytes { &kind, 1 } };
-        if (auto value_type = ValueType::parse(value_stream); !value_type.is_error())
-            return BlockType { value_type.release_value() };
+    ReconsumableStream value_stream { stream };
+    value_stream.unread({ &kind, 1 });
+    auto value_type = TRY(ValueType::parse(value_stream));
+    if (value_type.is_typeuse()) {
+        return BlockType { value_type.unsafe_typeindex() };
     }
 
-    ReconsumableStream new_stream { stream };
-    new_stream.unread({ &kind, 1 });
-
-    // FIXME: should be an i33. Right now, we're missing a potential last bit at
-    // the end. See https://webassembly.github.io/spec/core/binary/instructions.html#binary-blocktype
-    i32 index_value = TRY_READ(new_stream, LEB128<i32>, ParseError::ExpectedIndex);
-
-    if (index_value < 0) {
-        dbgln("Invalid type index {}", index_value);
-        return with_eof_check(stream, ParseError::InvalidIndex);
-    }
-
-    return BlockType { TypeIndex(index_value) };
+    return BlockType { value_type };
 }
 
 ParseResult<Catch> Catch::parse(ConstrainedStream& stream)
@@ -324,7 +361,7 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
     case Instructions::br_if.value(): {
         // branches with a single label immediate
         auto index = TRY(GenericIndexParser<LabelIndex>::parse(stream));
-        return Instruction { opcode, index };
+        return Instruction { opcode, BranchArgs { index } };
     }
     case Instructions::br_table.value(): {
         // br_table label* label
@@ -353,6 +390,11 @@ ParseResult<Instruction> Instruction::parse(ConstrainedStream& stream)
         auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
         auto table_index = TRY(GenericIndexParser<TableIndex>::parse(stream));
         return Instruction { opcode, IndirectCallArgs { type_index, table_index } };
+    }
+    case Instructions::call_ref.value():
+    case Instructions::return_call_ref.value(): {
+        auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
+        return Instruction { opcode, type_index };
     }
     case Instructions::i32_load.value():
     case Instructions::i64_load.value():
@@ -991,10 +1033,27 @@ ParseResult<CustomSection> CustomSection::parse(ConstrainedStream& stream)
     return CustomSection(name, move(data_buffer));
 }
 
+ParseResult<TypeSection::Type> TypeSection::Type::parse(ConstrainedStream& stream)
+{
+    ScopeLogger<WASM_BINPARSER_DEBUG> logger("Type"sv);
+    auto tag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
+
+    switch (tag) {
+    case Constants::function_signature_tag:
+        return Type { TRY(FunctionType::parse(stream)) };
+    case Constants::struct_tag:
+        return Type { TRY(StructType::parse(stream)) };
+    case Constants::array_tag:
+        return Type { TRY(ArrayType::parse(stream)) };
+    default:
+        return ParseError::InvalidTag;
+    }
+}
+
 ParseResult<TypeSection> TypeSection::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("TypeSection"sv);
-    auto types = TRY(parse_vector<FunctionType>(stream));
+    auto types = TRY(parse_vector<Type>(stream));
     return TypeSection { types };
 }
 
@@ -1096,22 +1155,31 @@ ParseResult<Expression> Expression::parse(ConstrainedStream& stream, Optional<si
             }
             // Patch the end_ip of the last structured instruction
             auto entry = stack.take_last();
-            instructions[entry.value()].arguments().visit(
+            bool valid_type = instructions[entry.value()].arguments().visit(
                 [&](Instruction::StructuredInstructionArgs& args) {
                     args.end_ip = ip + (args.else_ip.has_value() ? 1 : 0);
+                    return true;
                 },
                 [&](Instruction::TryTableArgs& args) {
                     args.try_.end_ip = ip + 1;
+                    return true;
                 },
-                [](auto&) { VERIFY_NOT_REACHED(); });
+                [](auto&) { return false; });
+
+            if (!valid_type)
+                return ParseError::InvalidType;
+
             break;
         }
         case Instructions::structured_else.value(): {
             if (stack.is_empty())
                 return ParseError::UnknownInstruction;
             auto entry = stack.last();
-            auto& args = instructions[entry.value()].arguments().get<Instruction::StructuredInstructionArgs>();
-            args.else_ip = ip + 1;
+            auto* args = instructions[entry.value()].arguments().get_pointer<Instruction::StructuredInstructionArgs>();
+            if (!args)
+                return ParseError::InvalidType;
+
+            args->else_ip = ip + 1;
             break;
         }
         }
@@ -1343,19 +1411,8 @@ ParseResult<TagSection> TagSection::parse(ConstrainedStream& stream)
 {
     ScopeLogger<WASM_BINPARSER_DEBUG> logger("TagSection"sv);
     // https://webassembly.github.io/exception-handling/core/binary/modules.html#binary-tagsec
-    auto tags = TRY(parse_vector<Tag>(stream));
+    auto tags = TRY(parse_vector<TagType>(stream));
     return TagSection { move(tags) };
-}
-
-ParseResult<TagSection::Tag> TagSection::Tag::parse(ConstrainedStream& stream)
-{
-    // https://webassembly.github.io/exception-handling/core/binary/modules.html#binary-tagsec
-    ScopeLogger<WASM_BINPARSER_DEBUG> logger("Tag"sv);
-    auto flag = TRY_READ(stream, u8, ParseError::ExpectedKindTag);
-    if (flag != 0)
-        return ParseError::InvalidTag; // currently the only valid flag is 0
-    auto type_index = TRY(GenericIndexParser<TypeIndex>::parse(stream));
-    return TagSection::Tag { type_index, static_cast<TagSection::Tag::Flags>(flag) };
 }
 
 ParseResult<SectionId> SectionId::parse(Stream& stream)
@@ -1474,7 +1531,13 @@ ParseResult<NonnullRefPtr<Module>> Module::parse(Stream& stream)
             return ParseError::SectionSizeMismatch;
     }
 
+    module_ptr->preprocess();
+
     return module_ptr;
+}
+
+void Module::preprocess()
+{
 }
 
 ByteString parse_error_to_byte_string(ParseError error)

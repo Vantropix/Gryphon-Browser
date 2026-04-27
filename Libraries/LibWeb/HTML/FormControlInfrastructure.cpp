@@ -28,11 +28,11 @@ WebIDL::ExceptionOr<XHR::FormDataEntry> create_entry(JS::Realm& realm, String co
 
     auto entry_value = TRY(value.visit(
         // 2. If value is a string, then set value to the result of converting value into a scalar value string.
-        [&](String const& string) -> WebIDL::ExceptionOr<Variant<GC::Root<FileAPI::File>, String>> {
+        [&](String const& string) -> WebIDL::ExceptionOr<Variant<GC::Ref<FileAPI::File>, String>> {
             return TRY_OR_THROW_OOM(vm, Infra::convert_to_scalar_value_string(string));
         },
         // 3. Otherwise:
-        [&](GC::Ref<FileAPI::Blob> blob) -> WebIDL::ExceptionOr<Variant<GC::Root<FileAPI::File>, String>> {
+        [&](GC::Ref<FileAPI::Blob> blob) -> WebIDL::ExceptionOr<Variant<GC::Ref<FileAPI::File>, String>> {
             // 1. If value is not a File object, then set value to a new File object, representing the same bytes, whose
             //    name attribute value is "blob".
             if (!is<FileAPI::File>(*blob)) {
@@ -52,7 +52,7 @@ WebIDL::ExceptionOr<XHR::FormDataEntry> create_entry(JS::Realm& realm, String co
                 blob = TRY(FileAPI::File::create(realm, { GC::make_root(*blob) }, *filename, move(options)));
             }
 
-            return GC::make_root(as<FileAPI::File>(*blob));
+            return GC::Ref { as<FileAPI::File>(*blob) };
         }));
 
     // 4. Return an entry whose name is name and whose value is value.
@@ -62,12 +62,53 @@ WebIDL::ExceptionOr<XHR::FormDataEntry> create_entry(JS::Realm& realm, String co
     };
 }
 
+// https://html.spec.whatwg.org/multipage/custom-elements.html#face-entry-construction
+static WebIDL::ExceptionOr<void> construct_face_entry(JS::Realm& realm, GC::Ref<HTMLElement const> form_associated_custom_element, GC::ConservativeVector<XHR::FormDataEntry>& entry_list)
+{
+    // 1. If element's submission value is a list of entries, then append each item of element's submission value to
+    //    entry list, and return.
+    // NOTE: In this case, user agent does not refer to the name content attribute value. An implementation of
+    //       form-associated custom element is responsible to decide names of entries. They can be the name
+    //       content attribute value, they can be strings based on the name content attribute value, or they
+    //       can be unrelated to the name content attribute.
+    auto const& submission_value = form_associated_custom_element->face_submission_value();
+    if (auto const* form_data_entries = submission_value.get_pointer<GC::ConservativeVector<XHR::FormDataEntry>>()) {
+        entry_list.extend(*form_data_entries);
+        return {};
+    }
+
+    // 2. If the element does not have a name attribute specified, or its name attribute's value is the empty string, then return.
+    if (!form_associated_custom_element->name().has_value() || form_associated_custom_element->name()->is_empty())
+        return {};
+
+    // 3. If the element's submission value is not null, create an entry with the name attribute value and the submission value, and append it to entry list.
+    if (submission_value.has<Empty>())
+        return {};
+
+    auto name = form_associated_custom_element->name().value();
+    auto entry_submission_value = submission_value.visit(
+        [](GC::Ref<FileAPI::File> file) -> Variant<GC::Ref<FileAPI::Blob>, String> {
+            return GC::Ref<FileAPI::Blob> { file };
+        },
+        [](String const& string) -> Variant<GC::Ref<FileAPI::Blob>, String> {
+            return string;
+        },
+        [](auto&) -> Variant<GC::Ref<FileAPI::Blob>, String> {
+            // The other types were handled above.
+            VERIFY_NOT_REACHED();
+        });
+
+    auto entry = TRY(create_entry(realm, name.to_string(), entry_submission_value));
+    entry_list.append(entry);
+    return {};
+}
+
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#constructing-the-form-data-set
-WebIDL::ExceptionOr<Optional<Vector<XHR::FormDataEntry>>> construct_entry_list(JS::Realm& realm, HTMLFormElement& form, GC::Ptr<HTMLElement> submitter, Optional<String> encoding)
+WebIDL::ExceptionOr<Optional<GC::ConservativeVector<XHR::FormDataEntry>>> construct_entry_list(JS::Realm& realm, HTMLFormElement& form, GC::Ptr<HTMLElement> submitter, Optional<String> encoding)
 {
     // 1. If form's constructing entry list is true, then return null.
     if (form.constructing_entry_list())
-        return Optional<Vector<XHR::FormDataEntry>> {};
+        return OptionalNone {};
 
     // 2. Set form's constructing entry list to true.
     form.set_constructing_entry_list(true);
@@ -76,7 +117,7 @@ WebIDL::ExceptionOr<Optional<Vector<XHR::FormDataEntry>>> construct_entry_list(J
     auto controls = form.get_submittable_elements();
 
     // 4. Let entry list be a new empty entry list.
-    Vector<XHR::FormDataEntry> entry_list;
+    GC::ConservativeVector<XHR::FormDataEntry> entry_list { realm.heap() };
 
     // 5. For each element field in controls, in tree order:
     for (auto const& control : controls) {
@@ -130,7 +171,11 @@ WebIDL::ExceptionOr<Optional<Vector<XHR::FormDataEntry>>> construct_entry_list(J
             continue;
         }
 
-        // FIXME: 3. If the field is a form-associated custom element, then perform the entry construction algorithm given field and entry list, then continue.
+        // 3. If the field is a form-associated custom element, then perform the entry construction algorithm given field and entry list, then continue.
+        if (control_as_form_associated_element.form_associated_element_to_html_element().is_form_associated_custom_element()) {
+            TRY(construct_face_entry(realm, control_as_form_associated_element.form_associated_element_to_html_element(), entry_list));
+            continue;
+        }
 
         // 4. If either the field element does not have a name attribute specified, or its name attribute's value is the empty string, then continue.
         if (!control->name().has_value() || control->name()->is_empty())
@@ -185,7 +230,7 @@ WebIDL::ExceptionOr<Optional<Vector<XHR::FormDataEntry>>> construct_entry_list(J
         }
         // 10. Otherwise, create an entry with name and the value of the field element, and append it to entry list.
         else {
-            entry_list.append(TRY(create_entry(realm, name.to_string(), control_as_form_associated_element.value().to_utf8_but_should_be_ported_to_utf16())));
+            entry_list.append(TRY(create_entry(realm, name.to_string(), control_as_form_associated_element.form_value().to_utf8_but_should_be_ported_to_utf16())));
         }
 
         // 11. If the element has a dirname attribute, that attribute's value is not the empty string, and the element is an auto-directionality form-associated element:
@@ -236,7 +281,7 @@ ErrorOr<String> normalize_line_breaks(StringView value)
 }
 
 // https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm
-ErrorOr<SerializedFormData> serialize_to_multipart_form_data(Vector<XHR::FormDataEntry> const& entry_list)
+ErrorOr<SerializedFormData> serialize_to_multipart_form_data(GC::ConservativeVector<XHR::FormDataEntry> const& entry_list)
 {
     auto escape_line_feed_carriage_return_double_quote = [](StringView value) -> ErrorOr<String> {
         StringBuilder builder;

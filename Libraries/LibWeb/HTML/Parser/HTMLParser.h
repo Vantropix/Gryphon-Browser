@@ -8,22 +8,14 @@
 
 #include <LibGfx/Color.h>
 #include <LibJS/Heap/Cell.h>
-#include <LibWeb/DOM/Node.h>
+#include <LibWeb/DOM/FragmentSerializationMode.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/Parser/HTMLTokenizer.h>
 #include <LibWeb/HTML/Parser/ListOfActiveFormattingElements.h>
+#include <LibWeb/HTML/Parser/ParserScriptingMode.h>
 #include <LibWeb/HTML/Parser/StackOfOpenElements.h>
 #include <LibWeb/MimeSniff/MimeType.h>
-
-#ifdef LIBWEB_USE_SWIFT
-#    include <LibGC/ForeignCell.h>
-
-namespace Web {
-
-class SpeculativeHTMLParser;
-
-}
-#endif
+#include <LibWeb/Platform/Timer.h>
 
 namespace Web::HTML {
 
@@ -61,7 +53,7 @@ public:
 
     static GC::Ref<HTMLParser> create_for_scripting(DOM::Document&);
     static GC::Ref<HTMLParser> create_with_uncertain_encoding(DOM::Document&, ByteBuffer const& input, Optional<MimeSniff::MimeType> maybe_mime_type = {});
-    static GC::Ref<HTMLParser> create(DOM::Document&, StringView input, StringView encoding);
+    static GC::Ref<HTMLParser> create(DOM::Document&, StringView input, ParserScriptingMode, StringView encoding);
 
     void run(HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
     void run(URL::URL const&, HTMLTokenizer::StopAtInsertionPoint = HTMLTokenizer::StopAtInsertionPoint::No);
@@ -73,7 +65,7 @@ public:
         No,
         Yes,
     };
-    static WebIDL::ExceptionOr<Vector<GC::Root<DOM::Node>>> parse_html_fragment(DOM::Element& context_element, StringView, AllowDeclarativeShadowRoots = AllowDeclarativeShadowRoots::No);
+    static WebIDL::ExceptionOr<Vector<GC::Root<DOM::Node>>> parse_html_fragment(DOM::Element& context_element, StringView markup, AllowDeclarativeShadowRoots = AllowDeclarativeShadowRoots::No, ParserScriptingMode = ParserScriptingMode::Inert);
 
     enum class SerializableShadowRoots {
         No,
@@ -101,9 +93,12 @@ public:
 
     size_t script_nesting_level() const { return m_script_nesting_level; }
 
+    void schedule_resume_check();
+    void set_post_parse_action(Function<void()> action) { m_post_parse_action = move(action); }
+
 private:
-    HTMLParser(DOM::Document&, StringView input, StringView encoding);
-    HTMLParser(DOM::Document&);
+    HTMLParser(DOM::Document&, ParserScriptingMode, StringView input, StringView encoding);
+    HTMLParser(DOM::Document&, ParserScriptingMode);
 
     virtual void visit_edges(Cell::Visitor&) override;
     virtual void initialize(JS::Realm&) override;
@@ -135,6 +130,11 @@ private:
     void handle_after_after_frameset(HTMLToken&);
 
     void stop_parsing() { m_stop_parsing = true; }
+
+    // https://html.spec.whatwg.org/multipage/parsing.html#start-the-speculative-html-parser
+    void start_the_speculative_html_parser();
+    // https://html.spec.whatwg.org/multipage/parsing.html#stop-the-speculative-html-parser
+    void stop_the_speculative_html_parser();
 
     void generate_implied_end_tags(FlyString const& exception = {});
     void generate_all_implied_end_tags_thoroughly();
@@ -171,6 +171,9 @@ private:
     void decrement_script_nesting_level();
     void reset_the_insertion_mode_appropriately();
 
+    void resume_after_parser_blocking_script();
+    void invoke_post_parse_action();
+
     void handle_element_popped(DOM::Element&);
 
     void adjust_mathml_attributes(HTMLToken&);
@@ -204,15 +207,17 @@ private:
     bool m_frameset_ok { true };
     bool m_parsing_fragment { false };
 
-    // https://html.spec.whatwg.org/multipage/parsing.html#scripting-flag
-    // The scripting flag is set to "enabled" if scripting was enabled for the Document with which the parser is associated when the parser was created, and "disabled" otherwise.
-    bool m_scripting_enabled { true };
+    // https://html.spec.whatwg.org/multipage/parsing.html#scripting-mode
+    ParserScriptingMode m_scripting_mode {};
 
     bool m_invoked_via_document_write { false };
     bool m_aborted { false };
     bool m_parser_pause_flag { false };
     bool m_stop_parsing { false };
+    bool m_resume_check_pending { false };
     size_t m_script_nesting_level { 0 };
+
+    Function<void()> m_post_parse_action;
 
     JS::Realm& realm();
 
@@ -221,22 +226,50 @@ private:
     GC::Ptr<HTMLFormElement> m_form_element;
     GC::Ptr<DOM::Element> m_context_element;
 
-#ifdef LIBWEB_USE_SWIFT
-    GC::ForeignPtr<Web::SpeculativeHTMLParser> m_speculative_parser;
-#endif
+    // https://html.spec.whatwg.org/multipage/parsing.html#active-speculative-html-parser
+    GC::Ptr<SpeculativeHTMLParser> m_active_speculative_html_parser;
 
     Vector<HTMLToken> m_pending_table_character_tokens;
 
     GC::Ptr<DOM::Text> m_character_insertion_node;
     StringBuilder m_character_insertion_builder { StringBuilder::Mode::UTF16 };
-} SWIFT_UNSAFE_REFERENCE;
+};
+
+class HTMLParserEndState final : public JS::Cell {
+    GC_CELL(HTMLParserEndState, JS::Cell);
+    GC_DECLARE_ALLOCATOR(HTMLParserEndState);
+
+public:
+    static GC::Ref<HTMLParserEndState> create(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser>);
+
+    void schedule_progress_check();
+
+private:
+    enum class Phase {
+        WaitingForDeferredScripts,
+        WaitingForASAPScripts,
+        WaitingForLoadEventDelay,
+        Completed,
+    };
+
+    HTMLParserEndState(GC::Ref<DOM::Document>, GC::Ptr<HTMLParser>);
+
+    virtual void visit_edges(Cell::Visitor&) override;
+
+    void check_progress();
+    void advance_to_asap_scripts_phase();
+    void complete();
+
+    Phase m_phase { Phase::WaitingForDeferredScripts };
+    bool m_check_pending { false };
+
+    GC::Ref<DOM::Document> m_document;
+    GC::Ptr<HTMLParser> m_parser;
+    GC::Ref<Platform::Timer> m_timeout;
+};
 
 RefPtr<CSS::StyleValue const> parse_dimension_value(StringView);
 RefPtr<CSS::StyleValue const> parse_nonzero_dimension_value(StringView);
 Optional<Color> parse_legacy_color_value(StringView);
-
-// Swift interop
-using HTMLParserGCPtr = GC::Ptr<HTMLParser>;
-using HTMLParserGCRef = GC::Ref<HTMLParser>;
 
 }

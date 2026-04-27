@@ -6,16 +6,15 @@
 
 #pragma once
 
-#include <AK/Badge.h>
 #include <AK/Format.h>
 #include <AK/Forward.h>
 #include <AK/HashMap.h>
 #include <AK/Noncopyable.h>
+#include <AK/Platform.h>
 #include <AK/StringView.h>
-#include <AK/Swift.h>
-#include <AK/Weakable.h>
 #include <LibGC/Forward.h>
 #include <LibGC/Internals.h>
+#include <LibGC/NanBoxedValue.h>
 #include <LibGC/Ptr.h>
 
 namespace GC {
@@ -24,8 +23,10 @@ namespace GC {
 // It should only be used when the lifetime of the GC-allocated member is always longer than the object
 #if defined(AK_COMPILER_CLANG)
 #    define IGNORE_GC [[clang::annotate("serenity::ignore_gc")]]
+#    define GC_ALLOW_CELL_DESTRUCTOR [[clang::annotate("ladybird::allow_cell_destructor")]]
 #else
 #    define IGNORE_GC
+#    define GC_ALLOW_CELL_DESTRUCTOR
 #endif
 
 #define GC_CELL(class_, base_class)                \
@@ -42,6 +43,9 @@ class GC_API Cell {
     AK_MAKE_NONMOVABLE(Cell);
 
 public:
+    static constexpr bool OVERRIDES_MUST_SURVIVE_GARBAGE_COLLECTION = false;
+    static constexpr bool OVERRIDES_FINALIZE = false;
+
     virtual ~Cell() = default;
 
     bool is_marked() const { return m_mark; }
@@ -65,17 +69,17 @@ public:
                 visit_impl(*cell);
         }
 
-        void visit(Cell& cell) SWIFT_NAME(visitRef(_:))
+        void visit(Cell& cell)
         {
             visit_impl(cell);
         }
 
-        void visit(Cell const* cell) SWIFT_NAME(visitConst(_:))
+        void visit(Cell const* cell)
         {
             visit(const_cast<Cell*>(cell));
         }
 
-        void visit(Cell const& cell) SWIFT_NAME(visitConstRef(_:))
+        void visit(Cell const& cell)
         {
             visit(const_cast<Cell&>(cell));
         }
@@ -101,10 +105,24 @@ public:
         }
 
         template<typename T>
+        void visit(ReadonlySpan<T> span)
+        requires(IsBaseOf<NanBoxedValue, T>)
+        {
+            visit_impl(ReadonlySpan<NanBoxedValue>(span.data(), span.size()));
+        }
+
+        template<typename T>
         void visit(Span<T> span)
         {
             for (auto& value : span)
                 visit(value);
+        }
+
+        template<typename T>
+        void visit(Span<T> span)
+        requires(IsBaseOf<NanBoxedValue, T>)
+        {
+            visit_impl(ReadonlySpan<NanBoxedValue>(span.data(), span.size()));
         }
 
         template<typename T, size_t inline_capacity>
@@ -112,6 +130,13 @@ public:
         {
             for (auto& value : vector)
                 visit(value);
+        }
+
+        template<typename T, size_t inline_capacity>
+        void visit(Vector<T, inline_capacity> const& vector)
+        requires(IsBaseOf<NanBoxedValue, T>)
+        {
+            visit_impl(ReadonlySpan<NanBoxedValue>(vector.span().data(), vector.size()));
         }
 
         template<typename T>
@@ -150,7 +175,14 @@ public:
             }
         }
 
-        void visit(NanBoxedValue const& value) SWIFT_NAME(visitValue(_:));
+        template<typename T>
+        void visit(Optional<T> const& optional)
+        {
+            if (optional.has_value())
+                visit(optional.value());
+        }
+
+        void visit(NanBoxedValue const& value);
 
         // Allow explicitly ignoring a GC-allocated member in a visit_edges implementation instead
         // of just not using it.
@@ -163,33 +195,29 @@ public:
 
     protected:
         virtual void visit_impl(Cell&) = 0;
+        virtual void visit_impl(ReadonlySpan<NanBoxedValue>) = 0;
         virtual ~Visitor() = default;
-    } SWIFT_UNSAFE_REFERENCE;
+    };
 
-    virtual void visit_edges(Visitor&) { }
+    MUST_UPCALL virtual void visit_edges(Visitor&) { }
 
     // This will be called on unmarked objects by the garbage collector in a separate pass before destruction.
-    virtual void finalize() { }
+    MUST_UPCALL virtual void finalize() { }
 
     // This allows cells to survive GC by choice, even if nothing points to them.
     // It's used to implement special rules in the web platform.
-    // NOTE: Cells must call set_overrides_must_survive_garbage_collection() for this to be honored.
+    // NOTE: Cell types must have OVERRIDES_MUST_SURVIVE_GARBAGE_COLLECTION set for this to be called.
     virtual bool must_survive_garbage_collection() const { return false; }
-
-    bool overrides_must_survive_garbage_collection(Badge<Heap>) const { return m_overrides_must_survive_garbage_collection; }
 
     ALWAYS_INLINE Heap& heap() const { return HeapBlockBase::from_cell(this)->heap(); }
 
 protected:
     Cell() = default;
 
-    void set_overrides_must_survive_garbage_collection(bool b) { m_overrides_must_survive_garbage_collection = b; }
-
 private:
     bool m_mark { false };
-    bool m_overrides_must_survive_garbage_collection { false };
     State m_state { State::Live };
-} SWIFT_UNSAFE_REFERENCE;
+};
 
 }
 

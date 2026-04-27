@@ -11,11 +11,9 @@
 #include <AK/OwnPtr.h>
 #include <LibGC/Function.h>
 #include <LibGfx/Forward.h>
-#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
-#include <LibWeb/HTML/BrowsingContext.h>
+#include <LibWeb/DOM/ViewportClient.h>
 #include <LibWeb/HTML/CORSSettingAttribute.h>
-#include <LibWeb/HTML/FormAssociatedElement.h>
 #include <LibWeb/HTML/HTMLElement.h>
 #include <LibWeb/HTML/LazyLoadingElement.h>
 #include <LibWeb/HTML/SourceSet.h>
@@ -25,17 +23,20 @@ namespace Web::HTML {
 
 class HTMLImageElement final
     : public HTMLElement
-    , public FormAssociatedElement
     , public LazyLoadingElement<HTMLImageElement>
     , public Layout::ImageProvider
-    , public DOM::Document::ViewportClient {
+    , public DOM::ViewportClient {
     WEB_PLATFORM_OBJECT(HTMLImageElement, HTMLElement);
     GC_DECLARE_ALLOCATOR(HTMLImageElement);
-    FORM_ASSOCIATED_ELEMENT(HTMLElement, HTMLImageElement);
     LAZY_LOADING_ELEMENT(HTMLImageElement);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~HTMLImageElement() override;
+
+    // ^FormAssociatedElement
+    virtual bool is_form_associated_element() const override { return true; }
 
     virtual void form_associated_element_attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_) override;
 
@@ -59,6 +60,9 @@ public:
 
     unsigned natural_width() const;
     unsigned natural_height() const;
+
+    int x() const;
+    int y() const;
 
     // https://html.spec.whatwg.org/multipage/embedded-content.html#dom-img-complete
     bool complete() const;
@@ -87,6 +91,10 @@ public:
     [[nodiscard]] Optional<ImageSourceAndPixelDensity> select_an_image_source();
 
     void set_source_set(SourceSet);
+
+    // https://html.spec.whatwg.org/multipage/embedded-content.html#the-img-element:dimension-attribute-source
+    DOM::Element const& dimension_attribute_source() const;
+    void set_dimension_attribute_source(DOM::Element const*);
 
     ImageRequest& current_request() { return *m_current_request; }
     ImageRequest const& current_request() const { return *m_current_request; }
@@ -136,7 +144,7 @@ private:
 
     void handle_successful_fetch(URL::URL const&, StringView mime_type, ImageRequest&, ByteBuffer, bool maybe_omit_events, URL::URL const& previous_url);
     void handle_failed_fetch();
-    void add_callbacks_to_image_request(GC::Ref<ImageRequest>, bool maybe_omit_events, String const& url_string, String const& previous_url);
+    void add_callbacks_to_image_request(GC::Ref<ImageRequest>, bool maybe_omit_events, String const& url_string, String const& previous_url, u64 update_the_image_data_count);
 
     void animate();
 
@@ -163,6 +171,10 @@ private:
     SourceSet m_source_set;
 
     CSSPixelSize m_last_seen_viewport_size;
+
+    // https://html.spec.whatwg.org/multipage/embedded-content.html#the-img-element:dimension-attribute-source
+    // Each img element has a dimension attribute source, which must initially be the img element itself.
+    GC::Ptr<DOM::Element const> m_dimension_attribute_source;
 
     u64 m_update_the_image_data_count { 0 };
 };

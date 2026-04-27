@@ -7,7 +7,7 @@
  */
 
 #include <AK/Badge.h>
-#include <LibCore/Event.h>
+#include <AK/Vector.h>
 #include <LibCore/EventLoop.h>
 #include <LibCore/EventLoopImplementation.h>
 #include <LibCore/EventReceiver.h>
@@ -73,7 +73,6 @@ NonnullRefPtr<WeakEventLoopReference> EventLoop::current_weak()
 
 void EventLoop::quit(int code)
 {
-    ThreadEventQueue::current().cancel_all_pending_jobs();
     m_impl->quit(code);
 }
 
@@ -112,11 +111,6 @@ size_t EventLoop::pump(WaitMode mode)
     return m_impl->pump(mode == WaitMode::WaitForEvents ? EventLoopImplementation::PumpMode::WaitForEvents : EventLoopImplementation::PumpMode::DontWaitForEvents);
 }
 
-void EventLoop::add_job(NonnullRefPtr<Promise<NonnullRefPtr<EventReceiver>>> job_promise)
-{
-    ThreadEventQueue::current().add_job(move(job_promise));
-}
-
 int EventLoop::register_signal(int signal_number, Function<void(int)> handler)
 {
     return EventLoopManager::the().register_signal(signal_number, move(handler));
@@ -147,6 +141,16 @@ void EventLoop::unregister_notifier(Badge<Notifier>, Notifier& notifier)
     EventLoopManager::the().unregister_notifier(notifier);
 }
 
+void EventLoop::register_process(pid_t pid, ESCAPING Function<void(pid_t)> exit_handler)
+{
+    EventLoopManager::the().register_process(pid, move(exit_handler));
+}
+
+void EventLoop::unregister_process(pid_t pid)
+{
+    EventLoopManager::the().unregister_process(pid);
+}
+
 void EventLoop::wake()
 {
     m_impl->wake();
@@ -169,7 +173,7 @@ WeakEventLoopReference::WeakEventLoopReference(EventLoop& event_loop)
 
 void WeakEventLoopReference::revoke()
 {
-    Threading::RWLockLocker<Threading::LockMode::Read> locker { m_lock };
+    Threading::RWLockLocker<Threading::LockMode::Write> locker { m_lock };
     m_event_loop = nullptr;
 }
 
@@ -186,7 +190,7 @@ StrongEventLoopReference::StrongEventLoopReference(WeakEventLoopReference& event
 
 StrongEventLoopReference::~StrongEventLoopReference()
 {
-    m_event_loop_weak->m_lock.unlock();
+    m_event_loop_weak->m_lock.unlock_read();
 }
 
 bool StrongEventLoopReference::is_alive() const

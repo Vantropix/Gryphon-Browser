@@ -6,16 +6,21 @@
 
 #pragma once
 
+#include <LibGC/Ptr.h>
 #include <LibGC/Root.h>
 #include <LibWeb/CSS/ComputedValues.h>
+#include <LibWeb/CSS/Display.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/InvalidateDisplayList.h>
+#include <LibWeb/Painting/ShadowData.h>
 #include <LibWeb/PixelUnits.h>
 #include <LibWeb/TraversalDecision.h>
 #include <LibWeb/TreeNode.h>
 
 namespace Web::Painting {
+
+class ChromeWidget;
 
 enum class PaintPhase {
     Background,
@@ -28,10 +33,10 @@ enum class PaintPhase {
 
 struct HitTestResult {
     GC::Root<Paintable> paintable;
+    GC::Ptr<ChromeWidget> chrome_widget {};
     size_t index_in_node { 0 };
     Optional<CSSPixels> vertical_distance {};
     Optional<CSSPixels> horizontal_distance {};
-
     enum InternalPosition {
         None,
         Before,
@@ -55,45 +60,34 @@ class WEB_API Paintable
     GC_CELL(Paintable, JS::Cell);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~Paintable();
 
     void detach_from_layout_node();
 
-    [[nodiscard]] bool is_visible() const;
+    [[nodiscard]] bool is_visible() const
+    {
+        auto const& cv = computed_values();
+        return cv.visibility() == CSS::Visibility::Visible && cv.opacity() != 0;
+    }
     [[nodiscard]] bool is_positioned() const { return m_positioned; }
     [[nodiscard]] bool is_fixed_position() const { return m_fixed_position; }
     [[nodiscard]] bool is_sticky_position() const { return m_sticky_position; }
     [[nodiscard]] bool is_absolutely_positioned() const { return m_absolutely_positioned; }
     [[nodiscard]] bool is_floating() const { return m_floating; }
     [[nodiscard]] bool is_inline() const { return m_inline; }
-    [[nodiscard]] CSS::Display display() const;
+    [[nodiscard]] CSS::Display display() const { return m_display; }
 
     bool has_stacking_context() const;
     StackingContext* enclosing_stacking_context();
-
-    virtual void before_paint(DisplayListRecordingContext&, PaintPhase) const { }
-    virtual void after_paint(DisplayListRecordingContext&, PaintPhase) const { }
 
     virtual void paint(DisplayListRecordingContext&, PaintPhase) const { }
     void paint_inspector_overlay(DisplayListRecordingContext&) const;
 
     [[nodiscard]] virtual TraversalDecision hit_test(CSSPixelPoint, HitTestType, Function<TraversalDecision(HitTestResult)> const& callback) const;
 
-    virtual bool wants_mouse_events() const { return false; }
-
     virtual bool forms_unconnected_subtree() const { return false; }
-
-    enum class DispatchEventOfSameName {
-        Yes,
-        No,
-    };
-    // When these methods return true, the DOM event with the same name will be
-    // dispatch at the mouse_event_target if it returns a valid DOM::Node, or
-    // the layout node's associated DOM node if it doesn't.
-    virtual DispatchEventOfSameName handle_mousedown(Badge<EventHandler>, CSSPixelPoint, unsigned button, unsigned modifiers);
-    virtual DispatchEventOfSameName handle_mouseup(Badge<EventHandler>, CSSPixelPoint, unsigned button, unsigned modifiers);
-    virtual DispatchEventOfSameName handle_mousemove(Badge<EventHandler>, CSSPixelPoint, unsigned buttons, unsigned modifiers);
-    virtual void handle_mouseleave(Badge<EventHandler>) { }
 
     virtual bool handle_mousewheel(Badge<EventHandler>, CSSPixelPoint, unsigned buttons, unsigned modifiers, int wheel_delta_x, int wheel_delta_y);
 
@@ -110,9 +104,7 @@ public:
 
     GC::Ptr<HTML::Navigable> navigable() const;
 
-    virtual void set_needs_display(InvalidateDisplayList = InvalidateDisplayList::Yes);
-    void set_needs_paint_only_properties_update(bool);
-    [[nodiscard]] bool needs_paint_only_properties_update() const { return m_needs_paint_only_properties_update; }
+    virtual void set_needs_repaint(InvalidateDisplayList = InvalidateDisplayList::Yes);
 
     PaintableBox* containing_block() const;
 
@@ -134,6 +126,8 @@ public:
 
     CSSPixelPoint box_type_agnostic_position() const;
 
+    void scroll_ancestor_to_offset_into_view(size_t offset);
+
     enum class SelectionState : u8 {
         None,        // No selection
         Start,       // Selection starts in this Node
@@ -143,17 +137,30 @@ public:
     };
 
     SelectionState selection_state() const { return m_selection_state; }
-    void set_selection_state(SelectionState state) { m_selection_state = state; }
+    void set_selection_state(SelectionState state);
 
-    virtual void resolve_paint_properties();
+    // https://drafts.csswg.org/css-pseudo-4/#highlight-styling
+    struct TextDecorationStyle {
+        Vector<CSS::TextDecorationLine> line;
+        CSS::TextDecorationStyle style;
+        Color color;
+    };
+    struct SelectionStyle {
+        Color background_color;
+        Optional<Color> text_color;
+        Optional<Vector<ShadowData>> text_shadow;
+        Optional<TextDecorationStyle> text_decoration;
+
+        bool has_styling() const
+        {
+            return background_color.alpha() > 0 || text_color.has_value() || text_shadow.has_value() || text_decoration.has_value();
+        }
+    };
+    [[nodiscard]] SelectionStyle selection_style() const;
 
     [[nodiscard]] String debug_description() const;
 
-    virtual void finalize() override
-    {
-        if (m_list_node.is_in_list())
-            m_list_node.remove();
-    }
+    virtual void finalize() override;
 
     friend class Layout::Node;
 
@@ -163,11 +170,12 @@ protected:
     virtual void paint_inspector_overlay_internal(DisplayListRecordingContext&) const { }
     virtual void visit_edges(Cell::Visitor&) override;
 
+    Optional<GC::Ptr<PaintableBox>> mutable m_containing_block;
+
 private:
     IntrusiveListNode<Paintable> m_list_node;
     GC::Ptr<DOM::Node> m_dom_node;
     GC::Ref<Layout::Node const> m_layout_node;
-    Optional<GC::Ptr<PaintableBox>> mutable m_containing_block;
 
     SelectionState m_selection_state { SelectionState::None };
 
@@ -177,8 +185,7 @@ private:
     bool m_absolutely_positioned : 1 { false };
     bool m_floating : 1 { false };
     bool m_inline : 1 { false };
-    bool m_visible_for_hit_testing : 1 { true };
-    bool m_needs_paint_only_properties_update : 1 { true };
+    CSS::Display m_display;
 };
 
 inline DOM::Node* HitTestResult::dom_node()
@@ -200,6 +207,6 @@ inline bool Paintable::fast_is<PaintableWithLines>() const { return is_paintable
 template<>
 inline bool Paintable::fast_is<TextPaintable>() const { return is_text_paintable(); }
 
-WEB_API Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, CSSPixelRect const& rect, CSS::BorderRadiusData const& top_left_radius, CSS::BorderRadiusData const& top_right_radius, CSS::BorderRadiusData const& bottom_right_radius, CSS::BorderRadiusData const& bottom_left_radius);
+WEB_API Painting::BorderRadiiData normalize_border_radii_data(Layout::Node const& node, CSSPixelRect const& border_rect, CSSPixelRect const& reference_rect, CSS::BorderRadiusData const& top_left_radius, CSS::BorderRadiusData const& top_right_radius, CSS::BorderRadiusData const& bottom_right_radius, CSS::BorderRadiusData const& bottom_left_radius);
 
 }

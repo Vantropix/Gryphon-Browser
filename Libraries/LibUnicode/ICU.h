@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2024-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -8,6 +8,7 @@
 
 #include <AK/Optional.h>
 #include <AK/OwnPtr.h>
+#include <AK/SourceLocation.h>
 #include <AK/String.h>
 #include <AK/StringView.h>
 #include <AK/Utf16String.h>
@@ -36,10 +37,9 @@ namespace Unicode {
 class LocaleData {
 public:
     static Optional<LocaleData&> for_locale(StringView locale);
+    static String canonicalize(StringView locale);
 
     ALWAYS_INLINE icu::Locale& locale() { return m_locale; }
-
-    String to_string();
 
     icu::LocaleDisplayNames& standard_display_names();
     icu::LocaleDisplayNames& dialect_display_names();
@@ -57,7 +57,7 @@ private:
     explicit LocaleData(icu::Locale locale);
 
     icu::Locale m_locale;
-    Optional<String> m_locale_string;
+    Optional<String> m_canonical_locale_string;
 
     OwnPtr<icu::LocaleDisplayNames> m_standard_display_names;
     OwnPtr<icu::LocaleDisplayNames> m_dialect_display_names;
@@ -87,6 +87,14 @@ constexpr bool icu_success(UErrorCode code)
 constexpr bool icu_failure(UErrorCode code)
 {
     return static_cast<bool>(U_FAILURE(code));
+}
+
+inline void verify_icu_success(UErrorCode code, SourceLocation location = SourceLocation::current())
+{
+    if (icu_failure(code)) [[unlikely]] {
+        dbgln("\033[31;1mICU error\033[0m: {} {}", u_errorName(code), location);
+        VERIFY_NOT_REACHED();
+    }
 }
 
 ALWAYS_INLINE icu::StringPiece icu_string_piece(StringView string)

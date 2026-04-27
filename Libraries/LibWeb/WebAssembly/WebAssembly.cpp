@@ -21,7 +21,7 @@
 #include <LibJS/Runtime/ValueInlines.h>
 #include <LibWasm/AbstractMachine/Validator.h>
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ResponsePrototype.h>
+#include <LibWeb/Bindings/Response.h>
 #include <LibWeb/ContentSecurityPolicy/BlockingAlgorithms.h>
 #include <LibWeb/Fetch/Infrastructure/HTTP/MIME.h>
 #include <LibWeb/Fetch/Response.h>
@@ -215,6 +215,47 @@ namespace Detail {
         _temporary_result.release_value();                                                                                                              \
     })
 
+Wasm::HostFunction create_host_function(JS::VM& vm, JS::FunctionObject& function, Wasm::FunctionType const& type, ByteString const& name)
+{
+    return Wasm::HostFunction {
+        [&](auto&, auto arguments) -> Wasm::Result {
+            GC::RootVector<JS::Value> argument_values { vm.heap() };
+            size_t index = 0;
+            for (auto& entry : arguments) {
+                argument_values.append(to_js_value(vm, entry, type.parameters()[index]));
+                ++index;
+            }
+
+            auto result = TRY_OR_RETURN_TRAP(JS::call(vm, function, JS::js_undefined(), argument_values.span()));
+            if (type.results().is_empty())
+                return Wasm::Result { Vector<Wasm::Value> {} };
+
+            if (type.results().size() == 1)
+                return Wasm::Result { Vector<Wasm::Value> { TRY_OR_RETURN_TRAP(to_webassembly_value(vm, result, type.results().first())) } };
+
+            auto method = TRY_OR_RETURN_TRAP(result.get_method(vm, vm.names.iterator));
+            if (!method)
+                return Wasm::Trap::from_external_object(vm.throw_completion<JS::TypeError>(JS::ErrorType::NotIterable, result.to_string_without_side_effects()));
+
+            auto values = TRY_OR_RETURN_TRAP(JS::iterator_to_list(vm, TRY_OR_RETURN_TRAP(JS::get_iterator_from_method(vm, result, *method))));
+
+            if (values.size() != type.results().size())
+                return Wasm::Trap::from_external_object(vm.throw_completion<JS::TypeError>(ByteString::formatted("Invalid number of return values for multi-value wasm return of {} objects", type.results().size())));
+
+            Vector<Wasm::Value> wasm_values;
+            TRY_OR_RETURN_OOM_TRAP(vm, wasm_values.try_ensure_capacity(values.size()));
+
+            size_t i = 0;
+            for (auto& value : values)
+                wasm_values.append(TRY_OR_RETURN_TRAP(to_webassembly_value(vm, value, type.results()[i++])));
+
+            return Wasm::Result { move(wasm_values) };
+        },
+        type,
+        name,
+    };
+}
+
 JS::ThrowCompletionOr<NonnullOwnPtr<Wasm::ModuleInstance>> instantiate_module(JS::VM& vm, Wasm::Module const& module, GC::Ptr<JS::Object> import_object)
 {
     Wasm::Linker linker { module };
@@ -239,7 +280,7 @@ JS::ThrowCompletionOr<NonnullOwnPtr<Wasm::ModuleInstance>> instantiate_module(JS
 
             // 3.2. If o is not an Object, throw a TypeError exception.
             if (!value.is_object())
-                return vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObject, value);
+                return vm.throw_completion<JS::TypeError>(JS::ErrorType::IsNotAEvaluatedFrom, value.to_string_without_side_effects(), "Object"_string, MUST(String::formatted("[wasm import object][\"{}\"]", import_name.module)));
             auto const& object = value.as_object();
 
             // 3.3. Let v be ? Get(o, componentName).
@@ -255,6 +296,7 @@ JS::ThrowCompletionOr<NonnullOwnPtr<Wasm::ModuleInstance>> instantiate_module(JS
                     if (!import_.is_function())
                         return vm.throw_completion<LinkError>(JS::ErrorType::IsNotAEvaluatedFrom, import_, "function"_string, MUST(String::formatted("[wasm import object][\"{}\"]", import_name.name)));
                     auto& function = import_.as_function();
+                    auto& function_type = type.function();
 
                     // 3.4.2. If v has a [[FunctionAddress]] internal slot, and therefore is an Exported Function,
                     Optional<Wasm::FunctionAddress> address;
@@ -267,43 +309,7 @@ JS::ThrowCompletionOr<NonnullOwnPtr<Wasm::ModuleInstance>> instantiate_module(JS
                     else {
                         // 3.4.3.1. Create a host function from v and functype, and let funcaddr be the result.
                         cache.add_imported_object(function);
-                        Wasm::HostFunction host_function {
-                            [&](auto&, auto& arguments) -> Wasm::Result {
-                                GC::RootVector<JS::Value> argument_values { vm.heap() };
-                                size_t index = 0;
-                                for (auto& entry : arguments) {
-                                    argument_values.append(to_js_value(vm, entry, type.parameters()[index]));
-                                    ++index;
-                                }
-
-                                auto result = TRY_OR_RETURN_TRAP(JS::call(vm, function, JS::js_undefined(), argument_values.span()));
-                                if (type.results().is_empty())
-                                    return Wasm::Result { Vector<Wasm::Value> {} };
-
-                                if (type.results().size() == 1)
-                                    return Wasm::Result { Vector<Wasm::Value> { TRY_OR_RETURN_TRAP(to_webassembly_value(vm, result, type.results().first())) } };
-
-                                auto method = TRY_OR_RETURN_TRAP(result.get_method(vm, vm.names.iterator));
-                                if (!method)
-                                    return Wasm::Trap::from_external_object(vm.throw_completion<JS::TypeError>(JS::ErrorType::NotIterable, result));
-
-                                auto values = TRY_OR_RETURN_TRAP(JS::iterator_to_list(vm, TRY_OR_RETURN_TRAP(JS::get_iterator_from_method(vm, result, *method))));
-
-                                if (values.size() != type.results().size())
-                                    return Wasm::Trap::from_external_object(vm.throw_completion<JS::TypeError>(ByteString::formatted("Invalid number of return values for multi-value wasm return of {} objects", type.results().size())));
-
-                                Vector<Wasm::Value> wasm_values;
-                                TRY_OR_RETURN_OOM_TRAP(vm, wasm_values.try_ensure_capacity(values.size()));
-
-                                size_t i = 0;
-                                for (auto& value : values)
-                                    wasm_values.append(TRY_OR_RETURN_TRAP(to_webassembly_value(vm, value, type.results()[i++])));
-
-                                return Wasm::Result { move(wasm_values) };
-                            },
-                            type,
-                            ByteString::formatted("func{}", resolved_imports.size()),
-                        };
+                        auto host_function = create_host_function(vm, function, function_type, ByteString::formatted("func{}", resolved_imports.size()));
                         address = cache.abstract_machine().store().allocate(move(host_function));
                         // FIXME: 3.4.3.2. Let index be the number of external functions in imports. This value index is known as the index of the host function funcaddr.
                         //        'index' doesn't seem to be used anywhere?
@@ -345,9 +351,9 @@ JS::ThrowCompletionOr<NonnullOwnPtr<Wasm::ModuleInstance>> instantiate_module(JS
                         address = cache.abstract_machine().store().allocate({ type.type(), false }, cast_value);
                     }
                     // 3.5.2. Otherwise, if v implements Global,
-                    else if (import_.is_object() && is<Global>(import_.as_object())) {
+                    else if (auto global = import_.as_if<Global>()) {
                         // 3.5.2.1. Let globaladdr be v.[[Global]].
-                        address = as<Global>(import_.as_object()).address();
+                        address = global->address();
                     }
                     // 3.5.3. Otherwise,
                     else {
@@ -363,11 +369,11 @@ JS::ThrowCompletionOr<NonnullOwnPtr<Wasm::ModuleInstance>> instantiate_module(JS
                 // 3.6. If externtype is of the form mem memtype,
                 [&](Wasm::MemoryType const&) -> JS::ThrowCompletionOr<void> {
                     // 3.6.1. If v does not implement Memory, throw a LinkError exception.
-                    if (!import_.is_object() || !is<WebAssembly::Memory>(import_.as_object())) {
+                    auto memory = import_.as_if<Memory>();
+                    if (!memory)
                         return vm.throw_completion<LinkError>("Expected an instance of WebAssembly.Memory for a memory import"sv);
-                    }
                     // 3.6.2. Let externmem be the external value mem v.[[Memory]].
-                    auto address = static_cast<WebAssembly::Memory const&>(import_.as_object()).address();
+                    auto address = memory->address();
                     // 3.6.3. Append externmem to imports.
                     resolved_imports.set(import_name, Wasm::ExternValue { address });
                     return {};
@@ -375,12 +381,12 @@ JS::ThrowCompletionOr<NonnullOwnPtr<Wasm::ModuleInstance>> instantiate_module(JS
                 // 3.7. If externtype is of the form table tabletype,
                 [&](Wasm::TableType const&) -> JS::ThrowCompletionOr<void> {
                     // 3.7.1. If v does not implement Table, throw a LinkError exception.
-                    if (!import_.is_object() || !is<WebAssembly::Table>(import_.as_object())) {
+                    auto table = import_.as_if<Table>();
+                    if (!table)
                         return vm.throw_completion<LinkError>("Expected an instance of WebAssembly.Table for a table import"sv);
-                    }
                     // 3.7.2. Let tableaddr be v.[[Table]].
                     // 3.7.3. Let externtable be the external value table tableaddr.
-                    auto address = static_cast<WebAssembly::Table const&>(import_.as_object()).address();
+                    auto address = table->address();
                     // 3.7.4. Append externtable to imports.
                     resolved_imports.set(import_name, Wasm::ExternValue { address });
                     return {};
@@ -418,7 +424,7 @@ JS::ThrowCompletionOr<NonnullOwnPtr<Wasm::ModuleInstance>> instantiate_module(JS
     return instance_result.release_value();
 }
 
-// // https://webassembly.github.io/spec/js-api/#compile-a-webassembly-module
+// https://webassembly.github.io/spec/js-api/#compile-a-webassembly-module
 // https://webassembly.github.io/content-security-policy/js-api/#compile-a-webassembly-module
 JS::ThrowCompletionOr<NonnullRefPtr<CompiledWebAssemblyModule>> compile_a_webassembly_module(JS::VM& vm, ByteBuffer data)
 {
@@ -439,6 +445,7 @@ JS::ThrowCompletionOr<NonnullRefPtr<CompiledWebAssemblyModule>> compile_a_webass
     return compiled_module;
 }
 
+// https://webassembly.github.io/spec/js-api/#HostResizeArrayBuffer
 JS::ThrowCompletionOr<JS::HandledByHost> host_resize_array_buffer(JS::VM& vm, JS::ArrayBuffer& buffer, size_t new_length)
 {
     // 1. If buffer.[[ArrayBufferDetachKey]] is "WebAssembly.Memory",
@@ -489,6 +496,72 @@ JS::ThrowCompletionOr<JS::HandledByHost> host_resize_array_buffer(JS::VM& vm, JS
     return JS::HandledByHost::Unhandled;
 }
 
+// https://webassembly.github.io/threads/js-api/#abstract-operation-hostgrowsharedarraybuffer
+JS::ThrowCompletionOr<JS::HandledByHost> host_grow_shared_array_buffer(JS::VM& vm, JS::ArrayBuffer& buffer, size_t new_length)
+{
+    // AD-HOC: If buffer.[[ArrayBufferDetachKey]] is "WebAssembly.Memory",
+    auto detach_key = buffer.detach_key();
+    if (detach_key.is_string() && detach_key.as_string() == JS::PrimitiveString::create(vm, "WebAssembly.Memory"_string)) {
+        // 1. Let map be the surrounding agent's associated Memory object cache.
+        auto const& map = get_cache(*vm.current_realm()).memory_instances();
+
+        auto current_byte_length = buffer.byte_length();
+
+        // 3. For each memaddr → mem in map,
+        bool seen = false;
+        for (auto [address, memory] : map) {
+            auto buffer_object = memory->buffer_object();
+            // 1. If SameValue(mem.[[BufferObject]], buffer) is true,
+            if (buffer_object.ptr() == &buffer) {
+                // 2. Assert: buffer is the [[BufferObject]] of exactly one value in map.
+                VERIFY(!seen);
+                seen = true;
+
+                // 1. Assert: buffer.[[ArrayBufferByteLength]] modulo 65536 is 0.
+                VERIFY(buffer.byte_length() % Wasm::Constants::page_size == 0);
+
+                // 2. Let lengthDelta be newLength - buffer.[[ArrayBufferByteLength]].
+                auto length_delta = new_length - buffer.byte_length();
+
+                // 3. If lengthDelta < 0 or lengthDelta modulo 65536 is not 0,
+                if (new_length < buffer.byte_length() || length_delta % Wasm::Constants::page_size != 0) {
+                    // 1. Throw a RangeError exception.
+                    return vm.throw_completion<JS::RangeError>("WebAssembly.Memory buffers must be resized by a multiple of the page size"sv);
+                }
+
+                // 4. Let delta be lengthDelta ÷ 65536.
+                auto delta = length_delta / Wasm::Constants::page_size;
+
+                // 5. Grow the memory buffer associated with memaddr by delta.
+                // FIXME: "Grow the memory buffer" is a separate algorithm from the Memory#grow() method.
+                TRY(memory->grow(delta));
+            }
+        }
+
+        // 2. Assert: buffer is the [[BufferObject]] of exactly one value in map.
+        VERIFY(seen);
+
+        // 4. If newLength < buffer.[[ArrayBufferByteLength]] or newLength > buffer.[[ArrayBufferMaxByteLength]], throw a RangeError exception.
+        if (new_length < current_byte_length)
+            return vm.throw_completion<JS::RangeError>(JS::ErrorType::ByteLengthLessThanPreviousByteLength, new_length, current_byte_length);
+        if (new_length > buffer.max_byte_length())
+            return vm.throw_completion<JS::RangeError>(JS::ErrorType::ByteLengthExceedsMaxByteLength, new_length, buffer.max_byte_length());
+
+        // FIXME: 5. Let agentRecord be the surrounding agent’s Agent Record.
+        // FIXME: 6. Let isLittleEndian be agentRecord.[[LittleEndian]] .
+        // FIXME: 7. Let event be an implementation defined ReadModifyWriteSharedMemory event, whose [[Order]] is "SeqCst", [[Payload]] is NumericToRawBytes(Bigint, newLength, isLittleEndian), [[Block]] is buffer.[[ArrayBufferByteLengthData]], [[ByteIndex]] is 0, and [[ElementSize]] is 8.
+        // FIXME: 8. Let eventsRecord be the EventsRecord in agentRecord.[[CandidateExecution]].[[EventsRecords]] that corresponds to the surrounding agent’s signifier agentRecord.[[Signifier]].
+        // FIXME: 9. Append event to eventsRecord.[[EventsList]].
+        VERIFY(buffer.byte_length() == new_length);
+
+        // 10. Return handled.
+        return JS::HandledByHost::Handled;
+    }
+
+    // AD-HOC: Otherwise, return unhandled.
+    return JS::HandledByHost::Unhandled;
+}
+
 GC_DEFINE_ALLOCATOR(ExportedWasmFunction);
 
 GC::Ref<ExportedWasmFunction> ExportedWasmFunction::create(JS::Realm& realm, Utf16FlyString name, Function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)> behavior, Wasm::FunctionAddress exported_address)
@@ -502,9 +575,22 @@ GC::Ref<ExportedWasmFunction> ExportedWasmFunction::create(JS::Realm& realm, Utf
 }
 
 ExportedWasmFunction::ExportedWasmFunction(Utf16FlyString name, AK::Function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)> behavior, Wasm::FunctionAddress exported_address, JS::Object& prototype)
-    : NativeFunction(move(name), move(behavior), prototype)
+    : NativeFunction(move(name), prototype)
+    , m_behavior(move(behavior))
     , m_exported_address(exported_address)
 {
+}
+
+void ExportedWasmFunction::visit_edges(Cell::Visitor& visitor)
+{
+    NativeFunction::visit_edges(visitor);
+    visitor.visit_possible_values(m_behavior.raw_capture_range());
+}
+
+JS::ThrowCompletionOr<JS::Value> ExportedWasmFunction::call()
+{
+    VERIFY(m_behavior);
+    return m_behavior(vm());
 }
 
 JS::NativeFunction* create_native_function(JS::VM& vm, Wasm::FunctionAddress address, Utf16FlyString name, Instance* instance)
@@ -622,6 +708,7 @@ JS::ThrowCompletionOr<Wasm::Value> to_webassembly_value(JS::VM& vm, JS::Value va
         return Wasm::Value(Wasm::ValueType { Wasm::ValueType::Kind::ExceptionReference });
     case Wasm::ValueType::V128:
         return vm.throw_completion<JS::TypeError>("Cannot convert a vector value to a javascript value"sv);
+    case Wasm::ValueType::TypeUseReference:
     case Wasm::ValueType::UnsupportedHeapReference:
         return vm.throw_completion<JS::TypeError>("Unsupported heap reference"sv);
     }
@@ -642,6 +729,8 @@ Wasm::Value default_webassembly_value(JS::VM& vm, Wasm::ValueType type)
     case Wasm::ValueType::ExternReference:
         return MUST(to_webassembly_value(vm, JS::js_undefined(), type));
     case Wasm::ValueType::ExceptionReference:
+        return Wasm::Value(type);
+    case Wasm::ValueType::TypeUseReference:
         return Wasm::Value(type);
     case Wasm::ValueType::UnsupportedHeapReference:
         return Wasm::Value(type);
@@ -690,6 +779,7 @@ JS::Value to_js_value(JS::VM& vm, Wasm::Value& wasm_value, Wasm::ValueType type)
     }
     case Wasm::ValueType::V128:
     case Wasm::ValueType::ExceptionReference:
+    case Wasm::ValueType::TypeUseReference:
     case Wasm::ValueType::UnsupportedHeapReference:
         VERIFY_NOT_REACHED();
     }
@@ -805,23 +895,20 @@ GC::Ref<WebIDL::Promise> instantiate_promise_of_module(JS::VM& vm, GC::Ref<WebID
 
     // 2. Upon fulfillment of promiseOfModule with value module:
     auto fulfillment_steps = GC::create_function(vm.heap(), [&vm, promise, import_object](JS::Value module_value) -> WebIDL::ExceptionOr<JS::Value> {
-        VERIFY(module_value.is_object() && is<Module>(module_value.as_object()));
-        auto module = GC::Ref { static_cast<Module&>(module_value.as_object()) };
+        auto& module = module_value.as<Module>();
 
         // 1. Instantiate the WebAssembly module module importing importObject, and let innerPromise be the result.
         auto inner_promise = asynchronously_instantiate_webassembly_module(vm, module, import_object);
 
         // 2. Upon fulfillment of innerPromise with value instance.
-        auto instantiate_fulfillment_steps = GC::create_function(vm.heap(), [promise, module](JS::Value instance_value) -> WebIDL::ExceptionOr<JS::Value> {
+        auto instantiate_fulfillment_steps = GC::create_function(vm.heap(), [promise, &module](JS::Value instance_value) -> WebIDL::ExceptionOr<JS::Value> {
             auto& realm = HTML::relevant_realm(*promise->promise());
-
-            VERIFY(instance_value.is_object() && is<Instance>(instance_value.as_object()));
-            auto instance = GC::Ref { static_cast<Instance&>(instance_value.as_object()) };
+            auto& instance = instance_value.as<Instance>();
 
             // 1. Let result be the WebAssemblyInstantiatedSource value «[ "module" → module, "instance" → instance ]».
             auto result = JS::Object::create(realm, nullptr);
-            result->define_direct_property("module"_utf16_fly_string, module, JS::default_attributes);
-            result->define_direct_property("instance"_utf16_fly_string, instance, JS::default_attributes);
+            result->define_direct_property("module"_utf16_fly_string, &module, JS::default_attributes);
+            result->define_direct_property("instance"_utf16_fly_string, &instance, JS::default_attributes);
 
             // 2. Resolve promise with result.
             WebIDL::resolve_promise(realm, promise, result);
@@ -879,12 +966,12 @@ GC::Ref<WebIDL::Promise> compile_potential_webassembly_response(JS::VM& vm, GC::
         auto& realm = HTML::relevant_realm(*return_value->promise());
 
         // 1. Let response be unwrappedSource’s response.
-        if (!unwrapped_source.is_object() || !is<Fetch::Response>(unwrapped_source.as_object())) {
+        auto response_object = unwrapped_source.as_if<Fetch::Response>();
+        if (!response_object) {
             WebIDL::reject_promise(realm, return_value, vm.throw_completion<JS::TypeError>(JS::ErrorType::NotAnObjectOfType, "Response").value());
             return JS::js_undefined();
         }
-        auto& response_object = static_cast<Fetch::Response&>(unwrapped_source.as_object());
-        auto response = response_object.response();
+        auto response = response_object->response();
 
         // 2. Let mimeType be the result of getting `Content-Type` from response’s header list.
         // 3. If mimeType is null, reject returnValue with a TypeError and abort these substeps.
@@ -904,13 +991,13 @@ GC::Ref<WebIDL::Promise> compile_potential_webassembly_response(JS::VM& vm, GC::
         }
 
         // 7. If response’s status is not an ok status, reject returnValue with a TypeError and abort these substeps.
-        if (!response_object.ok()) {
+        if (!response_object->ok()) {
             WebIDL::reject_promise(realm, return_value, vm.throw_completion<JS::TypeError>("Response does not represent an ok status"sv).value());
             return JS::js_undefined();
         }
 
         // 8. Consume response’s body as an ArrayBuffer, and let bodyPromise be the result.
-        auto body_promise_or_error = response_object.array_buffer();
+        auto body_promise_or_error = response_object->array_buffer();
         if (body_promise_or_error.is_error()) {
             auto throw_completion = Bindings::exception_to_throw_completion(realm.vm(), body_promise_or_error.release_error());
             WebIDL::reject_promise(realm, return_value, throw_completion.value());

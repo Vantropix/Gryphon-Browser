@@ -9,7 +9,7 @@
 #include <AK/Optional.h>
 #include <AK/RedBlackTree.h>
 #include <LibWeb/Animations/AnimationEffect.h>
-#include <LibWeb/Bindings/KeyframeEffectPrototype.h>
+#include <LibWeb/Bindings/KeyframeEffect.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/CSS/Selector.h>
 #include <LibWeb/CSS/StyleValues/StyleValue.h>
@@ -25,6 +25,7 @@ struct KeyframeEffectOptions : public EffectTiming {
 };
 
 Bindings::CompositeOperation css_animation_composition_to_bindings_composite_operation(CSS::AnimationComposition composition);
+Bindings::CompositeOperationOrAuto css_animation_composition_to_bindings_composite_operation_or_auto(CSS::AnimationComposition composition);
 
 // https://www.w3.org/TR/web-animations-1/#dictdef-basepropertyindexedkeyframe
 // Note: This is an intermediate structure used only when parsing Keyframes provided by the caller in a slightly
@@ -69,6 +70,7 @@ public:
             // before they are applied to an element
             HashMap<CSS::PropertyID, Variant<UseInitial, NonnullRefPtr<CSS::StyleValue const>>> properties {};
             Bindings::CompositeOperationOrAuto composite { Bindings::CompositeOperationOrAuto::Auto };
+            Variant<Empty, CSS::EasingFunction, NonnullRefPtr<CSS::StyleValue const>> easing {};
         };
         RedBlackTree<u64, ResolvedKeyFrame> keyframes_by_key;
     };

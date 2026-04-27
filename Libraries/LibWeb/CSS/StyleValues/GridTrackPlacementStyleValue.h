@@ -20,11 +20,13 @@ public:
     virtual ~GridTrackPlacementStyleValue() override = default;
 
     GridTrackPlacement const& grid_track_placement() const { return m_grid_track_placement; }
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
     bool properties_equal(GridTrackPlacementStyleValue const& other) const { return m_grid_track_placement == other.m_grid_track_placement; }
+
+    virtual bool is_computationally_independent() const override { return m_grid_track_placement.is_computationally_independent(); }
 
 private:
     explicit GridTrackPlacementStyleValue(GridTrackPlacement grid_track_placement)

@@ -28,8 +28,8 @@ public:
     virtual ~DOMMatrix() override;
 
     static WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> from_matrix(JS::VM&, DOMMatrixInit other = {});
-    static WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> from_float32_array(JS::VM&, GC::Root<WebIDL::BufferSource> const& array32);
-    static WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> from_float64_array(JS::VM&, GC::Root<WebIDL::BufferSource> const& array64);
+    static WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> from_float32_array(JS::VM&, GC::Root<JS::Float32Array> const&);
+    static WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> from_float64_array(JS::VM&, GC::Root<JS::Float64Array> const&);
 
     void set_m11(double value);
     void set_m12(double value);
@@ -69,8 +69,6 @@ public:
     GC::Ref<DOMMatrix> invert_self();
 
     WebIDL::ExceptionOr<GC::Ref<DOMMatrix>> set_matrix_value(String const& transform_list);
-
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::DOMMatrix; }
 
 private:
     DOMMatrix(JS::Realm&, double m11, double m12, double m21, double m22, double m41, double m42);

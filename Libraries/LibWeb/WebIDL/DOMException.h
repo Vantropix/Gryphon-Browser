@@ -8,6 +8,7 @@
 
 #include <AK/Utf16FlyString.h>
 #include <AK/Utf16String.h>
+#include <LibJS/Runtime/ErrorData.h>
 #include <LibWeb/Bindings/PlatformObject.h>
 #include <LibWeb/Bindings/Serializable.h>
 #include <LibWeb/Export.h>
@@ -47,6 +48,7 @@ namespace Web::WebIDL {
 
 // https://webidl.spec.whatwg.org/#idl-DOMException-error-names
 // Same order as in the spec document, also matches the legacy codes order above.
+// Omits QuotaExceededError as that has it's own DOMException derived interface.
 #define ENUMERATE_DOM_EXCEPTION_ERROR_NAMES          \
     __ENUMERATE(IndexSizeError) /* Deprecated */     \
     __ENUMERATE(HierarchyRequestError)               \
@@ -66,7 +68,6 @@ namespace Web::WebIDL {
     __ENUMERATE(NetworkError)                        \
     __ENUMERATE(AbortError)                          \
     __ENUMERATE(URLMismatchError)                    \
-    __ENUMERATE(QuotaExceededError)                  \
     __ENUMERATE(TimeoutError)                        \
     __ENUMERATE(InvalidNodeTypeError)                \
     __ENUMERATE(DataCloneError)                      \
@@ -92,8 +93,9 @@ static u16 get_legacy_code_for_name(FlyString const& name)
 }
 
 // https://webidl.spec.whatwg.org/#idl-DOMException
-class WEB_API DOMException final
+class WEB_API DOMException
     : public Bindings::PlatformObject
+    , public JS::ErrorData
     , public Bindings::Serializable {
     WEB_PLATFORM_OBJECT(DOMException, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(DOMException);
@@ -112,8 +114,6 @@ public:
     Utf16FlyString const& message() const { return m_message; }
     u16 code() const { return get_legacy_code_for_name(m_name); }
 
-    virtual HTML::SerializeType serialize_type() const override { return HTML::SerializeType::DOMException; }
-
     virtual WebIDL::ExceptionOr<void> serialization_steps(HTML::TransferDataEncoder&, bool for_storage, HTML::SerializationMemory&) override;
     virtual WebIDL::ExceptionOr<void> deserialization_steps(HTML::TransferDataDecoder&, HTML::DeserializationMemory&) override;
 
@@ -122,8 +122,12 @@ protected:
     explicit DOMException(JS::Realm&);
 
     virtual void initialize(JS::Realm&) override;
+    virtual void visit_edges(Visitor&) override;
 
 private:
+    virtual ErrorData* error_data() final { return this; }
+    virtual ErrorData const* error_data() const final { return this; }
+
     FlyString m_name;
     Utf16FlyString m_message;
 };

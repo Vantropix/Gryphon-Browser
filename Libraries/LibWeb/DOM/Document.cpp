@@ -2,9 +2,10 @@
  * Copyright (c) 2018-2025, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2021-2023, Linus Groh <linusg@serenityos.org>
  * Copyright (c) 2021-2025, Luke Wilde <luke@ladybird.org>
- * Copyright (c) 2021-2024, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2021-2026, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2024, Matthew Olsson <mattco@serenityos.org>
  * Copyright (c) 2025, Jelle Raaijmakers <jelle@ladybird.org>
+ * Copyright (c) 2025, Simon Farre <simon.farre.cx@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -14,13 +15,17 @@
 #include <AK/Debug.h>
 #include <AK/GenericLexer.h>
 #include <AK/InsertionSort.h>
+#include <AK/JsonObjectSerializer.h>
+#include <AK/Random.h>
 #include <AK/StringBuilder.h>
 #include <AK/TemporaryChange.h>
 #include <AK/Time.h>
 #include <AK/Utf8View.h>
 #include <LibCore/Timer.h>
-#include <LibCrypto/SecureRandom.h>
 #include <LibGC/RootVector.h>
+#include <LibHTTP/Cookie/Cookie.h>
+#include <LibHTTP/Cookie/ParsedCookie.h>
+#include <LibJS/Console.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/FunctionObject.h>
 #include <LibJS/Runtime/NativeFunction.h>
@@ -33,12 +38,14 @@
 #include <LibWeb/Animations/AnimationTimeline.h>
 #include <LibWeb/Animations/DocumentTimeline.h>
 #include <LibWeb/Animations/TimeValue.h>
-#include <LibWeb/Bindings/DocumentPrototype.h>
+#include <LibWeb/Bindings/Document.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
 #include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/CSS/AnimationEvent.h>
 #include <LibWeb/CSS/CSSAnimation.h>
 #include <LibWeb/CSS/CSSImportRule.h>
+#include <LibWeb/CSS/CSSPropertyRule.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/CSSTransition.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/FontComputer.h>
@@ -48,7 +55,9 @@
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/SelectorEngine.h>
 #include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/CSS/StyleInvalidation.h>
 #include <LibWeb/CSS/StyleSheetIdentifier.h>
+#include <LibWeb/CSS/StyleSheetList.h>
 #include <LibWeb/CSS/StyleValues/ColorSchemeStyleValue.h>
 #include <LibWeb/CSS/StyleValues/GuaranteedInvalidStyleValue.h>
 #include <LibWeb/CSS/StyleValues/RandomValueSharingStyleValue.h>
@@ -58,7 +67,8 @@
 #include <LibWeb/ContentSecurityPolicy/Directives/Directive.h>
 #include <LibWeb/ContentSecurityPolicy/Policy.h>
 #include <LibWeb/ContentSecurityPolicy/PolicyList.h>
-#include <LibWeb/Cookie/ParsedCookie.h>
+#include <LibWeb/DOM/AbstractElement.h>
+#include <LibWeb/DOM/AccessibilityTreeNode.h>
 #include <LibWeb/DOM/AdoptedStyleSheets.h>
 #include <LibWeb/DOM/Attr.h>
 #include <LibWeb/DOM/CDATASection.h>
@@ -122,15 +132,18 @@
 #include <LibWeb/HTML/HTMLMetaElement.h>
 #include <LibWeb/HTML/HTMLObjectElement.h>
 #include <LibWeb/HTML/HTMLScriptElement.h>
+#include <LibWeb/HTML/HTMLSlotElement.h>
 #include <LibWeb/HTML/HTMLStyleElement.h>
 #include <LibWeb/HTML/HTMLTextAreaElement.h>
 #include <LibWeb/HTML/HTMLTitleElement.h>
 #include <LibWeb/HTML/HashChangeEvent.h>
+#include <LibWeb/HTML/History.h>
 #include <LibWeb/HTML/ListOfAvailableImages.h>
 #include <LibWeb/HTML/Location.h>
 #include <LibWeb/HTML/MessageEvent.h>
 #include <LibWeb/HTML/MessagePort.h>
 #include <LibWeb/HTML/Navigable.h>
+#include <LibWeb/HTML/NavigableContainer.h>
 #include <LibWeb/HTML/Navigation.h>
 #include <LibWeb/HTML/NavigationParams.h>
 #include <LibWeb/HTML/Numbers.h>
@@ -139,6 +152,7 @@
 #include <LibWeb/HTML/PopStateEvent.h>
 #include <LibWeb/HTML/Scripting/Agent.h>
 #include <LibWeb/HTML/Scripting/ClassicScript.h>
+#include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Scripting/WindowEnvironmentSettingsObject.h>
@@ -155,18 +169,28 @@
 #include <LibWeb/Infra/Strings.h>
 #include <LibWeb/IntersectionObserver/IntersectionObserver.h>
 #include <LibWeb/Layout/BlockFormattingContext.h>
+#include <LibWeb/Layout/SVGFormattingContext.h>
+#include <LibWeb/Layout/SVGSVGBox.h>
 #include <LibWeb/Layout/TreeBuilder.h>
 #include <LibWeb/Layout/Viewport.h>
 #include <LibWeb/Namespace.h>
+#include <LibWeb/Page/EventHandler.h>
 #include <LibWeb/Page/Page.h>
+#include <LibWeb/Painting/AccumulatedVisualContext.h>
 #include <LibWeb/Painting/DisplayList.h>
+#include <LibWeb/Painting/DisplayListCommand.h>
+#include <LibWeb/Painting/DisplayListRecorder.h>
+#include <LibWeb/Painting/PaintableBox.h>
+#include <LibWeb/Painting/StackingContext.h>
 #include <LibWeb/Painting/ViewportPaintable.h>
 #include <LibWeb/PermissionsPolicy/AutoplayAllowlist.h>
+#include <LibWeb/Platform/EventLoopPlugin.h>
 #include <LibWeb/ResizeObserver/ResizeObserver.h>
 #include <LibWeb/ResizeObserver/ResizeObserverEntry.h>
 #include <LibWeb/SVG/SVGDecodedImageData.h>
 #include <LibWeb/SVG/SVGElement.h>
 #include <LibWeb/SVG/SVGSVGElement.h>
+#include <LibWeb/SVG/SVGScriptElement.h>
 #include <LibWeb/SVG/SVGStyleElement.h>
 #include <LibWeb/SVG/SVGTitleElement.h>
 #include <LibWeb/Selection/Selection.h>
@@ -177,10 +201,15 @@
 #include <LibWeb/UIEvents/FocusEvent.h>
 #include <LibWeb/UIEvents/KeyboardEvent.h>
 #include <LibWeb/UIEvents/MouseEvent.h>
+#include <LibWeb/UIEvents/PointerEvent.h>
+#include <LibWeb/UIEvents/PointerTypes.h>
 #include <LibWeb/UIEvents/TextEvent.h>
+#include <LibWeb/ViewTransition/ViewTransition.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 #include <LibWeb/WebIDL/DOMException.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
+#include <LibWeb/WebIDL/ObservableArray.h>
+#include <LibWeb/XPath/XPath.h>
 
 namespace Web::DOM {
 
@@ -232,7 +261,7 @@ static GC::Ref<HTML::BrowsingContext> obtain_a_browsing_context_to_use_for_a_nav
     }
 
     // 10. Let newBrowsingContext be the first return value of creating a new top-level browsing context and document.
-    auto browsing_context_and_document = MUST(HTML::create_a_new_top_level_browsing_context_and_document(browsing_context.page()));
+    auto browsing_context_and_document = HTML::create_a_new_top_level_browsing_context_and_document(browsing_context.page());
     auto new_browsing_context = browsing_context_and_document.browsing_context;
 
     // 11. Let navigationCOOP be navigationParams's cross-origin opener policy.
@@ -355,7 +384,7 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     // AD-HOC: The response object no longer has an associated timing info object. For now, we use response's non-standard response time property,
     //         which represents the time that the time that the response object was created.
     auto response_creation_time = navigation_params.response->monotonic_response_time().nanoseconds() / 1e6;
-    load_timing_info.navigation_start_time = HighResolutionTime::coarsen_time(response_creation_time, HTML::relevant_settings_object(*window).cross_origin_isolated_capability() == HTML::CanUseCrossOriginIsolatedAPIs::Yes);
+    load_timing_info.navigation_start_time = HighResolutionTime::coarsen_time(response_creation_time, HTML::relevant_settings_object(*window).cross_origin_isolated_capability());
 
     // 9. Let document be a new Document, with
     //    type: type
@@ -373,7 +402,9 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     //    current document readiness: "loading"
     //    about base URL: navigationParams's about base URL
     //    allow declarative shadow roots: true
-    auto document = HTML::HTMLDocument::create(window->realm());
+    //    custom element registry: A new CustomElementRegistry object.
+    auto& realm = window->realm();
+    auto document = HTML::HTMLDocument::create(realm);
     document->m_type = type;
     document->m_content_type = move(content_type);
     document->set_origin(navigation_params.origin);
@@ -386,6 +417,7 @@ WebIDL::ExceptionOr<GC::Ref<Document>> Document::create_and_initialize(Type type
     document->m_readiness = HTML::DocumentReadyState::Loading;
     document->m_about_base_url = navigation_params.about_base_url;
     document->set_allow_declarative_shadow_roots(true);
+    document->set_custom_element_registry(realm.create<HTML::CustomElementRegistry>(realm));
 
     document->m_window = window;
 
@@ -451,7 +483,7 @@ GC::Ref<Document> Document::construct_impl(JS::Realm& realm)
 {
     // The new Document() constructor steps are to set this’s origin to the origin of current global object’s associated Document. [HTML]
     auto document = Document::create(realm);
-    document->set_origin(as<HTML::Window>(HTML::current_principal_global_object()).associated_document().origin());
+    document->set_origin(as<HTML::Window>(HTML::current_global_object()).associated_document().origin());
     return document;
 }
 
@@ -471,6 +503,7 @@ Document::Document(JS::Realm& realm, URL::URL const& url, TemporaryDocumentForFr
     , m_style_computer(realm.heap().allocate<CSS::StyleComputer>(*this))
     , m_font_computer(realm.heap().allocate<CSS::FontComputer>(*this))
     , m_url(url)
+    , m_fonts(CSS::FontFaceSet::create(realm))
     , m_temporary_document_for_fragment_parsing(temporary_document_for_fragment_parsing)
     , m_editing_host_manager(EditingHostManager::create(realm, *this))
     , m_dynamic_view_transition_style_sheet(parse_css_stylesheet(CSS::Parser::ParsingParams(realm), ""sv, {}))
@@ -482,6 +515,8 @@ Document::Document(JS::Realm& realm, URL::URL const& url, TemporaryDocumentForFr
         .has_legacy_override_built_ins_interface_extended_attribute = true,
     };
 
+    m_is_decoded_svg = m_page->client().is_svg_page_client();
+
     m_cursor_blink_timer = Core::Timer::create_repeating(500, [this] {
         auto cursor_position = this->cursor_position();
         if (!cursor_position)
@@ -492,11 +527,9 @@ Document::Document(JS::Realm& realm, URL::URL const& url, TemporaryDocumentForFr
             return;
 
         auto node = cursor_position->node();
-        node->document().update_layout(UpdateLayoutReason::CursorBlinkTimer);
-
-        if (node->paintable()) {
+        if (node->unsafe_paintable()) {
             m_cursor_blink_state = !m_cursor_blink_state;
-            node->paintable()->set_needs_display();
+            node->set_needs_repaint();
         }
     });
 
@@ -522,6 +555,8 @@ void Document::initialize(JS::Realm& realm)
     m_list_of_available_images = realm.create<HTML::ListOfAvailableImages>();
 
     page().client().page_did_create_new_document(*this);
+
+    ensure_cookie_version_index(m_url);
 }
 
 // https://html.spec.whatwg.org/multipage/document-lifecycle.html#populate-with-html/head/body
@@ -565,12 +600,15 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_focused_area);
     visitor.visit(m_active_element);
     visitor.visit(m_target_element);
+    visitor.visit(m_autofocus_candidates);
     visitor.visit(m_implementation);
     visitor.visit(m_current_script);
     visitor.visit(m_associated_inert_template_document);
     visitor.visit(m_appropriate_template_contents_owner_document);
     visitor.visit(m_pending_parsing_blocking_script);
+    visitor.visit(m_pending_parsing_blocking_svg_script);
     visitor.visit(m_history);
+    visitor.visit(m_html_parser_end_state);
     visitor.visit(m_style_computer);
     visitor.visit(m_font_computer);
     visitor.visit(m_browsing_context);
@@ -590,7 +628,6 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_parser);
     visitor.visit(m_lazy_load_intersection_observer);
     visitor.visit(m_visual_viewport);
-    visitor.visit(m_latest_entry);
     visitor.visit(m_default_timeline);
     visitor.visit(m_scripts_to_execute_when_parsing_has_finished);
     visitor.visit(m_scripts_to_execute_in_order_as_soon_as_possible);
@@ -602,20 +639,29 @@ void Document::visit_edges(Cell::Visitor& visitor)
     for (auto& resize_observer : m_resize_observers)
         visitor.visit(resize_observer);
 
+    visitor.visit(m_svg_roots_needing_relayout);
+
     visitor.visit(m_shared_resource_requests);
 
     visitor.visit(m_associated_animation_timelines);
     visitor.visit(m_list_of_available_images);
+    for (auto& it : m_map_of_preloaded_resources)
+        visitor.visit(it.value);
 
     for (auto* form_associated_element : m_form_associated_elements_with_form_attribute)
         visitor.visit(form_associated_element->form_associated_element_to_html_element());
 
     visitor.visit(m_potentially_named_elements);
+    m_anchor_name_map.visit_edges(visitor);
 
     for (auto& event : m_pending_animation_event_queue) {
         visitor.visit(event.event);
         visitor.visit(event.animation);
         visitor.visit(event.target);
+    }
+
+    for (auto& event : m_pending_fullscreen_events) {
+        visitor.visit(event.element);
     }
 
     visitor.visit(m_adopted_style_sheets);
@@ -641,7 +687,8 @@ void Document::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_render_blocking_elements);
     visitor.visit(m_policy_container);
     visitor.visit(m_style_invalidator);
-    visitor.visit(m_registered_custom_properties);
+    visitor.visit(m_deferred_parser_start);
+    visitor.visit(m_custom_element_registry);
 }
 
 // https://w3c.github.io/selection-api/#dom-document-getselection
@@ -739,7 +786,7 @@ WebIDL::ExceptionOr<void> Document::run_the_document_write_steps(Vector<TrustedT
     //     point at a time, processing resulting tokens as they are emitted, and stopping when the tokenizer reaches
     //     the insertion point or when the processing of the tokenizer is aborted by the tree construction stage (this
     //     can happen if a script end tag token is emitted by the tokenizer).
-    if (!pending_parsing_blocking_script())
+    if (!has_pending_parsing_blocking_script())
         m_parser->run(HTML::HTMLTokenizer::StopAtInsertionPoint::Yes);
 
     return {};
@@ -748,15 +795,6 @@ WebIDL::ExceptionOr<void> Document::run_the_document_write_steps(Vector<TrustedT
 // https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-document-open
 WebIDL::ExceptionOr<Document*> Document::open(Optional<String> const&, Optional<String> const&)
 {
-    // If document belongs to a child navigable, we need to make sure its initial navigation is done,
-    // because subsequent steps will modify "initial about:blank" to false, which would cause
-    // initial navigation to fail in case it was "about:blank".
-    if (auto navigable = this->navigable(); navigable && navigable->container() && !navigable->container()->content_navigable_has_session_history_entry_and_ready_for_navigation()) {
-        HTML::main_thread_event_loop().spin_processing_tasks_with_source_until(HTML::Task::Source::NavigationAndTraversal, GC::create_function(heap(), [navigable_container = navigable->container()] {
-            return navigable_container->content_navigable_has_session_history_entry_and_ready_for_navigation();
-        }));
-    }
-
     // 1. If document is an XML document, then throw an "InvalidStateError" DOMException.
     if (m_type == Type::XML)
         return WebIDL::InvalidStateError::create(realm(), "open() called on XML document."_utf16);
@@ -765,8 +803,8 @@ WebIDL::ExceptionOr<Document*> Document::open(Optional<String> const&, Optional<
     if (m_throw_on_dynamic_markup_insertion_counter > 0)
         return WebIDL::InvalidStateError::create(realm(), "throw-on-dynamic-markup-insertion-counter greater than zero."_utf16);
 
-    // FIXME: 3. Let entryDocument be the entry global object's associated Document.
-    auto& entry_document = *this;
+    // 3. Let entryDocument be the entry global object's associated Document.
+    auto& entry_document = as<HTML::Window>(HTML::entry_global_object()).associated_document();
 
     // 4. If document's origin is not same origin to entryDocument's origin, then throw a "SecurityError" DOMException.
     if (origin() != entry_document.origin())
@@ -784,7 +822,13 @@ WebIDL::ExceptionOr<Document*> Document::open(Optional<String> const&, Optional<
     if (m_active_parser_was_aborted)
         return this;
 
-    // FIXME: 8. If document's browsing context is non-null and there is an existing attempt to navigate document's browsing context, then stop document loading given document.
+    // 8. If document's node navigable is non-null and document's node navigable's ongoing navigation is a navigation ID, then stop loading document's node navigable.
+    // AD-HOC: Pending navigations can also sit in m_pending_navigations, so we need to cancel those too.
+    if (auto navigable = this->navigable()) {
+        navigable->clear_pending_navigations();
+        if (navigable->ongoing_navigation().has<String>())
+            navigable->stop_loading();
+    }
 
     // FIXME: 9. For each shadow-including inclusive descendant node of document, erase all event listeners and handlers given node.
 
@@ -810,8 +854,14 @@ WebIDL::ExceptionOr<Document*> Document::open(Optional<String> const&, Optional<
         if (&entry_document != this)
             new_url.set_fragment({});
 
-        // FIXME: 3. Run the URL and history update steps with document and newURL.
+        // 3. Run the URL and history update steps with document and newURL.
+        HTML::perform_url_and_history_update_steps(*this, move(new_url));
     }
+
+    // AD-HOC: Record that this document was an initial about:blank before document.open() cleared the flag, so the
+    //         Navigation API can keep entries and events disabled.
+    if (is_initial_about_blank())
+        as<HTML::Window>(HTML::relevant_global_object(*this)).navigation()->set_was_initial_about_blank_opened(true);
 
     // 13. Set document's is initial about:blank to false.
     set_is_initial_about_blank(false);
@@ -864,11 +914,19 @@ WebIDL::ExceptionOr<void> Document::close()
     m_parser->tokenizer().insert_eof();
 
     // 5. If there is a pending parsing-blocking script, then return.
-    if (pending_parsing_blocking_script())
+    if (has_pending_parsing_blocking_script()) {
+        m_parser->set_post_parse_action([this] { completely_finish_loading(); });
         return {};
+    }
 
     // 6. Run the tokenizer, processing resulting tokens as they are emitted, and stopping when the tokenizer reaches the explicit "EOF" character or spins the event loop.
     m_parser->run();
+
+    // run() may have paused on a blocking script (e.g. from document.write inside an inline script).
+    if (has_pending_parsing_blocking_script()) {
+        m_parser->set_post_parse_action([this] { completely_finish_loading(); });
+        return {};
+    }
 
     // AD-HOC: This ensures that a load event is fired if the node navigable's container is an iframe.
     completely_finish_loading();
@@ -909,6 +967,7 @@ bool Document::is_child_allowed(Node const& node) const
     case NodeType::TEXT_NODE:
         return false;
     case NodeType::COMMENT_NODE:
+    case NodeType::PROCESSING_INSTRUCTION_NODE:
         return true;
     case NodeType::DOCUMENT_TYPE_NODE:
         return !first_child_of_type<DocumentType>();
@@ -1124,18 +1183,29 @@ void Document::tear_down_layout_tree()
     m_needs_full_layout_tree_update = true;
 }
 
+void Document::clear_layout_and_paintable_nodes_for_inactive_document()
+{
+    for_each_in_inclusive_subtree([&](auto& node) {
+        node.clear_layout_node_and_paintable({});
+        if (auto* element = as_if<Element>(node))
+            element->clear_pseudo_element_layout_nodes({});
+        return TraversalDecision::Continue;
+    });
+}
+
 Color Document::background_color() const
 {
     // CSS2 says we should use the HTML element's background color unless it's transparent...
-    if (auto* html_element = this->html_element(); html_element && html_element->layout_node()) {
-        auto color = html_element->layout_node()->computed_values().background_color();
+    // NB: Called during painting inside update_layout().
+    if (auto* html_element = this->html_element(); html_element && html_element->unsafe_layout_node()) {
+        auto color = html_element->unsafe_layout_node()->computed_values().background_color();
         if (color.alpha())
             return color;
     }
 
     // ...in which case we use the BODY element's background color.
-    if (auto* body_element = body(); body_element && body_element->layout_node()) {
-        auto color = body_element->layout_node()->computed_values().background_color();
+    if (auto* body_element = body(); body_element && body_element->unsafe_layout_node()) {
+        auto color = body_element->unsafe_layout_node()->computed_values().background_color();
         return color;
     }
 
@@ -1150,11 +1220,26 @@ Vector<CSS::BackgroundLayerData> const* Document::background_layers() const
     if (!body_element)
         return {};
 
-    auto body_layout_node = body_element->layout_node();
+    // NB: Called during painting inside update_layout().
+    auto body_layout_node = body_element->unsafe_layout_node();
     if (!body_layout_node)
         return {};
 
     return &body_layout_node->background_layers();
+}
+
+CSS::ImageRendering Document::background_image_rendering() const
+{
+    auto* body_element = body();
+    if (!body_element)
+        return CSS::ImageRendering::Auto;
+
+    // NB: Called during painting inside update_layout().
+    auto body_layout_node = body_element->unsafe_layout_node();
+    if (!body_layout_node)
+        return CSS::ImageRendering::Auto;
+
+    return body_layout_node->computed_values().image_rendering();
 }
 
 void Document::update_base_element(Badge<HTML::HTMLBaseElement>)
@@ -1217,6 +1302,8 @@ void Document::set_url(URL::URL const& url)
     // OPTIMIZATION: Avoid unnecessary work if the URL is already set.
     if (m_url == url)
         return;
+
+    ensure_cookie_version_index(url, m_url);
 
     // To set the URL for a Document document to a URL record url:
 
@@ -1297,12 +1384,55 @@ void Document::invalidate_layout_tree(InvalidateLayoutTreeReason reason)
     tear_down_layout_tree();
 }
 
+void Document::mark_svg_root_as_needing_relayout(Layout::SVGSVGBox& svg_root)
+{
+    m_svg_roots_needing_relayout.set(svg_root);
+}
+
+static void relayout_svg_root(Layout::SVGSVGBox& svg_root)
+{
+    Layout::LayoutState layout_state(svg_root);
+
+    // Pre-populate the svg_root itself.
+    if (auto const* paintable = svg_root.paintable_box())
+        layout_state.populate_from_paintable(svg_root, *paintable);
+
+    // Pre-populate SVGGraphicsBox ancestors (up to outer SVG) for get_parent_svg_transform().
+    for (auto* ancestor = svg_root.parent(); ancestor; ancestor = ancestor->parent()) {
+        if (auto const* svg_graphics_ancestor = as_if<Layout::SVGGraphicsBox>(*ancestor)) {
+            if (auto const* paintable = svg_graphics_ancestor->paintable_box())
+                layout_state.populate_from_paintable(*svg_graphics_ancestor, *paintable);
+        }
+        if (is<Layout::SVGSVGBox>(*ancestor))
+            break;
+    }
+
+    // Pre-populate the viewport for position:fixed elements inside <foreignObject>.
+    auto& viewport = svg_root.root();
+    if (auto const* paintable = viewport.paintable_box())
+        layout_state.populate_from_paintable(viewport, *paintable);
+
+    auto const& svg_state = layout_state.get(svg_root);
+    auto content_width = svg_state.content_width();
+    auto content_height = svg_state.content_height();
+
+    Layout::SVGFormattingContext svg_context(layout_state, Layout::LayoutMode::Normal, svg_root, nullptr);
+    svg_context.run(Layout::AvailableSpace(Layout::AvailableSize::make_definite(content_width), Layout::AvailableSize::make_definite(content_height)));
+    layout_state.commit(svg_root);
+
+    svg_root.for_each_in_inclusive_subtree([](auto& node) {
+        node.reset_needs_layout_update();
+        return TraversalDecision::Continue;
+    });
+}
+
 static void propagate_scrollbar_width_to_viewport(Element& root_element, Layout::Viewport& viewport)
 {
     // https://drafts.csswg.org/css-scrollbars/#scrollbar-width
     // UAs must apply the scrollbar-color value set on the root element to the viewport.
     auto& viewport_computed_values = viewport.mutable_computed_values();
-    auto& root_element_computed_values = root_element.layout_node()->computed_values();
+    // NB: Called during layout tree construction.
+    auto& root_element_computed_values = root_element.unsafe_layout_node()->computed_values();
     viewport_computed_values.set_scrollbar_width(root_element_computed_values.scrollbar_width());
 }
 
@@ -1323,7 +1453,8 @@ static void propagate_overflow_to_viewport(Element& root_element, Layout::Viewpo
 
     // UAs must apply the overflow-* values set on the root element to the viewport
     // when the root element’s display value is not none.
-    auto overflow_origin_node = root_element.layout_node();
+    // NB: Called during layout tree construction.
+    auto overflow_origin_node = root_element.unsafe_layout_node();
     auto& viewport_computed_values = viewport.mutable_computed_values();
 
     // However, when the root element is an [HTML] html element (including XML syntax for HTML)
@@ -1331,12 +1462,12 @@ static void propagate_overflow_to_viewport(Element& root_element, Layout::Viewpo
     // a body element whose display value is also not none,
     // user agents must instead apply the overflow-* values of the first such child element to the viewport.
     if (root_element.is_html_html_element()) {
-        auto root_element_layout_node = root_element.layout_node();
+        auto root_element_layout_node = root_element.unsafe_layout_node();
         auto& root_element_computed_values = root_element_layout_node->mutable_computed_values();
         if (root_element_computed_values.overflow_x() == CSS::Overflow::Visible && root_element_computed_values.overflow_y() == CSS::Overflow::Visible) {
             auto* body_element = root_element.first_child_of_type<HTML::HTMLBodyElement>();
-            if (body_element && body_element->layout_node())
-                overflow_origin_node = body_element->layout_node();
+            if (body_element && body_element->unsafe_layout_node())
+                overflow_origin_node = body_element->unsafe_layout_node();
         }
     }
 
@@ -1358,8 +1489,15 @@ static void propagate_overflow_to_viewport(Element& root_element, Layout::Viewpo
     viewport_computed_values.set_overflow_y(overflow_y_to_apply);
 
     // The element from which the value is propagated must then have a used overflow value of visible.
+    // FIXME: Apply this to the used values, not the computed ones.
     overflow_origin_computed_values.set_overflow_x(CSS::Overflow::Visible);
     overflow_origin_computed_values.set_overflow_y(CSS::Overflow::Visible);
+}
+
+void Document::update_layout_if_needed_for_node(Node const& node, UpdateLayoutReason reason)
+{
+    if (node.is_connected())
+        update_layout(reason);
 }
 
 void Document::update_layout(UpdateLayoutReason reason)
@@ -1368,14 +1506,36 @@ void Document::update_layout(UpdateLayoutReason reason)
     if (!navigable || navigable->active_document() != this)
         return;
 
+    VERIFY(!m_is_running_update_layout);
+    ScopeGuard guard = [&] { m_is_running_update_layout = false; };
+    m_is_running_update_layout = true;
+
     update_style();
 
-    if (m_layout_root && !m_layout_root->needs_layout_update())
+    if (layout_is_up_to_date())
         return;
+
+    auto svg_roots_to_relayout = move(m_svg_roots_needing_relayout);
 
     // NOTE: If this is a document hosting <template> contents, layout is unnecessary.
     if (m_created_for_appropriate_template_contents)
         return;
+
+    auto const needs_layout_tree_rebuild = !m_layout_root || needs_layout_tree_update() || child_needs_layout_tree_update() || needs_full_layout_tree_update();
+
+    // Partial SVG relayout
+    if (!needs_layout_tree_rebuild && !svg_roots_to_relayout.is_empty() && !m_layout_root->needs_layout_update()) {
+        for (auto const& svg_root : svg_roots_to_relayout)
+            relayout_svg_root(*svg_root);
+
+        invalidate_stacking_context_tree();
+        invalidate_display_list();
+
+        set_needs_accumulated_visual_contexts_update(true);
+        update_paint_and_hit_testing_properties_if_needed();
+        m_document->set_needs_repaint();
+        return;
+    }
 
     // Clear text blocks cache so we rebuild them on the next find action.
     if (m_layout_root)
@@ -1388,11 +1548,12 @@ void Document::update_layout(UpdateLayoutReason reason)
 
     auto timer = Core::ElapsedTimer::start_new(Core::TimerType::Precise);
 
-    if (!m_layout_root || needs_layout_tree_update() || child_needs_layout_tree_update() || needs_full_layout_tree_update()) {
+    if (needs_layout_tree_rebuild) {
         Layout::TreeBuilder tree_builder;
         m_layout_root = as<Layout::Viewport>(*tree_builder.build(*this));
 
-        if (document_element && document_element->layout_node()) {
+        // NB: Called during layout update.
+        if (document_element && document_element->unsafe_layout_node()) {
             propagate_overflow_to_viewport(*document_element, *m_layout_root);
             propagate_scrollbar_width_to_viewport(*document_element, *m_layout_root);
         }
@@ -1404,58 +1565,70 @@ void Document::update_layout(UpdateLayoutReason reason)
         }
     }
 
+    u32 layout_index_counter = 0;
     m_layout_root->for_each_in_inclusive_subtree([&](auto& layout_node) {
+        if (auto* node_with_style = as_if<Layout::NodeWithStyle>(layout_node))
+            node_with_style->set_layout_index(layout_index_counter++);
+
         layout_node.recompute_containing_block({});
-        return TraversalDecision::Continue;
-    });
 
-    m_layout_root->for_each_in_inclusive_subtree_of_type<Layout::Box>([&](auto& child) {
-        if (child.needs_layout_update()) {
-            child.reset_cached_intrinsic_sizes();
-        }
-        child.clear_contained_abspos_children();
-        return TraversalDecision::Continue;
-    });
-
-    // Assign each box that establishes a formatting context a list of absolutely positioned children it should take care of during layout
-    m_layout_root->for_each_in_inclusive_subtree_of_type<Layout::Box>([&](auto& child) {
-        if (!child.is_absolutely_positioned())
+        auto* box = as_if<Layout::Box>(layout_node);
+        if (!box)
             return TraversalDecision::Continue;
-        if (auto containing_block = child.containing_block()) {
+
+        box->clear_contained_abspos_children();
+
+        if (!box->is_absolutely_positioned())
+            return TraversalDecision::Continue;
+
+        if (auto containing_block = box->containing_block()) {
             auto closest_box_that_establishes_formatting_context = containing_block;
             while (closest_box_that_establishes_formatting_context) {
                 if (closest_box_that_establishes_formatting_context == m_layout_root)
                     break;
-                if (Layout::FormattingContext::formatting_context_type_created_by_box(*closest_box_that_establishes_formatting_context).has_value()) {
+                if (Layout::FormattingContext::formatting_context_type_created_by_box(*closest_box_that_establishes_formatting_context).has_value())
                     break;
-                }
                 closest_box_that_establishes_formatting_context = closest_box_that_establishes_formatting_context->containing_block();
             }
             VERIFY(closest_box_that_establishes_formatting_context);
-            closest_box_that_establishes_formatting_context->add_contained_abspos_child(child);
+            closest_box_that_establishes_formatting_context->add_contained_abspos_child(*box);
         }
+
         return TraversalDecision::Continue;
     });
 
     Layout::LayoutState layout_state;
+    layout_state.ensure_capacity(layout_index_counter);
 
     {
-        Layout::BlockFormattingContext root_formatting_context(layout_state, Layout::LayoutMode::Normal, *m_layout_root, nullptr);
-
         auto& viewport = static_cast<Layout::Viewport&>(*m_layout_root);
         auto& viewport_state = layout_state.get_mutable(viewport);
         viewport_state.set_content_width(viewport_rect.width());
         viewport_state.set_content_height(viewport_rect.height());
 
-        if (document_element && document_element->layout_node()) {
-            auto& icb_state = layout_state.get_mutable(as<Layout::NodeWithStyleAndBoxModelMetrics>(*document_element->layout_node()));
+        // NB: Called during layout update.
+        if (document_element && document_element->unsafe_layout_node()) {
+            auto& icb_state = layout_state.get_mutable(as<Layout::NodeWithStyleAndBoxModelMetrics>(*document_element->unsafe_layout_node()));
             icb_state.set_content_width(viewport_rect.width());
         }
 
-        root_formatting_context.run(
-            Layout::AvailableSpace(
-                Layout::AvailableSize::make_definite(viewport_rect.width()),
-                Layout::AvailableSize::make_definite(viewport_rect.height())));
+        auto available_space = Layout::AvailableSpace(
+            Layout::AvailableSize::make_definite(viewport_rect.width()),
+            Layout::AvailableSize::make_definite(viewport_rect.height()));
+
+        if (m_layout_root->first_child() && m_layout_root->first_child()->is_svg_svg_box()) {
+            // NOTE: If we are laying out a standalone SVG document, we give it some special treatment:
+            //       The root <svg> container gets the same size as the viewport,
+            //       and we call directly into the SVG layout code from here.
+            auto const& svg_root = as<Layout::SVGSVGBox>(*m_layout_root->first_child());
+            auto content_height = layout_state.get(*svg_root.containing_block()).content_height();
+            layout_state.get_mutable(svg_root).set_content_height(content_height);
+            Layout::SVGFormattingContext svg_formatting_context(layout_state, Layout::LayoutMode::Normal, svg_root, nullptr);
+            svg_formatting_context.run(available_space);
+        } else {
+            Layout::BlockFormattingContext root_formatting_context(layout_state, Layout::LayoutMode::Normal, *m_layout_root, nullptr);
+            root_formatting_context.run(available_space);
+        }
     }
 
     layout_state.commit(*m_layout_root);
@@ -1463,22 +1636,21 @@ void Document::update_layout(UpdateLayoutReason reason)
     // Broadcast the current viewport rect to any new paintables, so they know whether they're visible or not.
     inform_all_viewport_clients_about_the_current_viewport_rect();
 
-    m_document->set_needs_display();
-    set_needs_to_resolve_paint_only_properties();
+    m_document->set_needs_repaint();
 
-    paintable()->assign_scroll_frames();
+    // NB: Called during layout update.
+    unsafe_paintable()->assign_scroll_frames();
 
-    // assign_clip_frames() needs border-radius be resolved
+    set_needs_accumulated_visual_contexts_update(true);
     update_paint_and_hit_testing_properties_if_needed();
-    paintable()->assign_clip_frames();
 
     if (auto range = get_selection()->range()) {
-        paintable()->recompute_selection_states(*range);
+        unsafe_paintable()->recompute_selection_states(*range);
     }
 
     // Collect elements with content-visibility: auto. This is used in the HTML event loop to avoid traversing the whole tree every time.
     Vector<GC::Ref<Painting::PaintableBox>> paintable_boxes_with_auto_content_visibility;
-    paintable()->for_each_in_subtree_of_type<Painting::PaintableBox>([&](auto& paintable_box) {
+    unsafe_paintable()->for_each_in_subtree_of_type<Painting::PaintableBox>([&](auto& paintable_box) {
         if (paintable_box.dom_node()
             && paintable_box.dom_node()->is_element()
             && paintable_box.computed_values().content_visibility() == CSS::ContentVisibility::Auto) {
@@ -1486,24 +1658,34 @@ void Document::update_layout(UpdateLayoutReason reason)
         }
         return TraversalDecision::Continue;
     });
-    paintable()->set_paintable_boxes_with_auto_content_visibility(move(paintable_boxes_with_auto_content_visibility));
+    unsafe_paintable()->set_paintable_boxes_with_auto_content_visibility(move(paintable_boxes_with_auto_content_visibility));
 
     m_layout_root->for_each_in_inclusive_subtree([](auto& node) {
         node.reset_needs_layout_update();
         return TraversalDecision::Continue;
     });
 
-    // Scrolling by zero offset will clamp scroll offset back to valid range if it was out of bounds
-    // after the viewport size change.
-    if (auto window = this->window())
-        window->scroll_by(0, 0);
-
     if constexpr (UPDATE_LAYOUT_DEBUG) {
         dbgln("LAYOUT {} {} µs", to_string(reason), timer.elapsed_time().to_microseconds());
     }
+
+    VERIFY(layout_is_up_to_date());
 }
 
-[[nodiscard]] static CSS::RequiredInvalidationAfterStyleChange update_style_recursively(Node& node, CSS::StyleComputer& style_computer, bool needs_inherited_style_update, bool recompute_elements_depending_on_custom_properties)
+bool Document::layout_is_up_to_date() const
+{
+    if (!navigable() || navigable()->active_document() != this)
+        return true;
+    if (!m_layout_root)
+        return false;
+    return !m_layout_root->needs_layout_update()
+        && !needs_layout_tree_update()
+        && !child_needs_layout_tree_update()
+        && !needs_full_layout_tree_update()
+        && m_svg_roots_needing_relayout.is_empty();
+}
+
+[[nodiscard]] static CSS::RequiredInvalidationAfterStyleChange update_style_recursively(Node& node, CSS::StyleComputer& style_computer, bool needs_inherited_style_update, bool recompute_elements_depending_on_custom_properties, bool parent_display_changed)
 {
     bool const needs_full_style_update = node.document().needs_full_style_update();
     CSS::RequiredInvalidationAfterStyleChange invalidation;
@@ -1520,16 +1702,35 @@ void Document::update_layout(UpdateLayoutReason reason)
     CSS::RequiredInvalidationAfterStyleChange node_invalidation;
     if (is<Element>(node)) {
         auto& element = static_cast<Element&>(node);
-        if (needs_full_style_update || node.needs_style_update() || (recompute_elements_depending_on_custom_properties && element.style_uses_var_css_function())) {
+
+        // FIXME: We can avoid some unnecessary re-computations by, skipping if a) the contained if() functions don't
+        //        include media conditions, or b) the data used to resolve media queries hasn't changed.
+        bool const needs_style_update_due_to_if_media = element.style_uses_if_css_function();
+
+        if (needs_full_style_update || node.needs_style_update() || parent_display_changed || (recompute_elements_depending_on_custom_properties && (element.style_uses_var_css_function() || element.style_uses_inherit_css_function())) || needs_style_update_due_to_if_media) {
             node_invalidation = element.recompute_style(did_change_custom_properties);
         } else if (needs_inherited_style_update) {
             node_invalidation = element.recompute_inherited_style();
         }
         is_display_none = static_cast<Element&>(node).computed_properties()->display().is_none();
+
+        // If this is a slot element and its style changed, mark its assigned
+        // (slotted) nodes as needing a style update. Slotted elements inherit
+        // from their slot in the flat tree, but they are DOM children of the
+        // shadow host, so the normal DOM tree walk won't propagate inherited
+        // style changes to them.
+        if (!node_invalidation.is_none()) {
+            if (auto* slot = as_if<HTML::HTMLSlotElement>(node)) {
+                for (auto const& slottable : slot->assigned_nodes_internal()) {
+                    slottable.visit([](auto const& assigned_node) {
+                        assigned_node->set_needs_style_update(true);
+                    });
+                }
+            }
+        }
     }
-    if (node_invalidation.relayout && node.layout_node()) {
-        node.layout_node()->set_needs_layout_update(SetNeedsLayoutReason::StyleChange);
-    }
+    if (node_invalidation.relayout)
+        node.set_needs_layout_update(SetNeedsLayoutReason::StyleChange);
     if (node_invalidation.rebuild_layout_tree) {
         // We mark layout tree for rebuild starting from parent element to correctly invalidate
         // "display" property change to/from "contents" value.
@@ -1547,11 +1748,14 @@ void Document::update_layout(UpdateLayoutReason reason)
     }
 
     bool children_need_inherited_style_update = !invalidation.is_none();
-    if (needs_full_style_update || node.child_needs_style_update() || children_need_inherited_style_update || recompute_elements_depending_on_custom_properties) {
+    // NB: When display changes to/from flex/grid/contents, children may need to be blockified or un-blockified.
+    //     This requires a full style recompute, not just inherited style update.
+    bool children_need_full_style_recompute = node_invalidation.rebuild_layout_tree;
+    if (needs_full_style_update || node.child_needs_style_update() || children_need_inherited_style_update || recompute_elements_depending_on_custom_properties || children_need_full_style_recompute) {
         if (node.is_element()) {
             if (auto shadow_root = static_cast<DOM::Element&>(node).shadow_root()) {
                 if (needs_full_style_update || shadow_root->needs_style_update() || shadow_root->child_needs_style_update()) {
-                    auto subtree_invalidation = update_style_recursively(*shadow_root, style_computer, children_need_inherited_style_update, recompute_elements_depending_on_custom_properties);
+                    auto subtree_invalidation = update_style_recursively(*shadow_root, style_computer, children_need_inherited_style_update, recompute_elements_depending_on_custom_properties, children_need_full_style_recompute);
                     if (!is_display_none)
                         invalidation |= subtree_invalidation;
                 }
@@ -1559,8 +1763,8 @@ void Document::update_layout(UpdateLayoutReason reason)
         }
 
         node.for_each_child([&](auto& child) {
-            if (needs_full_style_update || child.needs_style_update() || children_need_inherited_style_update || child.child_needs_style_update() || recompute_elements_depending_on_custom_properties) {
-                auto subtree_invalidation = update_style_recursively(child, style_computer, children_need_inherited_style_update, recompute_elements_depending_on_custom_properties);
+            if (needs_full_style_update || child.needs_style_update() || children_need_inherited_style_update || child.child_needs_style_update() || recompute_elements_depending_on_custom_properties || children_need_full_style_recompute) {
+                auto subtree_invalidation = update_style_recursively(child, style_computer, children_need_inherited_style_update, recompute_elements_depending_on_custom_properties, children_need_full_style_recompute);
                 if (!is_display_none)
                     invalidation |= subtree_invalidation;
             }
@@ -1580,8 +1784,8 @@ void Document::update_style()
 {
     // NOTE: If our parent document needs a relayout, we must do that *first*. This is required as it may cause the
     // viewport to change which will can affect media query evaluation and the value of the `vw` unit.
-    if (navigable()->container() && &navigable()->container()->document() != this)
-        navigable()->container()->document().update_layout(UpdateLayoutReason::ChildDocumentStyleUpdate);
+    if (auto navigable = this->navigable(); navigable && navigable->container() && &navigable->container()->document() != this)
+        navigable->container()->document().update_layout(UpdateLayoutReason::ChildDocumentStyleUpdate);
 
     if (!browsing_context())
         return;
@@ -1592,10 +1796,13 @@ void Document::update_style()
     // style change event. [CSS-Transitions-2]
     m_transition_generation++;
 
-    style_scope().invalidate_style_of_elements_affected_by_has();
-    for_each_shadow_root([&](auto& shadow_root) {
-        shadow_root.style_scope().invalidate_style_of_elements_affected_by_has();
-    });
+    if (m_needs_invalidation_of_elements_affected_by_has) {
+        m_needs_invalidation_of_elements_affected_by_has = false;
+        style_scope().invalidate_style_of_elements_affected_by_has();
+        for_each_shadow_root([&](auto& shadow_root) {
+            shadow_root.style_scope().invalidate_style_of_elements_affected_by_has();
+        });
+    }
 
     if (!m_style_invalidator->has_pending_invalidations() && !needs_full_style_update() && !needs_style_update() && !child_needs_style_update())
         return;
@@ -1611,14 +1818,69 @@ void Document::update_style()
 
     evaluate_media_rules();
 
+    style_computer().reset_has_result_cache();
     style_computer().reset_ancestor_filter();
 
-    auto invalidation = update_style_recursively(*this, style_computer(), false, false);
+    build_registered_properties_cache();
+
+    auto invalidation = update_style_recursively(*this, style_computer(), false, false, false);
     if (!invalidation.is_none())
         invalidate_display_list();
+
+    if (invalidation.rebuild_accumulated_visual_contexts)
+        set_needs_accumulated_visual_contexts_update(true);
+
     if (invalidation.rebuild_stacking_context_tree)
         invalidate_stacking_context_tree();
     m_needs_full_style_update = false;
+}
+
+void Document::update_style_if_needed_for_element(AbstractElement const& abstract_element)
+{
+    if (element_needs_style_update(abstract_element))
+        update_style();
+}
+
+bool Document::element_needs_style_update(AbstractElement const& abstract_element) const
+{
+    // If there are document-level reasons to update style, we can't skip.
+    if (m_needs_full_style_update)
+        return true;
+    if (m_needs_animated_style_update)
+        return true;
+    if (m_needs_invalidation_of_elements_affected_by_has)
+        return true;
+    if (m_style_invalidator->has_pending_invalidations())
+        return true;
+
+    // Check the element itself.
+    if (abstract_element.element().needs_style_update())
+        return true;
+    if (abstract_element.element().entire_subtree_needs_style_update())
+        return true;
+
+    // Walk the inheritance ancestor chain. We use element_to_inherit_style_from()
+    // because style inheritance follows the flat tree (slotted elements inherit
+    // from their assigned slot, not their DOM parent). If any ancestor on the
+    // path has its style marked dirty, the target element's computed style could
+    // change via inherited properties, so we must update.
+    for (auto ancestor = abstract_element.element_to_inherit_style_from(); ancestor.has_value(); ancestor = ancestor->element_to_inherit_style_from()) {
+        if (ancestor->element().needs_style_update())
+            return true;
+        if (ancestor->element().entire_subtree_needs_style_update())
+            return true;
+    }
+
+    // If the navigable has a container and that container needs a style update, then we need one as well, since the
+    // container's style can affect this element (e.g. via media queries or viewport units).
+    if (auto navigable = this->navigable()) {
+        if (auto container = navigable->container()) {
+            if (container->document().element_needs_style_update(AbstractElement { *container }))
+                return true;
+        }
+    }
+
+    return false;
 }
 
 void Document::update_animated_style_if_needed()
@@ -1630,9 +1892,9 @@ void Document::update_animated_style_if_needed()
 
     for (auto& timeline : m_associated_animation_timelines) {
         for (auto& animation : timeline->associated_animations()) {
-            if (animation->is_idle())
+            if (animation.is_idle())
                 continue;
-            if (auto effect = animation->effect())
+            if (auto effect = animation.effect())
                 effect->update_computed_properties(context);
         }
     }
@@ -1642,15 +1904,16 @@ void Document::update_animated_style_if_needed()
 
 void Document::update_paint_and_hit_testing_properties_if_needed()
 {
-    if (auto* paintable = this->paintable()) {
+    // NB: Called during paint property resolution.
+    if (auto* paintable = this->unsafe_paintable()) {
         paintable->refresh_scroll_state();
     }
 
-    if (!m_needs_to_resolve_paint_only_properties)
-        return;
-    m_needs_to_resolve_paint_only_properties = false;
-    if (auto* paintable = this->paintable()) {
-        paintable->resolve_paint_only_properties();
+    if (m_needs_accumulated_visual_contexts_update) {
+        m_needs_accumulated_visual_contexts_update = false;
+        if (auto* paintable = this->unsafe_paintable()) {
+            paintable->assign_accumulated_visual_contexts();
+        }
     }
 }
 
@@ -1737,8 +2000,9 @@ void Document::obtain_theme_color()
             // 4. If color is not failure, then return color.
             if (!css_value.is_null() && css_value->has_color()) {
                 CSS::ColorResolutionContext color_resolution_context {};
-                if (html_element() && html_element()->layout_node()) {
-                    color_resolution_context = CSS::ColorResolutionContext::for_layout_node_with_style(*html_element()->layout_node());
+                // NB: Called during theme color computation, layout may be stale.
+                if (html_element() && html_element()->unsafe_layout_node()) {
+                    color_resolution_context = CSS::ColorResolutionContext::for_layout_node_with_style(*html_element()->unsafe_layout_node());
                 }
 
                 theme_color = css_value->to_color(color_resolution_context).value();
@@ -1763,6 +2027,16 @@ Layout::Viewport* Document::layout_node()
     return static_cast<Layout::Viewport*>(Node::layout_node());
 }
 
+Layout::Viewport const* Document::unsafe_layout_node() const
+{
+    return static_cast<Layout::Viewport const*>(Node::unsafe_layout_node());
+}
+
+Layout::Viewport* Document::unsafe_layout_node()
+{
+    return static_cast<Layout::Viewport*>(Node::unsafe_layout_node());
+}
+
 void Document::set_inspected_node(GC::Ptr<Node> node)
 {
     m_inspected_node = node;
@@ -1774,13 +2048,13 @@ void Document::set_highlighted_node(GC::Ptr<Node> node, Optional<CSS::PseudoElem
         return;
 
     if (auto layout_node = highlighted_layout_node(); layout_node && layout_node->first_paintable())
-        layout_node->first_paintable()->set_needs_display();
+        layout_node->first_paintable()->set_needs_repaint();
 
     m_highlighted_node = node;
     m_highlighted_pseudo_element = pseudo_element;
 
     if (auto layout_node = highlighted_layout_node(); layout_node && layout_node->first_paintable())
-        layout_node->first_paintable()->set_needs_display();
+        layout_node->first_paintable()->set_needs_repaint();
 }
 
 GC::Ptr<Layout::Node> Document::highlighted_layout_node()
@@ -1788,8 +2062,9 @@ GC::Ptr<Layout::Node> Document::highlighted_layout_node()
     if (!m_highlighted_node)
         return nullptr;
 
+    // NB: Called during painting inside update_layout().
     if (!m_highlighted_pseudo_element.has_value() || !m_highlighted_node->is_element())
-        return m_highlighted_node->layout_node();
+        return m_highlighted_node->unsafe_layout_node();
 
     auto const& element = static_cast<Element const&>(*m_highlighted_node);
     return element.get_pseudo_element_node(m_highlighted_pseudo_element.value());
@@ -1838,17 +2113,17 @@ void Document::invalidate_style_for_elements_affected_by_pseudo_class_change(CSS
             return false;
 
         SelectorEngine::MatchContext context;
-        if (SelectorEngine::matches(selector, element, {}, context, {}))
-            return true;
-        if (element.has_pseudo_element(CSS::PseudoElement::Before)) {
-            if (SelectorEngine::matches(selector, element, {}, context, CSS::PseudoElement::Before))
-                return true;
+        auto const& target_pseudo = selector.target_pseudo_element();
+        if (!target_pseudo.has_value())
+            return SelectorEngine::matches(selector, element, {}, context);
+        switch (target_pseudo->type()) {
+        case CSS::PseudoElement::Before:
+            return SelectorEngine::matches(selector, { element, CSS::PseudoElement::Before }, {}, context);
+        case CSS::PseudoElement::After:
+            return SelectorEngine::matches(selector, { element, CSS::PseudoElement::After }, {}, context);
+        default:
+            return false;
         }
-        if (element.has_pseudo_element(CSS::PseudoElement::After)) {
-            if (SelectorEngine::matches(selector, element, {}, context, CSS::PseudoElement::After))
-                return true;
-        }
-        return false;
     };
 
     auto matches_different_set_of_rules_after_state_change = [&](Element& element) {
@@ -1886,7 +2161,19 @@ void Document::invalidate_style_for_elements_affected_by_pseudo_class_change(CSS
             style_computer.pop_ancestor(static_cast<Element&>(node));
     };
 
-    invalidate_affected_elements_recursively(root);
+    // Seed the ancestor filter with ancestors above the starting node,
+    // so that ancestor-dependent selectors can still be correctly rejected.
+    for (auto* ancestor = old_new_common_ancestor.parent(); ancestor; ancestor = ancestor->parent()) {
+        if (ancestor->is_element())
+            style_computer.push_ancestor(static_cast<Element&>(*ancestor));
+    }
+
+    invalidate_affected_elements_recursively(old_new_common_ancestor);
+
+    for (auto* ancestor = old_new_common_ancestor.parent(); ancestor; ancestor = ancestor->parent()) {
+        if (ancestor->is_element())
+            style_computer.pop_ancestor(static_cast<Element&>(*ancestor));
+    }
 }
 
 void Document::set_hovered_node(GC::Ptr<Node> node)
@@ -1914,6 +2201,21 @@ void Document::set_hovered_node(GC::Ptr<Node> node)
 
     m_hovered_node = node;
 
+    // https://w3c.github.io/pointerevents/#the-pointerout-event
+    if (old_hovered_node && old_hovered_node != m_hovered_node) {
+        UIEvents::PointerEventInit pointer_event_init {};
+        pointer_event_init.bubbles = true;
+        pointer_event_init.cancelable = true;
+        pointer_event_init.composed = true;
+        pointer_event_init.related_target = m_hovered_node;
+        pointer_event_init.is_primary = true;
+        pointer_event_init.pointer_type = UIEvents::PointerTypes::Mouse;
+        if (auto navigable = this->navigable())
+            pointer_event_init.view = navigable->active_window_proxy();
+        auto event = UIEvents::PointerEvent::create(realm(), UIEvents::EventNames::pointerout, pointer_event_init);
+        old_hovered_node->dispatch_event(event);
+    }
+
     // https://w3c.github.io/uievents/#mouseout
     if (old_hovered_node && old_hovered_node != m_hovered_node) {
         UIEvents::MouseEventInit mouse_event_init {};
@@ -1927,15 +2229,43 @@ void Document::set_hovered_node(GC::Ptr<Node> node)
         old_hovered_node->dispatch_event(event);
     }
 
+    // https://w3c.github.io/pointerevents/#the-pointerleave-event
+    if (old_hovered_node && (!m_hovered_node || !m_hovered_node->is_descendant_of(*old_hovered_node))) {
+        for (auto target = old_hovered_node; target && target.ptr() != common_ancestor; target = target->parent()) {
+            // FIXME: Populate the event with mouse coordinates, etc.
+            UIEvents::PointerEventInit pointer_event_init {};
+            pointer_event_init.related_target = m_hovered_node;
+            pointer_event_init.is_primary = true;
+            pointer_event_init.pointer_type = UIEvents::PointerTypes::Mouse;
+            if (auto navigable = this->navigable())
+                pointer_event_init.view = navigable->active_window_proxy();
+            target->dispatch_event(UIEvents::PointerEvent::create(realm(), UIEvents::EventNames::pointerleave, pointer_event_init));
+        }
+    }
+
     // https://w3c.github.io/uievents/#mouseleave
     if (old_hovered_node && (!m_hovered_node || !m_hovered_node->is_descendant_of(*old_hovered_node))) {
-        // FIXME: Check if we need to dispatch these events in a specific order.
-        for (auto target = old_hovered_node; target && target.ptr() != common_ancestor; target = target->parent()) {
+        for (auto target = old_hovered_node; target && target.ptr() != common_ancestor; target = target->parent_or_shadow_host()) {
             // FIXME: Populate the event with mouse coordinates, etc.
             UIEvents::MouseEventInit mouse_event_init {};
             mouse_event_init.related_target = m_hovered_node;
             target->dispatch_event(UIEvents::MouseEvent::create(realm(), UIEvents::EventNames::mouseleave, mouse_event_init));
         }
+    }
+
+    // https://w3c.github.io/pointerevents/#the-pointerover-event
+    if (m_hovered_node && m_hovered_node != old_hovered_node) {
+        UIEvents::PointerEventInit pointer_event_init {};
+        pointer_event_init.bubbles = true;
+        pointer_event_init.cancelable = true;
+        pointer_event_init.composed = true;
+        pointer_event_init.related_target = old_hovered_node;
+        pointer_event_init.is_primary = true;
+        pointer_event_init.pointer_type = UIEvents::PointerTypes::Mouse;
+        if (auto navigable = this->navigable())
+            pointer_event_init.view = navigable->active_window_proxy();
+        auto event = UIEvents::PointerEvent::create(realm(), UIEvents::EventNames::pointerover, pointer_event_init);
+        m_hovered_node->dispatch_event(event);
     }
 
     // https://w3c.github.io/uievents/#mouseover
@@ -1951,11 +2281,24 @@ void Document::set_hovered_node(GC::Ptr<Node> node)
         m_hovered_node->dispatch_event(event);
     }
 
+    // https://w3c.github.io/pointerevents/#the-pointerenter-event
     // https://w3c.github.io/uievents/#mouseenter
+    // Enter events are dispatched from ancestor to descendant.
+    // Leave events are dispatched in the opposite order.
     if (m_hovered_node && (!old_hovered_node || !m_hovered_node->is_ancestor_of(*old_hovered_node))) {
-        // FIXME: Check if we need to dispatch these events in a specific order.
-        for (auto target = m_hovered_node; target && target.ptr() != common_ancestor; target = target->parent()) {
-            // FIXME: Populate the event with mouse coordinates, etc.
+        Vector<GC::Ref<Node>> entered_ancestors;
+        for (auto target = m_hovered_node; target && target.ptr() != common_ancestor; target = target->parent_or_shadow_host())
+            entered_ancestors.append(*target);
+
+        for (auto target : entered_ancestors.in_reverse()) {
+            // FIXME: Populate the events with mouse coordinates, etc.
+            UIEvents::PointerEventInit pointer_event_init {};
+            pointer_event_init.related_target = old_hovered_node;
+            pointer_event_init.is_primary = true;
+            pointer_event_init.pointer_type = UIEvents::PointerTypes::Mouse;
+            if (auto navigable = this->navigable())
+                pointer_event_init.view = navigable->active_window_proxy();
+            target->dispatch_event(UIEvents::PointerEvent::create(realm(), UIEvents::EventNames::pointerenter, pointer_event_init));
             UIEvents::MouseEventInit mouse_event_init {};
             mouse_event_init.related_target = old_hovered_node;
             target->dispatch_event(UIEvents::MouseEvent::create(realm(), UIEvents::EventNames::mouseenter, mouse_event_init));
@@ -2068,9 +2411,7 @@ GC::Ref<HTML::HTMLAllCollection> Document::all()
 // https://drafts.csswg.org/css-font-loading/#font-source
 GC::Ref<CSS::FontFaceSet> Document::fonts()
 {
-    if (!m_fonts)
-        m_fonts = CSS::FontFaceSet::create(realm());
-    return *m_fonts;
+    return m_fonts;
 }
 
 // https://html.spec.whatwg.org/multipage/obsolete.html#dom-document-clear
@@ -2125,44 +2466,32 @@ WebIDL::ExceptionOr<GC::Ref<Element>> Document::create_element(String const& loc
         ? local_name.to_ascii_lowercase()
         : local_name;
 
-    // 3. Let is be null.
-    Optional<String> is_value;
+    // 3. Let registry and is be the result of flattening element creation options given options and this.
+    auto [registry, is_value] = TRY(flatten_element_creation_options(options));
 
-    // 4. If options is a dictionary and options["is"] exists, then set is to it.
-    if (options.has<ElementCreationOptions>()) {
-        auto const& element_creation_options = options.get<ElementCreationOptions>();
-        if (element_creation_options.is.has_value())
-            is_value = element_creation_options.is.value();
-    }
-
-    // 5. Let namespace be the HTML namespace, if this is an HTML document or this’s content type is "application/xhtml+xml"; otherwise null.
+    // 4. Let namespace be the HTML namespace, if this is an HTML document or this’s content type is
+    //    "application/xhtml+xml"; otherwise null.
     Optional<FlyString> namespace_;
     if (document_type() == Type::HTML || content_type() == "application/xhtml+xml"sv)
         namespace_ = Namespace::HTML;
 
-    // 6. Return the result of creating an element given this, localName, namespace, null, is, and with the synchronous custom elements flag set.
-    return TRY(DOM::create_element(*this, FlyString::from_utf8_without_validation(local_name_lower.bytes()), move(namespace_), {}, move(is_value), true));
+    // 5. Return the result of creating an element given this, localName, namespace, null, is, true, and registry.
+    return TRY(DOM::create_element(*this, FlyString::from_utf8_without_validation(local_name_lower.bytes()), move(namespace_), {}, move(is_value), true, registry));
 }
 
 // https://dom.spec.whatwg.org/#dom-document-createelementns
 // https://dom.spec.whatwg.org/#internal-createelementns-steps
 WebIDL::ExceptionOr<GC::Ref<Element>> Document::create_element_ns(Optional<FlyString> const& namespace_, String const& qualified_name, Variant<String, ElementCreationOptions> const& options)
 {
-    // 1. Let (namespace, prefix, localName) be the result of validating and extracting namespace and qualifiedName given "element".
+    // 1. Let (namespace, prefix, localName) be the result of validating and extracting namespace and qualifiedName
+    //    given "element".
     auto extracted_qualified_name = TRY(validate_and_extract(realm(), namespace_, qualified_name, ValidationContext::Element));
 
-    // 2. Let is be null.
-    Optional<String> is_value;
+    // 2. Let registry and is be the result of flattening element creation options given options and this.
+    auto [registry, is_value] = TRY(flatten_element_creation_options(options));
 
-    // 3. If options is a dictionary and options["is"] exists, then set is to it.
-    if (options.has<ElementCreationOptions>()) {
-        auto const& element_creation_options = options.get<ElementCreationOptions>();
-        if (element_creation_options.is.has_value())
-            is_value = element_creation_options.is.value();
-    }
-
-    // 4. Return the result of creating an element given document, localName, namespace, prefix, is, and with the synchronous custom elements flag set.
-    return TRY(DOM::create_element(*this, extracted_qualified_name.local_name(), extracted_qualified_name.namespace_(), extracted_qualified_name.prefix(), move(is_value), true));
+    // 3. Return the result of creating an element given document, localName, namespace, prefix, is, true, and registry.
+    return TRY(DOM::create_element(*this, extracted_qualified_name.local_name(), extracted_qualified_name.namespace_(), extracted_qualified_name.prefix(), move(is_value), true, registry));
 }
 
 GC::Ref<DocumentFragment> Document::create_document_fragment()
@@ -2303,6 +2632,19 @@ GC::Ref<HTML::HTMLScriptElement> Document::take_pending_parsing_blocking_script(
     return *script;
 }
 
+void Document::set_pending_parsing_blocking_svg_script(SVG::SVGScriptElement* script)
+{
+    m_pending_parsing_blocking_svg_script = script;
+}
+
+GC::Ref<SVG::SVGScriptElement> Document::take_pending_parsing_blocking_svg_script(Badge<HTML::HTMLParser>)
+{
+    VERIFY(m_pending_parsing_blocking_svg_script);
+    auto script = m_pending_parsing_blocking_svg_script;
+    m_pending_parsing_blocking_svg_script = nullptr;
+    return *script;
+}
+
 void Document::add_script_to_execute_when_parsing_has_finished(Badge<HTML::HTMLScriptElement>, HTML::HTMLScriptElement& script)
 {
     m_scripts_to_execute_when_parsing_has_finished.append(script);
@@ -2346,14 +2688,47 @@ Vector<GC::Root<HTML::HTMLScriptElement>> Document::take_scripts_to_execute_in_o
 }
 
 // https://dom.spec.whatwg.org/#dom-document-importnode
-WebIDL::ExceptionOr<GC::Ref<Node>> Document::import_node(GC::Ref<Node> node, bool deep)
+WebIDL::ExceptionOr<GC::Ref<Node>> Document::import_node(GC::Ref<Node> node, Variant<bool, ImportNodeOptions> options)
 {
     // 1. If node is a document or shadow root, then throw a "NotSupportedError" DOMException.
     if (is<Document>(*node) || is<ShadowRoot>(*node))
         return WebIDL::NotSupportedError::create(realm(), "Cannot import a document or shadow root."_utf16);
 
-    // 2. Return a clone of node, with this and the clone children flag set if deep is true.
-    return node->clone_node(this, deep);
+    // 2. Let subtree be false.
+    bool subtree = false;
+
+    // 3. Let registry be null.
+    GC::Ptr<HTML::CustomElementRegistry> registry;
+
+    TRY(options.visit(
+        // 4. If options is a boolean, then set subtree to options.
+        [&subtree](bool const& value) -> WebIDL::ExceptionOr<void> {
+            subtree = value;
+            return {};
+        },
+        // 5. Otherwise:
+        [&subtree, &registry, this](ImportNodeOptions const& options) -> WebIDL::ExceptionOr<void> {
+            // 1. Set subtree to the negation of options["selfOnly"].
+            subtree = !options.self_only;
+
+            // 2. If options["customElementRegistry"] exists, then set registry to it.
+            if (options.custom_element_registry)
+                registry = options.custom_element_registry;
+
+            // 3. If registry’s is scoped is false and registry is not this’s custom element registry, then throw a
+            //    "NotSupportedError" DOMException.
+            if (registry && !registry->is_scoped() && registry != custom_element_registry())
+                return WebIDL::NotSupportedError::create(realm(), "'customElementRegistry' in ImportNodeOptions must either be scoped or the document's custom element registry."_utf16);
+            return {};
+        }));
+
+    // 6. If registry is null, then set registry to the result of looking up a custom element registry given this.
+    if (!registry)
+        registry = HTML::look_up_a_custom_element_registry(*this);
+
+    // 7. Return the result of cloning a node given node with document set to this, subtree set to subtree, and
+    //   fallbackRegistry set to registry.
+    return node->clone_node(this, subtree, nullptr, registry);
 }
 
 // https://dom.spec.whatwg.org/#concept-node-adopt
@@ -2373,40 +2748,61 @@ void Document::adopt_node(Node& node)
             // 1. Set inclusiveDescendant’s node document to document.
             inclusive_descendant.set_document(Badge<Document> {}, *this);
 
-            // FIXME: 2. If inclusiveDescendant is an element, then set the node document of each attribute in inclusiveDescendant’s
-            //           attribute list to document.
+            // 2. If inclusiveDescendant is a shadow root and if any of the following are true:
+            //    - inclusiveDescendant’s custom element registry is null and inclusiveDescendant’s keep custom element
+            //      registry null is false; or
+            //    - inclusiveDescendant’s custom element registry is a global custom element registry,
+            //    then set inclusiveDescendant’s custom element registry to document’s effective global custom element
+            //    registry.
+            if (auto* shadow_root = as_if<ShadowRoot>(inclusive_descendant); shadow_root
+                && ((shadow_root->custom_element_registry() == nullptr && !shadow_root->keep_custom_element_registry_null())
+                    || HTML::is_a_global_custom_element_registry(shadow_root->custom_element_registry()))) {
+
+                shadow_root->set_custom_element_registry(effective_global_custom_element_registry());
+            }
+
+            // 3. Otherwise, if inclusiveDescendant is an element:
+            else if (auto* element = as_if<Element>(inclusive_descendant)) {
+                // FIXME: 1. Set the node document of each attribute in inclusiveDescendant’s attribute list to document.
+
+                // 2. If inclusiveDescendant’s custom element registry is null or inclusiveDescendant’s custom element
+                //    registry’s is scoped is false, then set inclusiveDescendant’s custom element registry to
+                //    document’s effective global custom element registry.
+                if (!element->custom_element_registry() || !element->custom_element_registry()->is_scoped()) {
+                    element->set_custom_element_registry(effective_global_custom_element_registry());
+                }
+            }
+
             return TraversalDecision::Continue;
         });
 
-        // 2. For each inclusiveDescendant in node’s shadow-including inclusive descendants that is custom,
-        //    enqueue a custom element callback reaction with inclusiveDescendant, callback name "adoptedCallback",
-        //    and an argument list containing oldDocument and document.
+        // 2. For each inclusiveDescendant in node’s shadow-including inclusive descendants that is custom, in
+        //    shadow-including tree order:
+        //    enqueue a custom element callback reaction with inclusiveDescendant, callback name "adoptedCallback", and
+        //    « oldDocument, document ».
         node.for_each_shadow_including_inclusive_descendant([&](DOM::Node& inclusive_descendant) {
-            if (!is<DOM::Element>(inclusive_descendant))
-                return TraversalDecision::Continue;
-
-            auto& element = static_cast<DOM::Element&>(inclusive_descendant);
-            if (element.is_custom()) {
+            if (auto* element = as_if<Element>(inclusive_descendant); element && element->is_custom()) {
                 auto& vm = this->vm();
 
                 GC::RootVector<JS::Value> arguments { vm.heap() };
                 arguments.append(&old_document);
                 arguments.append(this);
 
-                element.enqueue_a_custom_element_callback_reaction(HTML::CustomElementReactionNames::adoptedCallback, move(arguments));
+                element->enqueue_a_custom_element_callback_reaction(HTML::CustomElementReactionNames::adoptedCallback, move(arguments));
             }
 
             return TraversalDecision::Continue;
         });
 
-        // 3. For each inclusiveDescendant in node’s shadow-including inclusive descendants, in shadow-including tree order,
+        // 3. For each inclusiveDescendant in node’s shadow-including inclusive descendants, in shadow-including tree
+        //     order:
         //    run the adopting steps with inclusiveDescendant and oldDocument.
         node.for_each_shadow_including_inclusive_descendant([&](auto& inclusive_descendant) {
             inclusive_descendant.adopted_from(old_document);
             return TraversalDecision::Continue;
         });
 
-        // Transfer NodeIterators rooted at `node` from old_document to this document.
+        // AD-HOC: Transfer NodeIterators rooted at `node` from old_document to this document.
         Vector<NodeIterator&> node_iterators_to_transfer;
         for (auto node_iterator : old_document.m_node_iterators) {
             if (node_iterator->root().ptr() == &node)
@@ -2429,7 +2825,7 @@ WebIDL::ExceptionOr<GC::Ref<Node>> Document::adopt_node_binding(GC::Ref<Node> no
     if (is<ShadowRoot>(*node))
         return WebIDL::HierarchyRequestError::create(realm(), "Cannot adopt a shadow root into a document"_utf16);
 
-    if (is<DocumentFragment>(*node) && as<DocumentFragment>(*node).host())
+    if (auto* fragment = as_if<DocumentFragment>(*node); fragment && fragment->host())
         return node;
 
     adopt_node(*node);
@@ -2499,20 +2895,28 @@ void Document::set_focused_area(GC::Ptr<Node> node)
     if (new_focused_element)
         new_focused_element->did_receive_focus();
 
-    if (paintable())
-        paintable()->set_needs_display();
+    reset_cursor_blink_cycle();
+
+    set_needs_repaint();
 
     // Scroll the viewport if necessary to make the newly focused element visible.
     if (new_focused_element) {
-        new_focused_element->queue_an_element_task(HTML::Task::Source::UserInteraction, [&] {
+        new_focused_element->queue_an_element_task(HTML::Task::Source::UserInteraction, [new_focused_element] {
+            if (new_focused_element->document().focused_area().ptr() != new_focused_element)
+                return;
             ScrollIntoViewOptions scroll_options;
             scroll_options.block = Bindings::ScrollLogicalPosition::Nearest;
             scroll_options.inline_ = Bindings::ScrollLogicalPosition::Nearest;
-            (void)as<Element>(*m_focused_area).scroll_into_view(scroll_options);
+            (void)new_focused_element->scroll_into_view(scroll_options);
         });
     }
 
     update_active_element();
+}
+
+Element const* Document::active_element() const
+{
+    return m_active_element ? m_active_element.ptr() : body();
 }
 
 void Document::set_active_element(GC::Ptr<Element> element)
@@ -2520,30 +2924,9 @@ void Document::set_active_element(GC::Ptr<Element> element)
     if (m_active_element.ptr() == element)
         return;
 
-    auto old_active_element = move(m_active_element);
-    auto* common_ancestor = find_common_ancestor(old_active_element, element);
-
-    GC::Ptr<Node> old_active_node_root = nullptr;
-    GC::Ptr<Node> new_active_node_root = nullptr;
-    if (old_active_element)
-        old_active_node_root = old_active_element->root();
-    if (element)
-        new_active_node_root = element->root();
-    if (old_active_node_root != new_active_node_root) {
-        if (old_active_node_root) {
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Active, m_active_element, *old_active_node_root, element);
-        }
-        if (new_active_node_root) {
-            invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Active, m_active_element, *new_active_node_root, element);
-        }
-    } else {
-        invalidate_style_for_elements_affected_by_pseudo_class_change(CSS::PseudoClass::Active, m_active_element, *common_ancestor, element);
-    }
-
     m_active_element = element;
 
-    if (paintable())
-        paintable()->set_needs_display();
+    set_needs_repaint();
 }
 
 void Document::set_target_element(GC::Ptr<Element> element)
@@ -2574,8 +2957,107 @@ void Document::set_target_element(GC::Ptr<Element> element)
 
     m_target_element = element;
 
-    if (paintable())
-        paintable()->set_needs_display();
+    set_needs_repaint();
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#flush-autofocus-candidates
+void Document::flush_autofocus_candidates()
+{
+    // 1. If topDocument's autofocus processed flag is true, then return.
+    if (m_autofocus_processed_flag)
+        return;
+
+    // 2. Let candidates be topDocument's autofocus candidates.
+    auto& candidates = m_autofocus_candidates;
+
+    // 3. If candidates is empty, then return.
+    if (candidates.is_empty())
+        return;
+
+    // 4. If topDocument's focused area is not topDocument itself, or topDocument has non-null target element, then:
+    if ((m_focused_area && m_focused_area.ptr() != this) || m_target_element) {
+        // 1. Empty candidates.
+        candidates.clear();
+
+        // 2. Set topDocument's autofocus processed flag to true.
+        m_autofocus_processed_flag = true;
+
+        // 3. Return.
+        return;
+    }
+
+    // 5. While candidates is not empty:
+    while (!candidates.is_empty()) {
+        // 1. Let element be candidates[0].
+        GC::Ref<Element> element = candidates.first();
+
+        // 2. Let doc be element's node document.
+        auto& doc = element->document();
+
+        // 3. If doc is not fully active, then remove element from candidates, and continue.
+        if (!doc.is_fully_active()) {
+            candidates.take_first();
+            continue;
+        }
+
+        // 4. If doc's node navigable's top-level traversable is not the same as topDocument's node navigable, then
+        //    remove element from candidates, and continue.
+        auto doc_navigable = doc.navigable();
+        if (!doc_navigable || doc_navigable->top_level_traversable() != navigable()) {
+            candidates.take_first();
+            continue;
+        }
+
+        // 5. If doc's script-blocking style sheet set is not empty, then return.
+        if (!doc.script_blocking_style_sheet_set().is_empty())
+            return;
+
+        // 6. Remove element from candidates.
+        candidates.take_first();
+
+        // 7. Let inclusiveAncestorDocuments be a list consisting of the active document of doc's inclusive ancestor navigables.
+        GC::RootVector<GC::Ref<Document>> inclusive_ancestor_documents(heap());
+        inclusive_ancestor_documents.append(doc);
+        auto ancestor_navigable = doc_navigable->parent();
+        while (ancestor_navigable) {
+            if (auto active = ancestor_navigable->active_document())
+                inclusive_ancestor_documents.append(*active);
+            ancestor_navigable = ancestor_navigable->parent();
+        }
+
+        // 8. If any Document in inclusiveAncestorDocuments has non-null target element, then continue.
+        auto any_ancestor_has_target = false;
+        for (auto& ancestor : inclusive_ancestor_documents) {
+            if (ancestor->target_element()) {
+                any_ancestor_has_target = true;
+                break;
+            }
+        }
+        if (any_ancestor_has_target)
+            continue;
+
+        // 9. Let target be element.
+        GC::Ptr<Element> target = element;
+
+        // FIXME: 10. If target is not a focusable area, then set target to the result of getting the
+        //            focusable area for target.
+        // AD-HOC: We don't implement "get the focusable area" so for now, treat unconnected and non-focusable elements
+        //         as having no focusable area.
+        if (!target->is_connected() || !target->is_focusable())
+            target = nullptr;
+
+        // 11. If target is not null, then:
+        if (target) {
+            // 1. Empty candidates.
+            candidates.clear();
+
+            // 2. Set topDocument's autofocus processed flag to true.
+            m_autofocus_processed_flag = true;
+
+            // 3. Run the focusing steps for target.
+            HTML::run_focusing_steps(target.ptr());
+        }
+    }
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#the-indicated-part-of-the-document
@@ -2711,6 +3193,10 @@ void Document::dispatch_events_for_transition(GC::Ref<CSS::CSSTransition> transi
         case Animations::TimeValue::Type::Milliseconds:
             elapsed_time_output = elapsed_time.value / 1000;
             break;
+        case Animations::TimeValue::Type::Percentage:
+            // FIXME: The spec doesn't specify how to handle this case
+            elapsed_time_output = 0;
+            break;
         }
 
         append_pending_animation_event({
@@ -2810,6 +3296,10 @@ void Document::dispatch_events_for_animation_if_necessary(GC::Ref<Animations::An
         switch (elapsed_time.type) {
         case Animations::TimeValue::Type::Milliseconds:
             elapsed_time_output = elapsed_time.value / 1000;
+            break;
+        case Animations::TimeValue::Type::Percentage:
+            // FIXME: The spec doesn't specify how to handle this case
+            elapsed_time_output = 0;
             break;
         }
 
@@ -2968,7 +3458,7 @@ void Document::scroll_to_the_beginning_of_the_document()
 {
     // FIXME: Actually implement this algorithm
     if (auto navigable = this->navigable())
-        navigable->perform_scroll_of_viewport({ 0, 0 });
+        navigable->perform_scroll_of_viewport_scrolling_box({ 0, 0 });
 }
 
 StringView Document::ready_state() const
@@ -3089,8 +3579,21 @@ bool Document::is_completely_loaded() const
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#completely-finish-loading
 void Document::completely_finish_loading()
 {
-    if (!navigable())
+    // 2. Set document's completely loaded time to the current time.
+    // AD-HOC: Set this unconditionally, even if the document has no navigable yet.
+    //         In the async state machine, documents created during populate may complete
+    //         loading before they are activated. The timestamp must still be recorded so
+    //         that activate_history_entry can detect this and re-trigger the container
+    //         notification steps.
+    if (!m_completely_loaded_time.has_value())
+        m_completely_loaded_time = AK::UnixDateTime::now();
+
+    auto navigable = this->navigable();
+    if (!navigable) {
+        m_completely_loaded_deferred = true;
         return;
+    }
+    m_completely_loaded_deferred = false;
 
     ScopeGuard notify_observers = [this] {
         notify_each_document_observer([&](auto const& document_observer) {
@@ -3101,18 +3604,15 @@ void Document::completely_finish_loading()
     // 1. Assert: document's browsing context is non-null.
     VERIFY(browsing_context());
 
-    // 2. Set document's completely loaded time to the current time.
-    m_completely_loaded_time = AK::UnixDateTime::now();
-
     // NOTE: See the end of shared_declarative_refresh_steps.
     if (m_active_refresh_timer)
         m_active_refresh_timer->start();
 
     // 3. Let container be document's browsing context's container.
-    if (!navigable()->container())
+    if (!navigable->container())
         return;
 
-    auto container = GC::make_root(navigable()->container());
+    auto container = GC::make_root(navigable->container());
 
     // 4. If container is an iframe element, then queue an element task on the DOM manipulation task source given container to run the iframe load event steps given container.
     if (container && is<HTML::HTMLIFrameElement>(*container)) {
@@ -3126,10 +3626,14 @@ void Document::completely_finish_loading()
             container->dispatch_event(DOM::Event::create(container->realm(), HTML::EventNames::load));
         });
     }
+
+    // AD-HOC: Script-created parsers (iframe document.open/write/close) don't reach set_ready_for_post_load_tasks, so
+    //         the parent's load-event-delay phase wouldn't otherwise be re-evaluated when this iframe finishes loading.
+    container->document().schedule_html_parser_end_check();
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#dom-document-cookie
-WebIDL::ExceptionOr<String> Document::cookie(Cookie::Source source)
+WebIDL::ExceptionOr<String> Document::cookie()
 {
     // On getting, if the document is a cookie-averse Document object, then the user agent must return the empty string.
     if (is_cookie_averse())
@@ -3141,11 +3645,23 @@ WebIDL::ExceptionOr<String> Document::cookie(Cookie::Source source)
 
     // Otherwise, the user agent must return the cookie-string for the document's URL for a "non-HTTP" API, decoded using
     // UTF-8 decode without BOM.
-    return page().client().page_did_request_cookie(m_url, source);
+    if (m_cookie_version_index.has_value()) {
+        if (m_cookie_version == page().client().page_did_request_document_cookie_version(*m_cookie_version_index))
+            return m_cookie;
+    }
+
+    auto [cookie_version, cookie] = page().client().page_did_request_cookie(m_url, HTTP::Cookie::Source::NonHttp);
+
+    if (cookie_version.has_value()) {
+        m_cookie_version = *cookie_version;
+        m_cookie = cookie;
+    }
+
+    return cookie;
 }
 
 // https://html.spec.whatwg.org/multipage/dom.html#dom-document-cookie
-WebIDL::ExceptionOr<void> Document::set_cookie(StringView cookie_string, Cookie::Source source)
+WebIDL::ExceptionOr<void> Document::set_cookie(StringView cookie_string)
 {
     // On setting, if the document is a cookie-averse Document object, then the user agent must do nothing.
     if (is_cookie_averse())
@@ -3157,8 +3673,8 @@ WebIDL::ExceptionOr<void> Document::set_cookie(StringView cookie_string, Cookie:
 
     // Otherwise, the user agent must act as it would when receiving a set-cookie-string for the document's URL via a
     // "non-HTTP" API, consisting of the new value encoded as UTF-8.
-    if (auto cookie = Cookie::parse_cookie(url(), cookie_string); cookie.has_value())
-        page().client().page_did_set_cookie(m_url, cookie.value(), source);
+    if (auto cookie = HTTP::Cookie::parse_cookie(url(), cookie_string); cookie.has_value())
+        page().client().page_did_set_cookie(m_url, cookie.value(), HTTP::Cookie::Source::NonHttp);
 
     return {};
 }
@@ -3173,11 +3689,8 @@ bool Document::is_cookie_averse() const
         return true;
 
     // * A Document whose URL's scheme is not an HTTP(S) scheme.
-    if (!url().scheme().is_one_of("http"sv, "https"sv)) {
-        // AD-HOC: This allows us to write cookie integration tests.
-        if (!m_enable_cookies_on_file_domains || url().scheme() != "file"sv)
-            return true;
-    }
+    if (!url().scheme().is_one_of("http"sv, "https"sv))
+        return true;
 
     return false;
 }
@@ -3249,6 +3762,8 @@ void Document::set_bg_color(String const& value)
 
 String Document::dump_dom_tree_as_json() const
 {
+    const_cast<Document&>(*this).update_layout(UpdateLayoutReason::InspectDOMTree);
+
     StringBuilder builder;
     auto json = MUST(JsonObjectSerializer<>::try_create(builder));
     serialize_tree_as_json(json);
@@ -3272,11 +3787,12 @@ bool Document::has_a_style_sheet_that_is_blocking_scripts() const
         return true;
 
     // 2. If document's node navigable is null, then return false.
-    if (!navigable())
+    auto navigable = this->navigable();
+    if (!navigable)
         return false;
 
     // 3. Let containerDocument be document's node navigable's container document.
-    auto container_document = navigable()->container_document();
+    auto container_document = navigable->container_document();
 
     // 4. If containerDocument is non-null and containerDocument's script-blocking style sheet set is not empty, then return true.
     if (container_document && !container_document->m_script_blocking_style_sheet_set.is_empty())
@@ -3383,7 +3899,7 @@ void Document::update_the_visibility_state(HTML::VisibilityState visibility_stat
     dispatch_event(event);
 }
 
-// https://drafts.csswg.org/cssom-view/#run-the-resize-steps
+// https://drafts.csswg.org/cssom-view/#document-run-the-resize-steps
 void Document::run_the_resize_steps()
 {
     // 1. If doc’s viewport has had its width or height changed
@@ -3398,31 +3914,45 @@ void Document::run_the_resize_steps()
     VisualViewportState visual_viewport_state = { visual_viewport.scale(), { visual_viewport.width(), visual_viewport.height() } };
     bool is_initial_size = !m_last_viewport_size.has_value();
 
-    if (m_last_viewport_size == viewport_size && m_last_visual_viewport_state == visual_viewport_state)
+    bool viewport_size_changed = m_last_viewport_size != viewport_size;
+    bool visual_viewport_state_changed = m_last_visual_viewport_state != visual_viewport_state;
+
+    if (!viewport_size_changed && !visual_viewport_state_changed)
         return;
+
     m_last_viewport_size = viewport_size;
     m_last_visual_viewport_state = visual_viewport_state;
 
     if (!is_initial_size) {
-        auto window_resize_event = DOM::Event::create(realm(), UIEvents::EventNames::resize);
-        window_resize_event->set_is_trusted(true);
-        window()->dispatch_event(window_resize_event);
+        if (viewport_size_changed) {
+            auto window_resize_event = DOM::Event::create(realm(), UIEvents::EventNames::resize);
+            window_resize_event->set_is_trusted(true);
+            window()->dispatch_event(window_resize_event);
+        }
 
-        auto visual_viewport_resize_event = DOM::Event::create(realm(), UIEvents::EventNames::resize);
-        visual_viewport_resize_event->set_is_trusted(true);
-        visual_viewport.dispatch_event(visual_viewport_resize_event);
+        if (visual_viewport_state_changed) {
+            auto visual_viewport_resize_event = DOM::Event::create(realm(), UIEvents::EventNames::resize);
+            visual_viewport_resize_event->set_is_trusted(true);
+            visual_viewport.dispatch_event(visual_viewport_resize_event);
+        }
     }
 }
 
 // https://drafts.csswg.org/cssom-view-1/#document-run-the-scroll-steps
 void Document::run_the_scroll_steps()
 {
+    // AD-HOC: Process auto-scroll ticks before dispatching scroll events. This is tied to the rendering update to
+    //         ensure exactly one auto-scroll tick per frame.
+    if (auto navigable = this->navigable())
+        navigable->event_handler().process_auto_scroll();
+
     // FIXME: 1. For each scrolling box box that was scrolled:
     //        ...
 
     // 2. For each item (target, type) in doc’s pending scroll events, in the order they were added to the list, run
     //    these substeps:
-    for (auto const& [target, type] : m_pending_scroll_events) {
+    auto pending_scroll_events = move(m_pending_scroll_events);
+    for (auto const& [target, type] : pending_scroll_events) {
         // 1. If target is a Document, and type is "scroll" or "scrollend", fire an event named type that bubbles at target.
         if (is<Document>(*target) && (type == HTML::EventNames::scroll || type == HTML::EventNames::scrollend)) {
             auto event = DOM::Event::create(realm(), type);
@@ -3433,13 +3963,14 @@ void Document::run_the_scroll_steps()
         // FIXME: 3. Otherwise, if type is "scrollsnapchanging", then:
         // 4. Otherwise, fire an event named type at target.
         else {
-            auto event = DOM::Event::create(realm(), HTML::EventNames::scroll);
+            auto event = DOM::Event::create(realm(), type);
             target->dispatch_event(event);
         }
     }
 
     // 3. Empty doc’s pending scroll events.
-    m_pending_scroll_events.clear();
+    // AD-HOC: We already emptied the scroll events by moving in step 2. This prevents us from removing new scroll
+    //         events that were added while dispatching the old scroll events.
 }
 
 void Document::add_media_query_list(GC::Ref<CSS::MediaQueryList> media_query_list)
@@ -3534,8 +4065,39 @@ bool Document::has_focus_for_bindings() const
 // https://html.spec.whatwg.org/multipage/interaction.html#has-focus-steps
 bool Document::has_focus() const
 {
-    // FIXME: Implement this algorithm.
-    return true;
+    // 1. If target's node navigable's top-level traversable does not have system focus, then return false.
+    auto navigable = this->navigable();
+    if (!navigable)
+        return false;
+
+    auto traversable = navigable->traversable_navigable();
+    if (!traversable || !traversable->is_focused())
+        return false;
+
+    // 2. Let candidate be target's node navigable's top-level traversable's active document.
+    auto candidate = traversable->active_document();
+
+    // 3. While true:
+    while (candidate) {
+        // 3.1. If candidate is target, then return true.
+        if (candidate == this)
+            return true;
+
+        // 3.2. If the focused area of candidate is a navigable container with a non-null content navigable,
+        //      then set candidate to the active document of that navigable container's content navigable.
+        auto focused_area = candidate->focused_area();
+        if (auto* navigable_container = as_if<HTML::NavigableContainer>(focused_area.ptr())) {
+            if (auto content_navigable = navigable_container->content_navigable()) {
+                candidate = content_navigable->active_document();
+                continue;
+            }
+        }
+
+        // 3.3. Otherwise, return false.
+        return false;
+    }
+
+    return false;
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#allow-focus-steps
@@ -3560,7 +4122,7 @@ void Document::set_parser(Badge<HTML::HTMLParser>, HTML::HTMLParser& parser)
     m_parser = parser;
 }
 
-void Document::detach_parser(Badge<HTML::HTMLParser>)
+void Document::detach_parser()
 {
     m_parser = nullptr;
 }
@@ -3667,6 +4229,38 @@ void Document::decrement_number_of_things_delaying_the_load_event(Badge<Document
     --m_number_of_things_delaying_the_load_event;
 
     page().client().page_did_update_resource_count(m_number_of_things_delaying_the_load_event);
+
+    schedule_html_parser_end_check();
+}
+
+void Document::set_html_parser_end_state(GC::Ptr<HTML::HTMLParserEndState> state)
+{
+    m_html_parser_end_state = state;
+}
+
+void Document::schedule_html_parser_end_check()
+{
+    if (m_html_parser_end_state)
+        m_html_parser_end_state->schedule_progress_check();
+    if (m_parser)
+        m_parser->schedule_resume_check();
+}
+
+void Document::set_ready_for_post_load_tasks(bool ready)
+{
+    m_ready_for_post_load_tasks = ready;
+    if (ready) {
+        if (auto navigable = this->navigable()) {
+            // AD-HOC: Clear the navigation load event guard now that the document is ready.
+            //         This guard was set in finalize_a_cross_document_navigation to prevent the parent's
+            //         load event from firing while the about:blank was still the active document.
+            navigable->clear_navigation_load_event_guard();
+
+            if (auto container = navigable->container()) {
+                container->document().schedule_html_parser_end_check();
+            }
+        }
+    }
 }
 
 bool Document::anything_is_delaying_the_load_event() const
@@ -3699,7 +4293,8 @@ void Document::set_page_showing(bool page_showing)
 
 void Document::invalidate_stacking_context_tree()
 {
-    if (auto* paintable_box = this->paintable_box())
+    // NB: Called during stacking context invalidation.
+    if (auto* paintable_box = this->unsafe_paintable_box())
         paintable_box->invalidate_stacking_context();
 }
 
@@ -3753,36 +4348,6 @@ void Document::check_favicon_after_loading_link_resource()
 void Document::set_window(HTML::Window& window)
 {
     m_window = &window;
-}
-
-// https://html.spec.whatwg.org/multipage/custom-elements.html#look-up-a-custom-element-definition
-GC::Ptr<HTML::CustomElementDefinition> Document::lookup_custom_element_definition(Optional<FlyString> const& namespace_, FlyString const& local_name, Optional<String> const& is) const
-{
-    // 1. If namespace is not the HTML namespace, then return null.
-    if (namespace_ != Namespace::HTML)
-        return nullptr;
-
-    // 2. If document's browsing context is null, then return null.
-    if (!browsing_context())
-        return nullptr;
-
-    // 3. Let registry be document's relevant global object's custom element registry.
-    auto registry = as<HTML::Window>(relevant_global_object(*this)).custom_elements();
-
-    // 4. If registry's custom element definition set contains an item with name and local name both equal to localName, then return that item.
-    auto converted_local_name = local_name.to_string();
-    auto maybe_definition = registry->get_definition_with_name_and_local_name(converted_local_name, converted_local_name);
-    if (maybe_definition)
-        return maybe_definition;
-
-    // 5. If registry's custom element definition set contains an item with name equal to is and local name equal to localName, then return that item.
-    // 6. Return null.
-
-    // NOTE: If `is` has no value, it can never match as custom element definitions always have a name and localName (i.e. not stored as Optional<String>)
-    if (!is.has_value())
-        return nullptr;
-
-    return registry->get_definition_with_name_and_local_name(is.value(), converted_local_name);
 }
 
 CSS::StyleSheetList& Document::style_sheets()
@@ -4001,9 +4566,17 @@ Vector<GC::Root<HTML::Navigable>> const Document::descendant_navigables() const
 // https://html.spec.whatwg.org/multipage/document-sequences.html#inclusive-descendant-navigables
 Vector<GC::Root<HTML::Navigable>> Document::inclusive_descendant_navigables()
 {
+    // FIXME: The document's node navigable should not be null here. But we currently do not implement the "unload a
+    //        document and its descendants" steps correctly, and the navigable becomes null during unloading. We are
+    //        essentially destroying the document too early. See Document::unload_a_document_and_its_descendants. See:
+    //        https://github.com/LadybirdBrowser/ladybird/issues/7825
+    auto document_node_navigable = navigable();
+    if (!document_node_navigable)
+        return {};
+
     // 1. Let navigables be « document's node navigable ».
     Vector<GC::Root<HTML::Navigable>> navigables;
-    navigables.append(*navigable());
+    navigables.append(*document_node_navigable);
 
     // 2. Extend navigables with document's descendant navigables.
     navigables.extend(descendant_navigables());
@@ -4015,8 +4588,11 @@ Vector<GC::Root<HTML::Navigable>> Document::inclusive_descendant_navigables()
 // https://html.spec.whatwg.org/multipage/document-sequences.html#ancestor-navigables
 Vector<GC::Root<HTML::Navigable>> Document::ancestor_navigables()
 {
-    // NOTE: This isn't in the spec, but if we don't have a navigable, we can't have ancestors either.
-    auto document_node_navigable = this->navigable();
+    // FIXME: The document's node navigable should not be null here. But we currently do not implement the "unload a
+    //        document and its descendants" steps correctly, and the navigable becomes null during unloading. We are
+    //        essentially destroying the document too early. See Document::unload_a_document_and_its_descendants. See:
+    //        https://github.com/LadybirdBrowser/ladybird/issues/7825
+    auto document_node_navigable = navigable();
     if (!document_node_navigable)
         return {};
 
@@ -4047,11 +4623,19 @@ Vector<GC::Root<HTML::Navigable>> const Document::ancestor_navigables() const
 // https://html.spec.whatwg.org/multipage/document-sequences.html#inclusive-ancestor-navigables
 Vector<GC::Root<HTML::Navigable>> Document::inclusive_ancestor_navigables()
 {
+    // FIXME: The document's node navigable should not be null here. But we currently do not implement the "unload a
+    //        document and its descendants" steps correctly, and the navigable becomes null during unloading. We are
+    //        essentially destroying the document too early. See Document::unload_a_document_and_its_descendants. See:
+    //        https://github.com/LadybirdBrowser/ladybird/issues/7825
+    auto document_node_navigable = navigable();
+    if (!document_node_navigable)
+        return {};
+
     // 1. Let navigables be document's ancestor navigables.
     auto navigables = ancestor_navigables();
 
     // 2. Append document's node navigable to navigables.
-    navigables.append(*navigable());
+    navigables.append(*document_node_navigable);
 
     // 3. Return navigables.
     return navigables;
@@ -4108,7 +4692,17 @@ void Document::run_unloading_cleanup_steps()
         window.clear_map_of_active_timers();
     }
 
+    // https://w3c.github.io/IndexedDB/#database-connection
+    // If the execution context where the connection was created is destroyed
+    // (for example due to the user navigating away from that page), the connection is closed.
+    // AD-HOC: We have no way to detect when the execution context that created the connection is destroyed, and
+    //         making LibJS notify us of that would undoubtedly be very costly to performance. All other browsers also
+    //         opt not to follow the spec exactly in regards to this, instead letting the connection stay open until
+    //         GC collects it. However, we need to be proactive about this when navigating for the sake of test-web.
+    window.close_all_idb_connections();
+
     FileAPI::run_unloading_cleanup_steps(*this);
+    fully_exit_fullscreen();
 }
 
 // https://html.spec.whatwg.org/multipage/document-lifecycle.html#destroy-a-document
@@ -4118,6 +4712,21 @@ void Document::destroy()
 
     // 2. Abort document.
     abort();
+
+    // AD-HOC: Notify document observers that this document became inactive.
+    //         This allows observers (e.g. HTMLImageElement) to clear resources like
+    //         DocumentLoadEventDelayers that would otherwise block the parent
+    //         document's load event forever.
+    //         Note: did_stop_being_active_document_in_navigable() handles the navigation case,
+    //         but document destruction (e.g. iframe removal) takes a different path.
+    //         The flag ensures we don't fire the callback twice for the same document
+    //         (once from navigation, then again from destruction).
+    if (!m_has_fired_document_became_inactive) {
+        m_has_fired_document_became_inactive = true;
+        notify_each_document_observer([&](auto const& document_observer) {
+            return document_observer.document_became_inactive();
+        });
+    }
 
     // 3. Set document's salvageable state to false.
     m_salvageable = false;
@@ -4137,14 +4746,18 @@ void Document::destroy()
     // 6. Run any unloading document cleanup steps for document that are defined by this specification and other applicable specifications.
     run_unloading_cleanup_steps();
 
+    // AD-HOC: Destruction does not go through did_stop_being_active_document_in_navigable(),
+    //         but stale per-node and root layout/paintable pointers can still keep the old
+    //         layout tree alive until GC runs.
+    clear_layout_and_paintable_nodes_for_inactive_document();
+    tear_down_layout_tree();
+
     // 7. Remove any tasks whose document is document from any task queue (without running those tasks).
     HTML::main_thread_event_loop().task_queue().remove_tasks_matching([this](auto& task) {
         return task.document() == this;
     });
 
-    // AD-HOC: Mark this document as destroyed. This makes any tasks scheduled for this document in the
-    //         future immediately runnable instead of blocking on the document becoming fully active.
-    //         This is important because otherwise those tasks will get stuck in the task queue forever.
+    // AD-HOC: Mark this document as destroyed so we can remove tasks from the queue that will never be able to run.
     m_has_been_destroyed = true;
 
     // 8. Set document's browsing context to null.
@@ -4153,12 +4766,12 @@ void Document::destroy()
     // Not in the spec:
     for (auto& navigable_container : HTML::NavigableContainer::all_instances()) {
         if (&navigable_container->document() == this && navigable_container->content_navigable())
-            HTML::all_navigables().remove(*navigable_container->content_navigable());
+            navigable_container->content_navigable()->remove_from_all_navigables();
     }
 
     // 9. Set document's node navigable's active session history entry's document state's document to null.
     if (auto navigable = this->navigable()) {
-        navigable->active_session_history_entry()->document_state()->set_document(nullptr);
+        navigable->set_active_document(nullptr);
 
         // AD-HOC: We set the page's focused navigable during mouse-down events. If that navigable is this document's
         //         navigable, we must be sure to reset the page's focused navigable.
@@ -4179,101 +4792,103 @@ void Document::make_unsalvageable([[maybe_unused]] String reason)
     set_salvageable(false);
 }
 
-struct DocumentDestructionState : public GC::Cell {
-    GC_CELL(DocumentDestructionState, GC::Cell);
+struct DocumentLifecycleState : public GC::Cell {
+    GC_CELL(DocumentLifecycleState, GC::Cell);
+    GC_DECLARE_ALLOCATOR(DocumentLifecycleState);
 
     static constexpr int TIMEOUT_MS = 15000;
 
-    DocumentDestructionState(GC::Ref<Document> document, size_t remaining, GC::Ptr<GC::Function<void()>> after)
+    DocumentLifecycleState(GC::Ref<Document> document, size_t remaining, GC::Ref<GC::Function<void()>> finish_callback)
         : remaining_children(remaining)
         , document(document)
-        , after_all(after)
+        , finish_callback(finish_callback)
         , timeout(Platform::Timer::create_single_shot(heap(), TIMEOUT_MS, GC::create_function(heap(), [this] {
             if (remaining_children > 0)
-                dbgln("FIXME: Document destruction timed out with {} remaining children", remaining_children);
+                dbgln("FIXME: Document unload/destruction timed out with {} remaining children", remaining_children);
         })))
     {
         timeout->start();
     }
 
-    virtual void visit_edges(GC::Cell::Visitor& visitor) override
+    virtual void visit_edges(Visitor& visitor) override
     {
         Base::visit_edges(visitor);
         visitor.visit(document);
-        visitor.visit(after_all);
+        visitor.visit(finish_callback);
         visitor.visit(timeout);
     }
 
-    void increment_destroyed()
+    void did_process_child()
     {
-        --remaining_children;
-        if (remaining_children > 0)
+        if (--remaining_children > 0)
             return;
         timeout->stop();
-        queue_global_task(HTML::Task::Source::NavigationAndTraversal, relevant_global_object(document), GC::create_function(heap(), [document = move(document), after_all = move(after_all)] {
-            document->destroy();
-            if (after_all)
-                after_all->function()();
-        }));
+        queue_a_task(HTML::Task::Source::NavigationAndTraversal, nullptr, nullptr, finish_callback);
     }
 
     size_t remaining_children { 0 };
     GC::Ref<Document> document;
-    GC::Ptr<GC::Function<void()>> after_all;
+    GC::Ref<GC::Function<void()>> finish_callback;
     GC::Ref<Platform::Timer> timeout;
 };
+
+GC_DEFINE_ALLOCATOR(DocumentLifecycleState);
 
 // https://html.spec.whatwg.org/multipage/document-lifecycle.html#destroy-a-document-and-its-descendants
 void Document::destroy_a_document_and_its_descendants(GC::Ptr<GC::Function<void()>> after_all_destruction)
 {
     // 1. If document is not fully active, then:
     if (!is_fully_active()) {
-        // 1. Let reason be a string from user-agent specific blocking reasons.
-        //    If none apply, then let reason be "masked".
+        // 1. Let reason be a string from user-agent specific blocking reasons. If none apply, then let reason be
+        //    "masked".
         // FIXME: user-agent specific blocking reasons.
         auto reason = "masked"_string;
 
         // 2. Make document unsalvageable given document and reason.
         make_unsalvageable(reason);
 
-        // FIXME: 3. If document's node navigable is a top-level traversable,
-        //           build not restored reasons for a top-level traversable and its descendants given document's node navigable.
+        // FIXME: 3. If document's node navigable is a top-level traversable, build not restored reasons for a top-level
+        //    traversable and its descendants given document's node navigable.
     }
 
     // 2. Let childNavigables be document's child navigables.
-    IGNORE_USE_IN_ESCAPING_LAMBDA auto child_navigables = document_tree_child_navigables();
+    IGNORE_USE_IN_ESCAPING_LAMBDA auto child_navigables = navigable()->child_navigables();
 
-    // NOTE: Not in the spec but we could avoid allocating destruction state in case there's no child navigables.
+    // 6. Queue a global task on the navigation and traversal task source given document's relevant global object to
+    //    perform the following steps:
+    auto finish_callback = GC::create_function(heap(), [document = this, after_all_destruction] {
+        // 1. Destroy document.
+        document->destroy();
+
+        // 2. If afterAllDestruction was given, then run it.
+        if (after_all_destruction)
+            after_all_destruction->function()();
+    });
+
+    // AD-HOC: We avoid allocating a DocumentLifecycleState in case there's no child navigables.
     if (child_navigables.is_empty()) {
-        HTML::queue_global_task(HTML::Task::Source::NavigationAndTraversal, relevant_global_object(*this), GC::create_function(heap(), [document = this, after_all_destruction] {
-            // 1. Destroy document.
-            document->destroy();
-
-            // 2. If afterAllDestruction was given, then run it.
-            if (after_all_destruction)
-                after_all_destruction->function()();
-        }));
+        HTML::queue_global_task(HTML::Task::Source::NavigationAndTraversal, relevant_global_object(*this), finish_callback);
         return;
     }
 
     // 3. Let numberDestroyed be 0.
-    auto destruction_state = heap().allocate<DocumentDestructionState>(*this, child_navigables.size(), after_all_destruction);
+    auto destruction_state = heap().allocate<DocumentLifecycleState>(*this, child_navigables.size(), finish_callback);
 
     // 4. For each childNavigable of childNavigables, queue a global task on the navigation and traversal task source
     //    given childNavigable's active window to perform the following steps:
     for (auto& child_navigable : child_navigables) {
-        queue_global_task(HTML::Task::Source::NavigationAndTraversal, *child_navigable->active_window(), GC::create_function(heap(), [&heap = heap(), destruction_state, child_navigable] {
-            // 1. Let incrementDestroyed be an algorithm step which increments numberDestroyed.
-            auto increment_destroyed = GC::create_function(heap, [destruction_state] { destruction_state->increment_destroyed(); });
+        queue_global_task(HTML::Task::Source::NavigationAndTraversal, *child_navigable->active_window(),
+            GC::create_function(heap(), [&heap = heap(), destruction_state, child_navigable] {
+                // 1. Let incrementDestroyed be an algorithm step which increments numberDestroyed.
+                auto increment_destroyed = GC::create_function(heap, [destruction_state] { destruction_state->did_process_child(); });
 
-            // 2. Destroy a document and its descendants given childNavigable's active document and incrementDestroyed.
-            child_navigable->active_document()->destroy_a_document_and_its_descendants(increment_destroyed);
-        }));
+                // 2. Destroy a document and its descendants given childNavigable's active document and incrementDestroyed.
+                child_navigable->active_document()->destroy_a_document_and_its_descendants(increment_destroyed);
+            }));
     }
 
-    // NOTE: Both of subsequent steps are handled by DocumentDestructionState.
     // 5. Wait until numberDestroyed equals childNavigable's size.
-    // 6. Queue a global task on the navigation and traversal task source given document's relevant global object to perform the following steps:
+    // NB: This is handled by destruction_state.
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#abort-a-document
@@ -4364,10 +4979,11 @@ void Document::unload(GC::Ptr<Document>)
 
     // FIXME: 3. If newDocument is not given, then set unloadTimingInfo to null.
 
-    // FIXME: 4. Otherwise, if newDocument's event loop is not oldDocument's event loop, then the user agent may be unloading oldDocument in parallel. In that case, the user agent should
-    //           set unloadTimingInfo to null.
+    // FIXME: 4. Otherwise, if newDocument's event loop is not oldDocument's event loop, then the user agent may be unloading
+    //    oldDocument in parallel. In that case, the user agent should set unloadTimingInfo to null.
 
-    // 5. Let intendToStoreInBfcache be true if the user agent intends to keep oldDocument alive in a session history entry, such that it can later be used for history traversal.
+    // 5. Let intendToStoreInBfcache be true if the user agent intends to keep oldDocument alive in a session history
+    //    entry, such that it can later be used for history traversal.
     auto intend_to_store_in_bfcache = false;
 
     // 6. Let eventLoop be oldDocument's relevant agent's event loop.
@@ -4380,26 +4996,28 @@ void Document::unload(GC::Ptr<Document>)
     m_unload_counter += 1;
 
     // 9. If intendToKeepInBfcache is false, then set oldDocument's salvageable state to false.
-    if (!intend_to_store_in_bfcache) {
+    if (!intend_to_store_in_bfcache)
         m_salvageable = false;
-    }
 
     // 10. If oldDocument's page showing is true:
     if (m_page_showing) {
         // 1. Set oldDocument's page showing to false.
         m_page_showing = false;
 
-        // 2. Fire a page transition event named pagehide at oldDocument's relevant global object with oldDocument's salvageable state.
+        // 2. Fire a page transition event named pagehide at oldDocument's relevant global object with oldDocument's
+        //    salvageable state.
         as<HTML::Window>(relevant_global_object(*this)).fire_a_page_transition_event(HTML::EventNames::pagehide, m_salvageable);
 
         // 3. Update the visibility state of oldDocument to "hidden".
         update_the_visibility_state(HTML::VisibilityState::Hidden);
     }
 
-    // FIXME: 11. If unloadTimingInfo is not null, then set unloadTimingInfo's unload event start time to the current high resolution time given newDocument's relevant global object, coarsened
-    //            given oldDocument's relevant settings object's cross-origin isolated capability.
+    // FIXME: 11. If unloadTimingInfo is not null, then set unloadTimingInfo's unload event start time to the current high
+    //     resolution time given newDocument's relevant global object, coarsened given oldDocument's relevant settings
+    //     object's cross-origin isolated capability.
 
-    // 12. If oldDocument's salvageable state is false, then fire an event named unload at oldDocument's relevant global object, with legacy target override flag set.
+    // 12. If oldDocument's salvageable state is false, then fire an event named unload at oldDocument's relevant global
+    //     object, with legacy target override flag set.
     if (!m_salvageable) {
         // then fire an event named unload at document's relevant global object, with legacy target override flag set.
         // FIXME: The legacy target override flag is currently set by a virtual override of dispatch_event()
@@ -4408,8 +5026,9 @@ void Document::unload(GC::Ptr<Document>)
         as<HTML::Window>(relevant_global_object(*this)).dispatch_event(event);
     }
 
-    // FIXME: 13. If unloadTimingInfo is not null, then set unloadTimingInfo's unload event end time to the current high resolution time given newDocument's relevant global object, coarsened
-    //            given oldDocument's relevant settings object's cross-origin isolated capability.
+    // FIXME: 13. If unloadTimingInfo is not null, then set unloadTimingInfo's unload event end time to the current high
+    //     resolution time given newDocument's relevant global object, coarsened given oldDocument's relevant settings
+    //     object's cross-origin isolated capability.
 
     // 14. Decrease eventLoop's termination nesting level by 1.
     event_loop.decrement_termination_nesting_level();
@@ -4420,18 +5039,20 @@ void Document::unload(GC::Ptr<Document>)
 
     // FIXME: 17. Set oldDocument's has been scrolled by the user to false.
 
-    // FIXME: 18. Run any unloading document cleanup steps for oldDocument that are defined by this specification and other applicable specifications.
+    // 18. Run any unloading document cleanup steps for oldDocument that are defined by this specification and other
+    //     applicable specifications.
+    run_unloading_cleanup_steps();
 
     // 19. If oldDocument's salvageable state is false, then destroy oldDocument.
-    if (!m_salvageable) {
-        // NOTE: Document is destroyed from Document::unload_a_document_and_its_descendants()
-    }
+    if (!m_salvageable)
+        destroy();
 
     // 20. Decrease oldDocument's unload counter by 1.
     m_unload_counter -= 1;
 
-    // FIXME: 21. If newDocument is given, newDocument's was created via cross-origin redirects is false, and newDocument's origin is the same as oldDocument's origin, then set
-    //            newDocument's previous document unload timing to unloadTimingInfo.
+    // FIXME: 21. If newDocument is given, newDocument's was created via cross-origin redirects is false, and newDocument's
+    //     origin is the same as oldDocument's origin, then set newDocument's previous document unload timing to
+    //     unloadTimingInfo.
 
     did_stop_being_active_document_in_navigable();
 }
@@ -4439,57 +5060,51 @@ void Document::unload(GC::Ptr<Document>)
 // https://html.spec.whatwg.org/multipage/document-lifecycle.html#unload-a-document-and-its-descendants
 void Document::unload_a_document_and_its_descendants(GC::Ptr<Document> new_document, GC::Ptr<GC::Function<void()>> after_all_unloads)
 {
-    // Specification defines this algorithm in the following steps:
-    // 1. Recursively unload (and destroy) documents in descendant navigables
-    // 2. Unload (and destroy) this document.
-    //
-    // Implementation of the spec will fail in the following scenario:
-    // 1. Unload iframe's (has attribute name="test") document
-    //    1.1. Destroy iframe's document
-    // 2. Unload iframe's parent document
-    //    2.1. Dispatch "unload" event
-    //       2.2. In "unload" event handler run `window["test"]`
-    //          2.2.1. Execute Window::document_tree_child_navigable_target_name_property_set()
-    //             2.2.1.1. Fail to access iframe's navigable active document because it was destroyed on step 1.1
-    //
-    // We change the algorithm to:
-    // 1. Unload all descendant documents without destroying them
-    // 2. Unload this document
-    // 3. Destroy all descendant documents
-    // 4. Destroy this document
-    //
-    // This way we maintain the invariant that all navigable containers present in the DOM tree
-    // have an active document while the document is being unloaded.
+    // FIXME: 1. Assert: this is running within document's node navigable's traversable navigable's session history traversal
+    //    queue.
 
-    IGNORE_USE_IN_ESCAPING_LAMBDA size_t number_unloaded = 0;
+    // 2. Let childNavigables be document's child navigables.
+    IGNORE_USE_IN_ESCAPING_LAMBDA auto child_navigables = navigable()->child_navigables();
 
-    auto navigable = this->navigable();
+    // 6. Queue a global task on the navigation and traversal task source given document's relevant global object to
+    //    perform the following steps:
+    auto finish_callback = GC::create_function(heap(), [document = this, new_document, after_all_unloads] {
+        // FIXME: 1. If firePageSwapSteps is given, then run firePageSwapSteps.
 
-    Vector<GC::Root<HTML::Navigable>> descendant_navigables;
-    for (auto& other_navigable : HTML::all_navigables()) {
-        if (navigable->is_ancestor_of(*other_navigable))
-            descendant_navigables.append(other_navigable);
+        // 2. Unload document, passing along newDocument if it is not null.
+        document->unload(new_document);
+
+        // 3. If afterAllUnloads was given, then run it.
+        if (after_all_unloads)
+            after_all_unloads->function()();
+    });
+
+    // AD-HOC: We avoid allocating a DocumentLifecycleState in case there's no child navigables.
+    //         Queue with null document to ensure the task is always runnable. The document
+    //         can become non-fully-active during unloading, which would make the task stuck.
+    if (child_navigables.is_empty()) {
+        HTML::queue_a_task(HTML::Task::Source::NavigationAndTraversal, nullptr, nullptr, finish_callback);
+        return;
     }
 
-    IGNORE_USE_IN_ESCAPING_LAMBDA auto unloaded_documents_count = descendant_navigables.size() + 1;
+    // 3. Let numberUnloaded be 0.
+    auto unload_state = heap().allocate<DocumentLifecycleState>(*this, child_navigables.size(), finish_callback);
 
-    HTML::queue_global_task(HTML::Task::Source::NavigationAndTraversal, HTML::relevant_global_object(*this), GC::create_function(heap(), [&number_unloaded, this, new_document] {
-        unload(new_document);
-        ++number_unloaded;
-    }));
+    // 4. For each childNavigable of childNavigables [[ in what order? ]], queue a global task on the navigation and
+    //    traversal task source given childNavigable's active window to perform the following steps:
+    for (auto& child_navigable : child_navigables) {
+        HTML::queue_a_task(HTML::Task::Source::NavigationAndTraversal, nullptr, nullptr,
+            GC::create_function(heap(), [&heap = heap(), unload_state, child_navigable = child_navigable.ptr()] {
+                // 1. Let incrementUnloaded be an algorithm step which increments numberUnloaded.
+                auto increment_unloaded = GC::create_function(heap, [unload_state] { unload_state->did_process_child(); });
 
-    for (auto& descendant_navigable : descendant_navigables) {
-        HTML::queue_global_task(HTML::Task::Source::NavigationAndTraversal, *descendant_navigable->active_window(), GC::create_function(heap(), [&number_unloaded, descendant_navigable = descendant_navigable.ptr()] {
-            descendant_navigable->active_document()->unload();
-            ++number_unloaded;
-        }));
+                // 2. Unload a document and its descendants given childNavigable's active document, null, and incrementUnloaded.
+                child_navigable->active_document()->unload_a_document_and_its_descendants({}, increment_unloaded);
+            }));
     }
 
-    HTML::main_thread_event_loop().spin_until(GC::create_function(heap(), [&] {
-        return number_unloaded == unloaded_documents_count;
-    }));
-
-    destroy_a_document_and_its_descendants(move(after_all_unloads));
+    // 5. Wait until numberUnloaded equals childNavigables's size.
+    // NB: This is handled by unload_state.
 }
 
 // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#allowed-to-use
@@ -4511,11 +5126,23 @@ bool Document::is_allowed_to_use_feature(PolicyControlledFeature feature) const
         if (PermissionsPolicy::AutoplayAllowlist::the().is_allowed_for_origin(*this, origin()) == PermissionsPolicy::Decision::Enabled)
             return true;
         break;
+    case PolicyControlledFeature::Camera:
+        // FIXME: Implement allowlist for this.
+        return true;
     case PolicyControlledFeature::FocusWithoutUserActivation:
     case PolicyControlledFeature::EncryptedMedia:
         // FIXME: Implement allowlist for this.
         return true;
+    case PolicyControlledFeature::Fullscreen:
+        // FIXME: Implement allowlist for this.
+        return true;
     case PolicyControlledFeature::Gamepad:
+        // FIXME: Implement allowlist for this.
+        return true;
+    case PolicyControlledFeature::Microphone:
+        // FIXME: Implement allowlist for this.
+        return true;
+    case PolicyControlledFeature::WindowManagement:
         // FIXME: Implement allowlist for this.
         return true;
     }
@@ -4526,11 +5153,17 @@ bool Document::is_allowed_to_use_feature(PolicyControlledFeature feature) const
 
 void Document::did_stop_being_active_document_in_navigable()
 {
+    clear_layout_and_paintable_nodes_for_inactive_document();
     tear_down_layout_tree();
 
-    notify_each_document_observer([&](auto const& document_observer) {
-        return document_observer.document_became_inactive();
-    });
+    schedule_html_parser_end_check();
+
+    if (!m_has_fired_document_became_inactive) {
+        m_has_fired_document_became_inactive = true;
+        notify_each_document_observer([&](auto const& document_observer) {
+            return document_observer.document_became_inactive();
+        });
+    }
 }
 
 void Document::increment_throw_on_dynamic_markup_insertion_counter(Badge<HTML::HTMLParser>)
@@ -4631,14 +5264,7 @@ void Document::make_active()
         page().client().page_did_change_active_document_in_top_level_browsing_context(*this);
     }
 
-    // 3. Set document's visibility state to document's node navigable's traversable navigable's system visibility state.
-    if (navigable()) {
-        m_visibility_state = navigable()->traversable_navigable()->system_visibility_state();
-    }
-
-    // TODO: 4. Queue a new VisibilityStateEntry whose visibility state is document's visibility state and whose timestamp is zero.
-
-    // 5. Set window's relevant settings object's execution ready flag.
+    // 3. Set window's relevant settings object's execution ready flag.
     HTML::relevant_settings_object(window).execution_ready = true;
 
     if (m_needs_to_call_page_did_load) {
@@ -4649,6 +5275,23 @@ void Document::make_active()
     notify_each_document_observer([&](auto const& document_observer) {
         return document_observer.document_became_active();
     });
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#set-the-initial-visibility-state
+void Document::set_initial_visibility_state(HTML::VisibilityState visibility_state)
+{
+    // 1. Set document's visibility state to visibility state.
+    m_visibility_state = visibility_state;
+
+    // TODO: 2. Queue a new VisibilityStateEntry whose visibility state is document's visibility state and whose timestamp is 0.
+
+    // AD-HOC: Record the initial viewport and visual viewport state so that if the viewport changes before the
+    //         first rendering update (e.g. in our fullscreen tests), change events are still fired.
+    if (!m_last_viewport_size.has_value()) {
+        m_last_viewport_size = viewport_rect().size().to_type<int>();
+        auto& current_visual_viewport = *visual_viewport();
+        m_last_visual_viewport_state = VisualViewportState { current_visual_viewport.scale(), { current_visual_viewport.width(), current_visual_viewport.height() } };
+    }
 }
 
 HTML::ListOfAvailableImages& Document::list_of_available_images()
@@ -4783,26 +5426,58 @@ void Document::queue_an_intersection_observer_entry(IntersectionObserver::Inters
 }
 
 // https://www.w3.org/TR/intersection-observer/#compute-the-intersection
-static CSSPixelRect compute_intersection(GC::Ref<Element> target, IntersectionObserver::IntersectionObserver const& observer)
+static CSSPixelRect compute_intersection(GC::Ref<Element> target, IntersectionObserver::IntersectionObserver const& observer, Painting::PaintableBox const* root_paintable, CSSPixelRect const& root_bounds)
 {
     // 1. Let intersectionRect be the result of getting the bounding box for target.
     auto intersection_rect = target->get_bounding_client_rect();
 
-    // FIXME: 2. Let container be the containing block of target.
-    // FIXME: 3. While container is not root:
-    // FIXME:   1. If container is the document of a nested browsing context, update intersectionRect by clipping to
-    //             the viewport of the document, and update container to be the browsing context container of container.
-    // FIXME:   2. Map intersectionRect to the coordinate space of container.
-    // FIXME:   3. If container has a content clip or a css clip-path property, update intersectionRect by applying
-    //             container’s clip.
-    // FIXME:   4. If container is the root element of a browsing context, update container to be the browsing context’s
-    //             document; otherwise, update container to be the containing block of container.
+    // 2. Let container be the containing block of target.
+    // 3. While container is not root:
+    if (auto const* target_paintable = target->paintable_box()) {
+        for (auto const* container = target_paintable->containing_block(); container; container = container->containing_block()) {
+            // Stop when we reach the intersection root.
+            if (container == root_paintable)
+                break;
+
+            // FIXME: 3.1. If container is the document of a nested browsing context, update
+            //             intersectionRect by clipping to the viewport of the document, and update
+            //             container to be the browsing context container of container.
+
+            // NOTE: Steps 3.2 (map to container coordinate space) and 3.5 (update container) are
+            //       unnecessary here because get_bounding_client_rect() and transform_rect_to_viewport()
+            //       already produce viewport-relative coordinates.
+
+            // 3.3. If container is a scroll container, apply the observer’s [[scrollMargin]]
+            //      to the container’s clip rect.
+            // 3.4. If container has a content clip or a css clip-path property, update intersectionRect
+            //      by applying container’s clip.
+            // FIXME: Handle clip-path.
+            auto overflow_x = container->computed_values().overflow_x();
+            auto overflow_y = container->computed_values().overflow_y();
+            bool has_content_clip = overflow_x != CSS::Overflow::Visible || overflow_y != CSS::Overflow::Visible;
+            if (has_content_clip) {
+                auto clip_rect = container->transform_rect_to_viewport(container->absolute_padding_box_rect());
+
+                // Apply scroll margin to expand the scrollport for scroll containers.
+                auto& scroll_margin = observer.scroll_margin_values();
+                auto const& layout_node = container->layout_node_with_style_and_box_metrics();
+                if (layout_node.is_scroll_container() && !scroll_margin.is_empty()) {
+                    clip_rect.inflate(
+                        scroll_margin[0].to_px(layout_node, clip_rect.height()),
+                        scroll_margin[1].to_px(layout_node, clip_rect.width()),
+                        scroll_margin[2].to_px(layout_node, clip_rect.height()),
+                        scroll_margin[3].to_px(layout_node, clip_rect.width()));
+                }
+
+                intersection_rect.intersect(clip_rect);
+            }
+        }
+    }
+
     // FIXME: 4. Map intersectionRect to the coordinate space of root.
 
     // 5. Update intersectionRect by intersecting it with the root intersection rectangle.
-    // FIXME: Pass in target so we can properly apply rootMargin.
-    auto root_intersection_rectangle = observer.root_intersection_rectangle();
-    intersection_rect.intersect(root_intersection_rectangle);
+    intersection_rect.intersect(root_bounds);
 
     // FIXME: 6. Map intersectionRect to the coordinate space of the viewport of the document containing target.
 
@@ -4826,9 +5501,16 @@ void Document::run_the_update_intersection_observations_steps(HighResolutionTime
         // 1. Let rootBounds be observer’s root intersection rectangle.
         auto root_bounds = observer->root_intersection_rectangle();
 
+        // Pre-compute per-observer values to avoid repeated work in the per-target loop.
+        auto intersection_root_node = observer->intersection_root_node();
+        auto* root_paintable = intersection_root_node->paintable_box();
+        bool is_implicit_root = observer->is_implicit_root();
+        bool root_is_element = intersection_root_node->is_element();
+
         // 2. For each target in observer’s internal [[ObservationTargets]] slot, processed in the same order that
         //    observe() was called on each target:
-        for (auto& target : observer->observation_targets()) {
+        for (auto& observed_target : observer->observation_targets()) {
+            auto& target = observed_target.target;
             // 1. Let:
             // thresholdIndex be 0.
             size_t threshold_index = 0;
@@ -4842,25 +5524,21 @@ void Document::run_the_update_intersection_observations_steps(HighResolutionTime
             // intersectionRect be a DOMRectReadOnly with x, y, width, and height set to 0.
             CSSPixelRect intersection_rect { 0, 0, 0, 0 };
 
-            // SPEC ISSUE: It doesn't pass in intersection ratio to "queue an IntersectionObserverEntry" despite needing it.
+            // SPEC ISSUE: It doesn’t pass in intersection ratio to "queue an IntersectionObserverEntry" despite needing it.
             //             This is default 0, as isIntersecting is default false, see step 9.
             double intersection_ratio = 0.0;
 
             // 2. If the intersection root is not the implicit root, and target is not in the same document as the intersection root, skip to step 11.
             // 3. If the intersection root is an Element, and target is not a descendant of the intersection root in the containing block chain, skip to step 11.
             // FIXME: Actually use the containing block chain.
-            auto intersection_root = observer->intersection_root();
-            auto intersection_root_document = intersection_root.visit([](auto& node) -> GC::Ref<Document> {
-                return node->document();
-            });
             // NOTE: Check if target has a layout node is not in the spec but required to match other browsers.
-            if (target->layout_node() && (!(observer->root().has<Empty>() && &target->document() == intersection_root_document.ptr()) || !(intersection_root.has<GC::Root<DOM::Element>>() && !target->is_descendant_of(*intersection_root.get<GC::Root<DOM::Element>>())))) {
+            if (target->layout_node() && (is_implicit_root || &target->document() == &intersection_root_node->document()) && !(root_is_element && !target->is_descendant_of(*intersection_root_node))) {
                 // 4. Set targetRect to the DOMRectReadOnly obtained by getting the bounding box for target.
                 target_rect = target->get_bounding_client_rect();
 
                 // 5. Let intersectionRect be the result of running the compute the intersection algorithm on target and
                 //    observer’s intersection root.
-                intersection_rect = compute_intersection(target, observer);
+                intersection_rect = compute_intersection(target, *observer, root_paintable, root_bounds);
 
                 // 6. Let targetArea be targetRect’s area.
                 auto target_area = target_rect.width() * target_rect.height();
@@ -4882,15 +5560,28 @@ void Document::run_the_update_intersection_observations_steps(HighResolutionTime
                 // 10. Set thresholdIndex to the index of the first entry in observer.thresholds whose value is greater
                 //     than intersectionRatio, or the length of observer.thresholds if intersectionRatio is greater than
                 //     or equal to the last entry in observer.thresholds.
-                threshold_index = observer->thresholds().find_first_index_if([&intersection_ratio](double threshold_value) {
-                                                            return threshold_value > intersection_ratio;
-                                                        })
-                                      .value_or(observer->thresholds().size());
+                // NB: Thresholds are sorted in ascending order, so we use binary search.
+                {
+                    auto const& thresholds = observer->thresholds();
+                    size_t lo = 0;
+                    size_t hi = thresholds.size();
+                    while (lo < hi) {
+                        size_t mid = lo + (hi - lo) / 2;
+                        if (thresholds[mid] > intersection_ratio)
+                            hi = mid;
+                        else
+                            lo = mid + 1;
+                    }
+                    threshold_index = lo;
+                }
             }
 
             // 11. Let intersectionObserverRegistration be the IntersectionObserverRegistration record in target’s
             //     internal [[RegisteredIntersectionObservers]] slot whose observer property is equal to observer.
-            auto& intersection_observer_registration = target->get_intersection_observer_registration({}, observer);
+            // NB: This implementation deviates from the spec's storage model. intersectionObserverRegistration here
+            //     aliases the observer-side observation target state, since target's registered observers only keep
+            //     the observer reference. This avoids an extra lookup through target on every update.
+            auto& intersection_observer_registration = observed_target;
 
             // 12. Let previousThresholdIndex be the intersectionObserverRegistration’s previousThresholdIndex property.
             auto previous_threshold_index = intersection_observer_registration.previous_threshold_index;
@@ -5169,8 +5860,18 @@ Painting::ViewportPaintable* Document::paintable()
     return static_cast<Painting::ViewportPaintable*>(Node::paintable());
 }
 
+Painting::ViewportPaintable const* Document::unsafe_paintable() const
+{
+    return static_cast<Painting::ViewportPaintable const*>(Node::unsafe_paintable());
+}
+
+Painting::ViewportPaintable* Document::unsafe_paintable()
+{
+    return static_cast<Painting::ViewportPaintable*>(Node::unsafe_paintable());
+}
+
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#restore-the-history-object-state
-void Document::restore_the_history_object_state(GC::Ref<HTML::SessionHistoryEntry> entry)
+void Document::restore_the_history_object_state(NonnullRefPtr<HTML::SessionHistoryEntry> entry)
 {
     // 1. Let targetRealm be document's relevant realm.
     auto& target_realm = HTML::relevant_realm(*this);
@@ -5185,7 +5886,7 @@ void Document::restore_the_history_object_state(GC::Ref<HTML::SessionHistoryEntr
 }
 
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#update-document-for-history-step-application
-void Document::update_for_history_step_application(GC::Ref<HTML::SessionHistoryEntry> entry, bool do_not_reactivate, size_t script_history_length, size_t script_history_index, Optional<Bindings::NavigationType> navigation_type, Optional<Vector<GC::Ref<HTML::SessionHistoryEntry>>> entries_for_navigation_api, GC::Ptr<HTML::SessionHistoryEntry> previous_entry_for_activation, bool update_navigation_api)
+void Document::update_for_history_step_application(NonnullRefPtr<HTML::SessionHistoryEntry> entry, bool do_not_reactivate, size_t script_history_length, size_t script_history_index, Optional<Bindings::NavigationType> navigation_type, Optional<Vector<NonnullRefPtr<HTML::SessionHistoryEntry>>> entries_for_navigation_api, RefPtr<HTML::SessionHistoryEntry> previous_entry_for_activation, bool update_navigation_api)
 {
     (void)previous_entry_for_activation;
 
@@ -5223,11 +5924,10 @@ void Document::update_for_history_step_application(GC::Ref<HTML::SessionHistoryE
             // NOTE: Not in the spec, but otherwise document's url won't be updated in case of a same-document back/forward navigation.
             set_url(entry->url());
 
-            // 1. Assert: navigationType is not null.
-            VERIFY(navigation_type.has_value());
-
             // AD HOC: Skip this in situations the spec steps don't account for
             if (update_navigation_api) {
+                // 1. Assert: navigationType is not null.
+                VERIFY(navigation_type.has_value());
                 // 2. Update the navigation API entries for a same-document navigation given navigation, entry, and navigationType.
                 navigation->update_the_navigation_api_entries_for_a_same_document_navigation(entry, navigation_type.value());
             }
@@ -5300,7 +6000,7 @@ void Document::update_for_history_step_application(GC::Ref<HTML::SessionHistoryE
         try_to_scroll_to_the_fragment();
 
         // 4. At this point scripts may run for the newly-created document document.
-        m_ready_to_run_scripts = true;
+        set_ready_to_run_scripts();
     }
 
     // 9. Otherwise, if documentsEntryChanged is false and doNotReactivate is false, then:
@@ -5309,6 +6009,26 @@ void Document::update_for_history_step_application(GC::Ref<HTML::SessionHistoryE
         // FIXME: 1. Assert: entriesForNavigationAPI is given.
         // FIXME: 2. Reactivate document given entry and entriesForNavigationAPI.
     }
+}
+
+void Document::set_ready_to_run_scripts()
+{
+    m_ready_to_run_scripts = true;
+    if (auto callback = m_deferred_parser_start) {
+        m_deferred_parser_start = nullptr;
+        callback->function()();
+    }
+}
+
+void Document::set_deferred_parser_start(GC::Ref<GC::Function<void()>> callback)
+{
+    VERIFY(!m_deferred_parser_start);
+    m_deferred_parser_start = callback;
+}
+
+void Document::set_latest_entry(RefPtr<HTML::SessionHistoryEntry> entry)
+{
+    m_latest_entry = move(entry);
 }
 
 HashMap<URL::URL, GC::Ptr<HTML::SharedResourceRequest>>& Document::shared_resource_requests()
@@ -5359,8 +6079,14 @@ void Document::update_animations_and_send_events(double timestamp)
         for (auto const& timeline : timelines_to_update) {
             timeline->update_current_time(timestamp);
 
-            for (auto const& animation : timeline->associated_animations())
-                animation->update();
+            for (auto& animation : timeline->associated_animations())
+                animation.update();
+
+            auto animations = GC::RootVector<GC::Ref<Animations::Animation>> { heap() };
+            for (auto& animation : timeline->associated_animations())
+                animations.append(animation);
+            for (auto& animation : animations)
+                dispatch_events_for_animation_if_necessary(animation);
         }
 
         // 2. Remove replaced animations for doc.
@@ -5416,12 +6142,6 @@ void Document::update_animations_and_send_events(double timestamp)
     //    the previous step.
     for (auto const& event : events_to_dispatch)
         event.target->dispatch_event(event.event);
-
-    for (auto& timeline : timelines_to_update) {
-        auto animations_to_dispatch = GC::RootVector { heap(), timeline->associated_animations().values() };
-        for (auto& animation : animations_to_dispatch)
-            dispatch_events_for_animation_if_necessary(animation.as_nonnull());
-    }
 }
 
 // https://www.w3.org/TR/web-animations-1/#remove-replaced-animations
@@ -5437,21 +6157,21 @@ void Document::remove_replaced_animations()
 
     Vector<GC::Ref<Animations::Animation>> replaceable_animations;
     for (auto const& timeline : m_associated_animation_timelines) {
-        for (auto const& animation : timeline->associated_animations()) {
-            if (!animation->effect() || !animation->effect()->target() || &animation->effect()->target()->document() != this)
+        for (auto& animation : timeline->associated_animations()) {
+            if (!animation.effect() || !animation.effect()->target() || &animation.effect()->target()->document() != this)
                 continue;
 
-            if (!animation->is_replaceable())
+            if (!animation.is_replaceable())
                 continue;
 
-            if (animation->replace_state() != Bindings::AnimationReplaceState::Active)
+            if (animation.replace_state() != Bindings::AnimationReplaceState::Active)
                 continue;
 
             // Composite order is only defined for KeyframeEffects
-            if (!animation->effect()->is_keyframe_effect())
+            if (!animation.effect()->is_keyframe_effect())
                 continue;
 
-            replaceable_animations.append(animation.as_nonnull());
+            replaceable_animations.append(animation);
         }
     }
 
@@ -5488,8 +6208,8 @@ void Document::remove_replaced_animations()
             // - Set removeEvent’s timelineTime attribute to the current time of the timeline with which animation is
             //   associated.
             Animations::AnimationPlaybackEventInit init;
-            init.current_time = animation->current_time().map([](auto const& value) { return value.as_css_numberish(); });
-            init.timeline_time = animation->timeline()->current_time().map([](auto const& value) { return value.as_css_numberish(); });
+            init.current_time = animation->current_time().has_value() ? Animations::NullableCSSNumberish { animation->current_time()->as_css_numberish(realm()) } : Animations::NullableCSSNumberish { Empty {} };
+            init.timeline_time = animation->timeline()->current_time().has_value() ? Animations::NullableCSSNumberish { animation->timeline()->current_time()->as_css_numberish(realm()) } : Animations::NullableCSSNumberish { Empty {} };
             auto remove_event = Animations::AnimationPlaybackEvent::create(realm(), HTML::EventNames::remove, init);
 
             // - If animation has a document for timing, then append removeEvent to its document for timing's pending
@@ -5621,6 +6341,24 @@ void Document::element_with_name_was_removed(Badge<DOM::Element>, GC::Ref<DOM::E
     }
 }
 
+GC::Ptr<Element> Document::element_by_anchor_name(FlyString const& name, Node const& querying_node) const
+{
+    // https://drafts.csswg.org/css-shadow-1/#tree-scoped-name
+    // If a tree-scoped name is global (such as @font-face names), then when a tree-scoped reference is dereferenced to
+    // find it, first search only the tree-scoped names associated with the same root as the tree-scoped reference. If
+    // no relevant tree-scoped name is found, and the root is a shadow root, then repeat this search in the root's
+    // host's node tree (recursively).
+    auto const* node = &querying_node;
+    while (auto const* shadow_root = as_if<ShadowRoot>(node->root())) {
+        if (auto element = shadow_root->anchor_name_map().element_by_name(name))
+            return element;
+        node = shadow_root->host();
+        if (!node)
+            return {};
+    }
+    return m_anchor_name_map.element_by_name(name);
+}
+
 void Document::add_form_associated_element_with_form_attribute(HTML::FormAssociatedElement& form_associated_element)
 {
     m_form_associated_elements_with_form_attribute.append(&form_associated_element);
@@ -5637,6 +6375,10 @@ void Document::set_design_mode_enabled_state(bool design_mode_enabled)
 {
     m_design_mode_enabled = design_mode_enabled;
     set_editable(design_mode_enabled);
+    for_each_in_inclusive_subtree([](Node& node) {
+        node.recompute_editable_subtree_flag();
+        return TraversalDecision::Continue;
+    });
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#making-entire-documents-editable:-the-designmode-idl-attribute
@@ -5656,12 +6398,9 @@ WebIDL::ExceptionOr<void> Document::set_design_mode(String const& design_mode)
         // 1. Set this's design mode enabled to true.
         set_design_mode_enabled_state(true);
         // 2. Reset this's active range's start and end boundary points to be at the start of this.
-        if (auto selection = get_selection(); selection) {
-            if (auto active_range = selection->range(); active_range) {
-                TRY(active_range->set_start(*this, 0));
-                TRY(active_range->set_end(*this, 0));
-                update_layout(UpdateLayoutReason::DocumentSetDesignMode);
-            }
+        if (auto selection = get_selection()) {
+            TRY(selection->collapse(this, 0));
+            update_layout(UpdateLayoutReason::DocumentSetDesignMode);
         }
         // 3. Run the focusing steps for this's document element, if non-null.
         if (auto* document_element = this->document_element(); document_element)
@@ -5672,6 +6411,17 @@ WebIDL::ExceptionOr<void> Document::set_design_mode(String const& design_mode)
         set_design_mode_enabled_state(false);
     }
     return {};
+}
+
+static Element* retarget_from_ua_internal_shadow_root(Element& element)
+{
+    auto* result = &element;
+    while (auto shadow_root = result->containing_shadow_root()) {
+        if (!shadow_root->is_user_agent_internal())
+            break;
+        result = shadow_root->host();
+    }
+    return result;
 }
 
 // https://drafts.csswg.org/cssom-view/#dom-document-elementfrompoint
@@ -5691,19 +6441,20 @@ Element const* Document::element_from_point(double x, double y)
 
     // 2. If there is a box in the viewport that would be a target for hit testing at coordinates x,y, when applying the transforms
     //    that apply to the descendants of the viewport, return the associated element and terminate these steps.
-    Optional<Painting::HitTestResult> hit_test_result;
-    if (auto const* paintable_box = this->paintable_box(); paintable_box) {
+    GC::Ptr<Element> hit_element;
+    if (auto const* paintable_box = this->paintable_box()) {
         (void)paintable_box->hit_test(position, Painting::HitTestType::Exact, [&](Painting::HitTestResult result) {
-            auto* dom_node = result.dom_node();
-            if (dom_node && dom_node->is_element()) {
-                hit_test_result = result;
+            if (auto* element = as_if<Element>(result.dom_node())) {
+                hit_element = element;
                 return TraversalDecision::Break;
             }
             return TraversalDecision::Continue;
         });
     }
-    if (hit_test_result.has_value())
-        return static_cast<Element*>(hit_test_result->dom_node());
+    if (hit_element) {
+        // AD-HOC: If element is inside a UA internal shadow root, retarget to the host.
+        return retarget_from_ua_internal_shadow_root(*hit_element);
+    }
 
     // 3. If the document has a root element, return the root element and terminate these steps.
     if (auto const* root_element = document_element())
@@ -5736,8 +6487,13 @@ GC::RootVector<GC::Ref<Element>> Document::elements_from_point(double x, double 
     //    apply to the descendants of the viewport, append the associated element to sequence.
     if (auto const* paintable_box = this->paintable_box()) {
         (void)paintable_box->hit_test(position, Painting::HitTestType::Exact, [&](Painting::HitTestResult result) {
-            if (auto* element = as_if<Element>(result.dom_node()))
-                sequence.append(*element);
+            if (auto* element = as_if<Element>(result.dom_node())) {
+                // AD-HOC: If element is inside a UA internal shadow root, retarget to the host.
+                element = retarget_from_ua_internal_shadow_root(*element);
+                // AD-HOC: Avoid adding duplicates when multiple internal elements retarget to the same host.
+                if (sequence.is_empty() || sequence.last() != element)
+                    sequence.append(*element);
+            }
             return TraversalDecision::Continue;
         });
     }
@@ -5758,7 +6514,7 @@ GC::Ptr<Element const> Document::scrolling_element() const
     if (in_quirks_mode()) {
         // 1. If the body element exists, and it is not potentially scrollable, return the body element and abort these steps.
         //    For this purpose, a value of overflow:clip on the the body element’s parent element must be treated as overflow:hidden.
-        if (auto const* body_element = body(); body_element && !body_element->is_potentially_scrollable())
+        if (auto const* body_element = body(); body_element && !body_element->is_potentially_scrollable(Element::TreatOverflowClipOnBodyParentAsOverflowHidden::Yes))
             return body_element;
 
         // 2. Return null and abort these steps.
@@ -6052,7 +6808,7 @@ WebIDL::ExceptionOr<void> Document::set_adopted_style_sheets(JS::Value new_value
     return {};
 }
 
-void Document::for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)>&& callback) const
+void Document::for_each_active_css_style_sheet(Function<void(CSS::CSSStyleSheet&)> const& callback) const
 {
     if (m_style_sheets) {
         for (auto& style_sheet : m_style_sheets->sheets()) {
@@ -6160,30 +6916,9 @@ void Document::unregister_shadow_root(Badge<DOM::ShadowRoot>, DOM::ShadowRoot& s
     m_shadow_roots.remove(shadow_root);
 }
 
-void Document::for_each_shadow_root(Function<void(DOM::ShadowRoot&)>&& callback)
-{
-    for (auto& shadow_root : m_shadow_roots)
-        callback(shadow_root);
-}
-
-void Document::for_each_shadow_root(Function<void(DOM::ShadowRoot&)>&& callback) const
-{
-    for (auto& shadow_root : m_shadow_roots)
-        callback(const_cast<ShadowRoot&>(shadow_root));
-}
-
-bool Document::is_decoded_svg() const
-{
-    return page().client().is_svg_page_client();
-}
-
 // https://drafts.csswg.org/css-position-4/#add-an-element-to-the-top-layer
 void Document::add_an_element_to_the_top_layer(GC::Ref<Element> element)
 {
-    // AD-HOC: The root element is excluded from the top layer
-    if (element == this->document_element())
-        return;
-
     // 1. Let doc be el’s node document.
 
     // 2. If el is already contained in doc’s top layer:
@@ -6247,9 +6982,10 @@ void Document::process_top_layer_removals()
     // 1. For each element el in doc’s pending top layer removals: if el’s computed value of overlay is none, or el is
     //    not rendered, remove el from doc’s top layer and pending top layer removals.
     GC::RootVector<GC::Ref<Element>> elements_to_remove(heap());
+    // NB: Called during top layer processing.
     for (auto& element : m_top_layer_pending_removals) {
         // FIXME: Implement overlay property
-        if (!element->paintable()) {
+        if (!element->unsafe_paintable()) {
             elements_to_remove.append(element);
         }
     }
@@ -6282,7 +7018,8 @@ GC::Ptr<HTML::HTMLElement> Document::topmost_auto_or_hint_popover()
 
 void Document::set_needs_to_refresh_scroll_state(bool b)
 {
-    if (auto* paintable = this->paintable())
+    // NB: Propagating scroll state invalidation.
+    if (auto* paintable = this->unsafe_paintable())
         paintable->set_needs_to_refresh_scroll_state(b);
 }
 
@@ -6387,6 +7124,277 @@ void Document::remove_render_blocking_element(GC::Ref<Element> element)
     m_render_blocking_elements.remove(element);
 }
 
+// https://fullscreen.spec.whatwg.org/#run-the-fullscreen-steps
+void Document::run_fullscreen_steps()
+{
+    // 1. Let pendingEvents be document’s list of pending fullscreen events.
+    auto pending_events = GC::ConservativeVector<PendingFullscreenEvent> { vm().heap() };
+    pending_events.extend(m_pending_fullscreen_events);
+
+    // 2. Empty document’s list of pending fullscreen events.
+    m_pending_fullscreen_events.clear();
+
+    // 3. For each (type, element) in pendingEvents:
+    for (auto const& [type, element] : pending_events) {
+        // 1. Let target be element if element is connected and its node document is document, and otherwise let target be document.
+        GC::Ref<Node> target { *this };
+        if (element->is_connected() && &element->document() == this)
+            target = element;
+
+        // 2. Fire an event named type, with its bubbles and composed attributes set to true, at target.
+        switch (type) {
+        case PendingFullscreenEvent::Type::Change:
+            target->dispatch_event(Event::create(realm(), HTML::EventNames::fullscreenchange, EventInit { .bubbles = true, .composed = true }));
+            break;
+        case PendingFullscreenEvent::Type::Error:
+            target->dispatch_event(Event::create(realm(), HTML::EventNames::fullscreenerror, EventInit { .bubbles = true, .composed = true }));
+            break;
+        }
+    }
+}
+
+void Document::append_pending_fullscreen_change(PendingFullscreenEvent::Type type, GC::Ref<Element> element)
+{
+    m_pending_fullscreen_events.append(PendingFullscreenEvent { type, element });
+}
+
+// https://fullscreen.spec.whatwg.org/#fullscreen-an-element
+void Document::fullscreen_element_within_doc(GC::Ref<Element> element)
+{
+    // FIXME: Spec issue:  Finding topmost popover ancestor algorithm takes different parameters than those described
+    //        by the fullscreen spec. Since the new algorithm takes 4 parameters, with the new "popover list", we must
+    //        also account for the auto popover list.
+    //        See: https://github.com/whatwg/fullscreen/issues/245
+    auto const get_hide_until = [&](auto const& popover_list) {
+        return HTML::HTMLElement::topmost_popover_ancestor(element, popover_list, nullptr, HTML::IsPopover::No);
+    };
+
+    // 1. Let hideUntil be the result of running topmost popover ancestor given element, null, and false.
+    auto hide_until = get_hide_until(showing_hint_popover_list());
+
+    if (hide_until == nullptr)
+        hide_until = get_hide_until(showing_auto_popover_list());
+
+    Variant<GC::Ptr<HTML::HTMLElement>, GC::Ptr<Document>> hide_until_argument { hide_until };
+
+    // 2. If hideUntil is null, then set hideUntil to element’s node document.
+    if (hide_until == nullptr)
+        hide_until_argument = GC::Ptr { element->document() };
+
+    // 3. Run hide all popovers until given hideUntil, false, and true.
+    HTML::HTMLElement::hide_all_popovers_until(hide_until_argument, HTML::FocusPreviousElement::No, HTML::FireEvents::Yes);
+
+    // 4. Set element’s fullscreen flag.
+    element->set_fullscreen_flag(true);
+
+    // 5. Remove from the top layer immediately given element.
+    remove_an_element_from_the_top_layer_immediately(element);
+
+    // 6. Add to the top layer given element.
+    add_an_element_to_the_top_layer(element);
+    element->invalidate_style(StyleInvalidationReason::Fullscreen);
+}
+
+// https://fullscreen.spec.whatwg.org/#fullscreen-element
+GC::Ptr<Element> Document::fullscreen_element() const
+{
+    // All documents have an associated fullscreen element. The fullscreen element is the topmost element in the
+    // document’s top layer whose fullscreen flag is set, if any, and null otherwise.
+    for (auto const& el : top_layer_elements().in_reverse()) {
+        if (el->is_fullscreen_element())
+            return el;
+    }
+    return nullptr;
+}
+
+// https://fullscreen.spec.whatwg.org/#dom-document-fullscreenelement
+GC::Ptr<Element> Document::fullscreen_element_for_bindings() const
+{
+    auto fullscreen_element = this->fullscreen_element();
+    if (!fullscreen_element)
+        return nullptr;
+
+    // 1. If this is a shadow root and its host is not connected, then return null.
+    // NB: We're not a shadow root. See ShadowRoot::fullscreen_element_for_bindings().
+
+    // 2. Let candidate be the result of retargeting fullscreen element against this.
+    auto* candidate = retarget(fullscreen_element, const_cast<Document*>(this));
+    if (!candidate)
+        return nullptr;
+
+    // 3. If candidate and this are in the same tree, then return candidate.
+    if (auto* retargeted_element = as<Element>(candidate); retargeted_element && &retargeted_element->root() == &root())
+        return retargeted_element;
+
+    // 4. Return null.
+    return nullptr;
+}
+
+// https://fullscreen.spec.whatwg.org/#dom-document-fullscreen
+bool Document::fullscreen() const
+{
+    // The fullscreen getter steps are to return false if this's fullscreen element is null, and true otherwise.
+    return fullscreen_element() != nullptr;
+}
+
+// https://fullscreen.spec.whatwg.org/#dom-document-fullscreenenabled
+bool Document::fullscreen_enabled() const
+{
+    // FIXME: Implement check policy check and "is supported" check.
+    return is_allowed_to_use_feature(PolicyControlledFeature::Fullscreen);
+}
+
+// https://fullscreen.spec.whatwg.org/#fully-exit-fullscreen
+void Document::fully_exit_fullscreen()
+{
+    // 1. If document’s fullscreen element is null, terminate these steps.
+    GC::Ptr<Element> fullscreened_element = fullscreen_element();
+    if (!fullscreened_element)
+        return;
+
+    // 2. Unfullscreen elements whose fullscreen flag is set, within document’s top layer, except for document’s fullscreen element.
+    GC::RootVector<GC::Ref<Element>, 8> fullscreen_elements { heap() };
+    for (auto const& element : top_layer_elements()) {
+        if (element->is_fullscreen_element() && element != fullscreened_element)
+            fullscreen_elements.append(element);
+    }
+
+    for (auto const& element : fullscreen_elements)
+        unfullscreen_element(element);
+
+    // 3. Exit fullscreen document.
+    HTML::TemporaryExecutionContext context { realm(), HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+    exit_fullscreen();
+}
+
+// https://fullscreen.spec.whatwg.org/#exit-fullscreen
+GC::Ref<WebIDL::Promise> Document::exit_fullscreen()
+{
+    auto& realm = this->realm();
+
+    // 1. Let promise be a new promise.
+    auto promise = WebIDL::create_promise(realm);
+
+    // 2. If doc is not fully active or doc’s fullscreen element is null, then reject promise with a TypeError exception
+    //    and return promise.
+    if (!is_fully_active() || !fullscreen_element()) {
+        WebIDL::reject_promise(realm, promise, JS::TypeError::create(realm, "Document not fully active or no fullscreen element."sv));
+        return promise;
+    }
+
+    // 3. Let resize be false.
+    bool resize = false;
+
+    // 4. Let docs be the result of collecting documents to unfullscreen given doc.
+    auto docs = collect_documents_to_unfullscreen();
+
+    // 5. Let topLevelDoc be doc’s node navigable’s top-level traversable’s active document.
+    auto top_level_doc = navigable()->top_level_traversable()->active_document();
+
+    // 6. If topLevelDoc is in docs, and it is a simple fullscreen document, then set doc to topLevelDoc and resize to true.
+    GC::Ref<Document> doc { *this };
+    if (top_level_doc && top_level_doc->is_simple_fullscreen_document() && docs->elements().contains_slow(GC::Ref { *top_level_doc })) {
+        doc = *top_level_doc;
+        resize = true;
+    }
+
+    // 7. If doc’s fullscreen element is not connected:
+    if (auto fullscreen_element = doc->fullscreen_element(); !fullscreen_element->is_connected()) {
+        // 1. Append (fullscreenchange, doc’s fullscreen element) to doc’s list of pending fullscreen events.
+        doc->append_pending_fullscreen_change(PendingFullscreenEvent::Type::Change, *fullscreen_element);
+
+        // 2. Unfullscreen doc’s fullscreen element.
+        doc->unfullscreen_element(*fullscreen_element);
+    }
+
+    // 8. Return promise, and run the remaining steps in parallel.
+    page().enqueue_fullscreen_exit(doc, resize, promise);
+
+    return promise;
+}
+
+// https://fullscreen.spec.whatwg.org/#unfullscreen-a-document
+void Document::unfullscreen()
+{
+    // To unfullscreen a document, unfullscreen all elements, within document’s top layer, whose fullscreen flag is set.
+    // NB: This has to be a copy of the list of those elements, since unfullscreen an element immediately removes it
+    //     from the top layer, invalidating iterators.
+    auto fullscreen_elements = heap().allocate<GC::HeapVector<GC::Ref<Element>>>();
+    for (auto el : top_layer_elements()) {
+        if (el->is_fullscreen_element())
+            fullscreen_elements->elements().append(el);
+    }
+
+    for (auto el : fullscreen_elements->elements())
+        unfullscreen_element(el);
+}
+
+// https://fullscreen.spec.whatwg.org/#simple-fullscreen-document
+bool Document::is_simple_fullscreen_document() const
+{
+    // A document is said to be a simple fullscreen document if there is exactly one element in its top layer that has its fullscreen flag set.
+    u32 total = 0;
+    for (auto const& element : top_layer_elements()) {
+        if (element->is_fullscreen_element())
+            ++total;
+
+        if (total > 1)
+            return false;
+    }
+    return total == 1;
+}
+
+// https://fullscreen.spec.whatwg.org/#collect-documents-to-unfullscreen
+GC::Ref<GC::HeapVector<GC::Ref<Document>>> Document::collect_documents_to_unfullscreen()
+{
+    // 1. Let docs be an ordered set consisting of doc.
+    auto docs = heap().allocate<GC::HeapVector<GC::Ref<Document>>>();
+    docs->elements().append(*this);
+
+    // 2. While true:
+    while (true) {
+        // 1. Let lastDoc be docs’s last document.
+        auto last_doc = docs->elements().last();
+
+        // 2. Assert: lastDoc’s fullscreen element is not null.
+        VERIFY(last_doc->fullscreen_element());
+
+        // 3. If lastDoc is not a simple fullscreen document, break.
+        if (!last_doc->is_simple_fullscreen_document())
+            break;
+
+        // 4. Let container be lastDoc’s node navigable’s container.
+        // Note on spec: It doesn't first check if `node navigable` is null.
+        auto container = last_doc->navigable() ? last_doc->navigable()->container() : nullptr;
+
+        // 5. If container is null, then break.
+        if (!container)
+            break;
+
+        // 6. If container’s iframe fullscreen flag is set, break.
+        if (auto* iframe_element = as_if<HTML::HTMLIFrameElement>(container.ptr()); iframe_element && iframe_element->iframe_fullscreen_flag())
+            break;
+
+        // 7. Append container’s node document to docs.
+        docs->elements().append(container->document());
+    }
+
+    // 3. Return docs.
+    return docs;
+}
+
+// https://fullscreen.spec.whatwg.org/#unfullscreen-an-element
+void Document::unfullscreen_element(GC::Ref<Element> element)
+{
+    // To unfullscreen an element, unset element’s fullscreen flag and iframe fullscreen flag (if any), and remove from
+    // the top layer immediately given element.
+    element->set_fullscreen_flag(false);
+    if (auto* iframe_element = as_if<HTML::HTMLIFrameElement>(element.ptr()))
+        iframe_element->set_iframe_fullscreen_flag(false);
+
+    remove_an_element_from_the_top_layer_immediately(element);
+}
+
 // https://dom.spec.whatwg.org/#document-allow-declarative-shadow-roots
 void Document::set_allow_declarative_shadow_roots(bool allow)
 {
@@ -6402,7 +7410,8 @@ void Document::parse_html_from_a_string(StringView html)
     // 2. Create an HTML parser parser, associated with document.
     // 3. Place html into the input stream for parser. The encoding confidence is irrelevant.
     // FIXME: We don't have the concept of encoding confidence yet.
-    auto parser = HTML::HTMLParser::create(*this, html, "UTF-8"sv);
+    auto scripting_mode = is_scripting_enabled() ? HTML::ParserScriptingMode::Normal : HTML::ParserScriptingMode::Disabled;
+    auto parser = HTML::HTMLParser::create(*this, html, scripting_mode, "UTF-8"sv);
 
     // 4. Start parser and let it run until it has consumed all the characters just inserted into the input stream.
     parser->run(as<HTML::Window>(HTML::relevant_global_object(*this)).associated_document().url());
@@ -6418,7 +7427,7 @@ WebIDL::ExceptionOr<GC::Root<DOM::Document>> Document::parse_html_unsafe(JS::VM&
     //    TrustedHTML, this's relevant global object, html, "Document parseHTMLUnsafe", and "script".
     auto const compliant_html = TRY(TrustedTypes::get_trusted_type_compliant_string(
         TrustedTypes::TrustedTypeName::TrustedHTML,
-        HTML::current_principal_global_object(),
+        HTML::current_global_object(),
         html,
         TrustedTypes::InjectionSink::Document_parseHTMLUnsafe,
         TrustedTypes::Script.to_string()));
@@ -6441,18 +7450,20 @@ WebIDL::ExceptionOr<GC::Root<DOM::Document>> Document::parse_html_unsafe(JS::VM&
     return document;
 }
 
-InputEventsTarget* Document::active_input_events_target()
+InputEventsTarget* Document::active_input_events_target(Node const* for_node)
 {
     auto focused_area = this->focused_area();
     if (!focused_area)
-        return {};
+        return nullptr;
 
-    if (auto* input_element = as_if<HTML::HTMLInputElement>(*focused_area))
-        return input_element;
-    if (auto* text_area_element = as_if<HTML::HTMLTextAreaElement>(*focused_area))
-        return text_area_element;
-    if (focused_area->is_editable_or_editing_host())
-        return m_editing_host_manager;
+    if (focused_area->is_editable_or_editing_host()) {
+        if (!for_node || m_editing_host_manager->is_within_active_contenteditable(*for_node))
+            return m_editing_host_manager;
+    }
+    if (auto* form_text_element = as_if<HTML::FormAssociatedTextControlElement>(*focused_area)) {
+        if (!for_node || for_node->find_in_shadow_including_ancestry([&](Node const& it) { return &it == focused_area; }))
+            return form_text_element;
+    }
     return nullptr;
 }
 
@@ -6484,7 +7495,10 @@ GC::Ptr<DOM::Position> Document::cursor_position() const
 void Document::reset_cursor_blink_cycle()
 {
     m_cursor_blink_state = true;
-    m_cursor_blink_timer->restart();
+
+    // In testing mode, disable timed blinking so we can deterministically generate display lists.
+    if (!HTML::Window::in_test_mode())
+        m_cursor_blink_timer->restart();
 }
 
 // https://html.spec.whatwg.org/multipage/document-sequences.html#doc-container-document
@@ -6499,62 +7513,61 @@ GC::Ptr<DOM::Document> Document::container_document() const
     return node_navigable->container_document();
 }
 
-GC::Ptr<HTML::Navigable> Document::cached_navigable()
+GC::Ptr<HTML::Navigable> Document::navigable() const
 {
-    return m_cached_navigable.ptr();
+    return m_navigable.ptr();
 }
 
-void Document::set_cached_navigable(GC::Ptr<HTML::Navigable> navigable)
+void Document::set_navigable(GC::Ptr<HTML::Navigable> navigable)
 {
-    m_cached_navigable = navigable.ptr();
+    if (m_navigable == navigable)
+        return;
+    m_navigable = navigable.ptr();
+    HTML::main_thread_event_loop().document_navigable_did_change({});
 }
 
-void Document::set_needs_display(InvalidateDisplayList should_invalidate_display_list)
+void Document::notify_css_background_image_loaded()
 {
-    set_needs_display(viewport_rect(), should_invalidate_display_list);
-}
-
-void Document::set_needs_display(CSSPixelRect const&, InvalidateDisplayList should_invalidate_display_list)
-{
-    // FIXME: Ignore updates outside the visible viewport rect.
-    //        This requires accounting for fixed-position elements in the input rect, which we don't do yet.
-
-    // OPTIMIZATION: Ignore set_needs_display() inside navigable containers (i.e frames) with visibility: hidden.
-    if (auto navigable = this->navigable()) {
-        if (navigable->has_inclusive_ancestor_with_visibility_hidden())
-            return;
+    // FIXME: Do less than a full repaint if possible?
+    if (auto* paintable = unsafe_paintable()) {
+        paintable->for_each_in_inclusive_subtree_of_type<Painting::PaintableBox>([](auto& paintable_box) {
+            paintable_box.invalidate_paint_cache();
+            return TraversalDecision::Continue;
+        });
     }
+    set_needs_repaint();
+}
+
+void Document::set_needs_repaint(InvalidateDisplayList should_invalidate_display_list)
+{
+    auto navigable = this->navigable();
+
+    // OPTIMIZATION: Ignore set_needs_repaint() inside navigable containers (i.e frames) with visibility: hidden.
+    if (navigable && navigable->has_inclusive_ancestor_with_visibility_hidden())
+        return;
 
     if (should_invalidate_display_list == InvalidateDisplayList::Yes) {
         invalidate_display_list();
     }
 
-    auto navigable = this->navigable();
     if (!navigable)
         return;
 
+    navigable->set_needs_repaint();
+
     if (navigable->is_traversable()) {
-        navigable->traversable_navigable()->set_needs_repaint();
         Web::HTML::main_thread_event_loop().schedule();
         return;
     }
 
     if (auto container = navigable->container()) {
-        container->document().set_needs_display(should_invalidate_display_list);
+        container->document().set_needs_repaint(InvalidateDisplayList::No);
     }
 }
 
 void Document::invalidate_display_list()
 {
     m_cached_display_list.clear();
-
-    auto navigable = this->navigable();
-    if (!navigable)
-        return;
-
-    if (auto container = navigable->container()) {
-        container->document().invalidate_display_list();
-    }
 }
 
 RefPtr<Painting::DisplayList> Document::cached_display_list() const
@@ -6564,21 +7577,13 @@ RefPtr<Painting::DisplayList> Document::cached_display_list() const
 
 RefPtr<Painting::DisplayList> Document::record_display_list(HTML::PaintConfig config)
 {
-    auto update_visual_viewport_transform = [&](Painting::DisplayList& display_list) {
-        auto transform = visual_viewport()->transform();
-        auto matrix = transform.to_matrix();
-        matrix[0, 3] *= display_list.device_pixels_per_css_pixel();
-        matrix[1, 3] *= display_list.device_pixels_per_css_pixel();
-        matrix[2, 3] *= display_list.device_pixels_per_css_pixel();
-        display_list.set_visual_viewport_transform(matrix);
-    };
-
-    if (m_cached_display_list && m_cached_display_list_paint_config == config) {
-        update_visual_viewport_transform(*m_cached_display_list);
+    if (m_cached_display_list && m_cached_display_list_paint_config == config)
         return m_cached_display_list;
-    }
 
-    auto display_list = Painting::DisplayList::create(page().client().device_pixels_per_css_pixel());
+    update_paint_and_hit_testing_properties_if_needed();
+    VERIFY(paintable());
+
+    auto display_list = Painting::DisplayList::create(paintable()->visual_context_tree());
     Painting::DisplayListRecorder display_list_recorder(display_list);
 
     // https://drafts.csswg.org/css-color-adjust-1/#color-scheme-effect
@@ -6614,20 +7619,13 @@ RefPtr<Painting::DisplayList> Document::record_display_list(HTML::PaintConfig co
         display_list_recorder.fill_rect(bitmap_rect, CSS::SystemColor::canvas(color_scheme));
 
     display_list_recorder.fill_rect(bitmap_rect, background_color());
-    if (!paintable()) {
-        VERIFY_NOT_REACHED();
-    }
 
-    Web::DisplayListRecordingContext context(display_list_recorder, page().palette(), page().client().device_pixels_per_css_pixel());
+    Web::DisplayListRecordingContext context(display_list_recorder, page().palette(), page().client().device_pixels_per_css_pixel(), page().chrome_metrics());
     context.set_device_viewport_rect(viewport_rect);
     context.set_should_show_line_box_borders(config.should_show_line_box_borders);
     context.set_should_paint_overlay(config.paint_overlay);
 
-    update_paint_and_hit_testing_properties_if_needed();
-
     auto& viewport_paintable = *paintable();
-
-    viewport_paintable.refresh_scroll_state();
 
     viewport_paintable.paint_all_phases(context);
 
@@ -6638,7 +7636,6 @@ RefPtr<Painting::DisplayList> Document::record_display_list(HTML::PaintConfig co
     m_cached_display_list = display_list;
     m_cached_display_list_paint_config = config;
 
-    update_visual_viewport_transform(*m_cached_display_list);
     return display_list;
 }
 
@@ -6647,6 +7644,13 @@ Unicode::Segmenter& Document::grapheme_segmenter() const
     if (!m_grapheme_segmenter)
         m_grapheme_segmenter = Unicode::Segmenter::create(Unicode::SegmenterGranularity::Grapheme);
     return *m_grapheme_segmenter;
+}
+
+Unicode::Segmenter& Document::line_segmenter() const
+{
+    if (!m_line_segmenter)
+        m_line_segmenter = Unicode::Segmenter::create(Unicode::SegmenterGranularity::Line);
+    return *m_line_segmenter;
 }
 
 Unicode::Segmenter& Document::word_segmenter() const
@@ -6720,6 +7724,41 @@ void Document::run_csp_initialization() const
     }
 }
 
+// https://dom.spec.whatwg.org/#flatten-element-creation-options
+WebIDL::ExceptionOr<Document::RegistryAndIs> Document::flatten_element_creation_options(Variant<String, ElementCreationOptions> const& options) const
+{
+    // 1. Let registry be the result of looking up a custom element registry given document.
+    GC::Ptr<HTML::CustomElementRegistry> registry = HTML::look_up_a_custom_element_registry(*this);
+
+    // 2. Let is be null.
+    Optional<String> is;
+
+    // 3. If options is a dictionary:
+    if (auto* dictionary = options.get_pointer<ElementCreationOptions>()) {
+        // 1. If options["is"] exists, then set is to it.
+        if (dictionary->is.has_value())
+            is = dictionary->is;
+
+        // 2. If options["customElementRegistry"] exists:
+        if (dictionary->custom_element_registry.has_value()) {
+            // 1. If is is non-null, then throw a "NotSupportedError" DOMException.
+            if (is.has_value())
+                return WebIDL::NotSupportedError::create(realm(), "Cannot specify both 'is' and 'customElementRegistry' in ElementCreationOptions."_utf16);
+
+            // 2. Set registry to options["customElementRegistry"].
+            registry = dictionary->custom_element_registry.value();
+        }
+
+        // 3. If registry is non-null, registry’s is scoped is false, and registry is not document’s custom element
+        //    registry, then throw a "NotSupportedError" DOMException.
+        if (registry && !registry->is_scoped() && registry != custom_element_registry())
+            return WebIDL::NotSupportedError::create(realm(), "'customElementRegistry' in ElementCreationOptions must either be scoped or the document's custom element registry."_utf16);
+    }
+
+    // 4. Return registry and is.
+    return RegistryAndIs { registry, move(is) };
+}
+
 WebIDL::CallbackType* Document::onreadystatechange()
 {
     return event_handler_attribute(HTML::EventNames::readystatechange);
@@ -6740,8 +7779,28 @@ void Document::set_onvisibilitychange(WebIDL::CallbackType* value)
     set_event_handler_attribute(HTML::EventNames::visibilitychange, value);
 }
 
+WebIDL::CallbackType* Document::onfullscreenchange()
+{
+    return event_handler_attribute(HTML::EventNames::fullscreenchange);
+}
+
+void Document::set_onfullscreenchange(WebIDL::CallbackType* value)
+{
+    set_event_handler_attribute(HTML::EventNames::fullscreenchange, value);
+}
+
+WebIDL::CallbackType* Document::onfullscreenerror()
+{
+    return event_handler_attribute(HTML::EventNames::fullscreenerror);
+}
+
+void Document::set_onfullscreenerror(WebIDL::CallbackType* value)
+{
+    set_event_handler_attribute(HTML::EventNames::fullscreenerror, value);
+}
+
 // https://drafts.csswg.org/css-view-transitions-1/#dom-document-startviewtransition
-GC::Ptr<ViewTransition::ViewTransition> Document::start_view_transition(ViewTransition::ViewTransitionUpdateCallback update_callback)
+GC::Ptr<ViewTransition::ViewTransition> Document::start_view_transition(GC::Ptr<WebIDL::CallbackType> update_callback)
 {
     // The method steps for startViewTransition(updateCallback) are as follows:
 
@@ -6831,6 +7890,63 @@ void Document::view_transition_page_visibility_change_steps()
     }));
 }
 
+// https://dom.spec.whatwg.org/#dom-documentorshadowroot-customelementregistry
+GC::Ptr<HTML::CustomElementRegistry> Document::custom_element_registry() const
+{
+    // 1. If this is a document, then return this’s custom element registry.
+    // NB: Always true.
+    return m_custom_element_registry;
+
+    // 2. Assert: this is a ShadowRoot node.
+    // 3. Return this’s custom element registry.
+}
+
+// https://dom.spec.whatwg.org/#effective-global-custom-element-registry
+GC::Ptr<HTML::CustomElementRegistry> Document::effective_global_custom_element_registry() const
+{
+    // A document document’s effective global custom element registry is:
+
+    // 1. If document’s custom element registry is a global custom element registry, then return document’s custom
+    //    element registry.
+    if (HTML::is_a_global_custom_element_registry(custom_element_registry()))
+        return custom_element_registry();
+
+    // 2. Return null.
+    return nullptr;
+}
+
+// https://html.spec.whatwg.org/multipage/custom-elements.html#upgrade-particular-elements-within-a-document
+void Document::upgrade_particular_elements(GC::Ref<HTML::CustomElementRegistry> registry, GC::Ref<HTML::CustomElementDefinition> definition, String local_name, Optional<String> maybe_name)
+{
+    // To upgrade particular elements within a document given a CustomElementRegistry object registry, a Document
+    // object document, a custom element definition definition, a string localName, and optionally a string name
+    // (default localName):
+    auto name = maybe_name.value_or(local_name);
+
+    // 1. Let upgradeCandidates be all elements that are shadow-including descendants of document, whose custom element
+    //    registry is registry, whose namespace is the HTML namespace, and whose local name is localName, in
+    //    shadow-including tree order.
+    //    Additionally, if name is not localName, only include elements whose is value is equal to name.
+    for_each_shadow_including_descendant([&](Node& inclusive_descendant) {
+        auto* element = as_if<Element>(inclusive_descendant);
+        if (!element
+            || element->custom_element_registry() != registry
+            || element->namespace_uri() != Namespace::HTML
+            || element->local_name() != local_name) {
+
+            return TraversalDecision::Continue;
+        }
+
+        if (name != local_name && element->is_value() != name)
+            return TraversalDecision::Continue;
+
+        // 2. For each element element of upgradeCandidates:
+        //    enqueue a custom element upgrade reaction given element and definition.
+        element->enqueue_a_custom_element_upgrade_reaction(definition);
+        return TraversalDecision::Continue;
+    });
+}
+
 ElementByIdMap& Document::element_by_id() const
 {
     if (!m_element_by_id)
@@ -6841,13 +7957,115 @@ ElementByIdMap& Document::element_by_id() const
 String Document::dump_display_list()
 {
     update_layout(UpdateLayoutReason::DumpDisplayList);
+
+    auto* viewport_paintable = paintable();
+    if (!viewport_paintable)
+        return "No paintable"_string;
+
     auto display_list = record_display_list(HTML::PaintConfig {});
     if (!display_list)
-        return {};
-    return display_list->dump();
+        return "No display list"_string;
+
+    HashMap<size_t, Painting::PaintableBox const*> context_id_to_paintable;
+    viewport_paintable->for_each_in_inclusive_subtree_of_type<Painting::PaintableBox>([&](auto const& paintable_box) {
+        auto visual_context_index = paintable_box.accumulated_visual_context_index();
+        if (visual_context_index.value())
+            (void)context_id_to_paintable.try_set(visual_context_index.value(), &paintable_box);
+        return TraversalDecision::Continue;
+    });
+
+    StringBuilder builder;
+    builder.append("AccumulatedVisualContext Tree:\n"sv);
+
+    auto const& visual_context_tree = display_list->visual_context_tree();
+    HashTable<size_t> visited;
+    HashMap<size_t, Vector<size_t>> children;
+    Vector<size_t> root_contexts;
+
+    for (auto const& item : display_list->commands()) {
+        if (!item.context_index.value())
+            continue;
+        for (size_t node_index = item.context_index.value(); node_index && !visited.contains(node_index); node_index = visual_context_tree.node_at(Painting::VisualContextIndex(node_index)).parent_index.value()) {
+            visited.set(node_index);
+            auto parent = visual_context_tree.node_at(Painting::VisualContextIndex(node_index)).parent_index.value();
+            if (parent)
+                children.ensure(parent).append(node_index);
+            else if (!root_contexts.contains_slow(node_index))
+                root_contexts.append(node_index);
+        }
+    }
+
+    Function<void(size_t, size_t)> dump_context = [&](size_t node_index, size_t indent) {
+        builder.append_repeated(' ', indent * 2);
+        builder.appendff("[{}] ", node_index);
+        visual_context_tree.dump(Painting::VisualContextIndex(node_index), builder);
+        if (auto it = context_id_to_paintable.find(node_index); it != context_id_to_paintable.end())
+            builder.appendff(" ({})", it->value->debug_description());
+        builder.append('\n');
+        for (auto child_node_index : children.get(node_index).value_or({}))
+            dump_context(child_node_index, indent + 1);
+    };
+
+    for (auto root : root_contexts)
+        dump_context(root, 1);
+
+    builder.append("\nDisplayList:\n"sv);
+
+    Function<void(Painting::DisplayList const&, int)> dump_commands =
+        [&](Painting::DisplayList const& list, int base_indent) {
+            int indent = base_indent;
+            for (auto const& item : list.commands()) {
+                int nesting_change = item.command.visit([](auto const& cmd) {
+                    if constexpr (requires { cmd.nesting_level_change; })
+                        return cmd.nesting_level_change;
+                    return 0;
+                });
+
+                if (nesting_change < 0)
+                    indent = max(base_indent, indent + nesting_change);
+
+                builder.append_repeated(' ', indent * 2);
+                item.command.visit([&](auto const& command) {
+                    builder.appendff("{}@{}", command.command_name, item.context_index.value());
+                    command.dump(builder);
+                });
+                builder.append('\n');
+
+                if (auto const* nested = item.command.get_pointer<Painting::PaintNestedDisplayList>()) {
+                    if (nested->display_list)
+                        dump_commands(*nested->display_list, indent + 1);
+                }
+
+                if (nesting_change > 0)
+                    indent += nesting_change;
+            }
+        };
+
+    dump_commands(*display_list, 0);
+
+    return builder.to_string_without_validation();
 }
 
-Optional<Vector<CSS::Parser::ComponentValue>> Document::environment_variable_value(CSS::EnvironmentVariable environment_variable, Span<i64> indices) const
+String Document::dump_stacking_context_tree()
+{
+    update_layout(UpdateLayoutReason::DumpDisplayList);
+
+    auto* viewport_paintable = paintable();
+    if (!viewport_paintable)
+        return "No paintable"_string;
+
+    viewport_paintable->build_stacking_context_tree_if_needed();
+
+    auto* stacking_context = viewport_paintable->stacking_context();
+    if (!stacking_context)
+        return "No stacking context"_string;
+
+    StringBuilder builder;
+    stacking_context->dump(builder);
+    return builder.to_string_without_validation();
+}
+
+Optional<Vector<CSS::Parser::ComponentValue>> Document::environment_variable_value(CSS::EnvironmentVariable environment_variable, Span<i32> indices) const
 {
     auto invalid = [] {
         return Vector { CSS::Parser::ComponentValue { CSS::Parser::GuaranteedInvalidValue {} } };
@@ -6890,9 +8108,9 @@ Optional<Vector<CSS::Parser::ComponentValue>> Document::environment_variable_val
     VERIFY_NOT_REACHED();
 }
 
-HashMap<FlyString, GC::Ref<Web::CSS::CSSPropertyRule>>& Document::registered_custom_properties()
+HashMap<FlyString, CSS::CustomPropertyRegistration>& Document::registered_property_set()
 {
-    return m_registered_custom_properties;
+    return m_registered_property_set;
 }
 
 WebIDL::ExceptionOr<GC::Ref<XPath::XPathExpression>> Document::create_expression(String const& expression, GC::Ptr<XPath::XPathNSResolver> resolver)
@@ -6912,14 +8130,30 @@ GC::Ref<DOM::Node> Document::create_ns_resolver(GC::Ref<DOM::Node> node_resolver
     return node_resolver;
 }
 
+// https://drafts.css-houdini.org/css-properties-values-api/#determining-registration
+Optional<CSS::CustomPropertyRegistration const&> Document::get_registered_custom_property(FlyString const& name) const
+{
+    // If the Document’s [[registeredPropertySet]] slot contains a record with the custom property’s name, the
+    // registration is that record.
+    if (auto registered_property = m_registered_property_set.get(name); registered_property.has_value())
+        return registered_property;
+
+    // Otherwise, if the Document’s active stylesheets contain at least one valid @property rule representing a
+    // registration with the custom property’s name, the last such one in document order is the registration.
+    if (auto registered_property = m_cached_registered_properties_from_css_property_rules.get(name); registered_property.has_value())
+        return registered_property;
+
+    // Otherwise there is no registration, and the custom property is not a registered custom property.
+    return {};
+}
+
 NonnullRefPtr<CSS::StyleValue const> Document::custom_property_initial_value(FlyString const& name) const
 {
-    auto maybe_custom_property = m_registered_custom_properties.get(name);
+    auto maybe_custom_property = get_registered_custom_property(name);
     if (maybe_custom_property.has_value()) {
-        auto parsed_value = maybe_custom_property.value()->initial_style_value();
-        if (!parsed_value)
-            return CSS::GuaranteedInvalidStyleValue::create();
-        return parsed_value.release_nonnull();
+        if (maybe_custom_property->initial_value)
+            return *maybe_custom_property->initial_value;
+        return CSS::GuaranteedInvalidStyleValue::create();
     }
 
     // For non-registered properties, the initial value is the guaranteed-invalid value.
@@ -6927,13 +8161,45 @@ NonnullRefPtr<CSS::StyleValue const> Document::custom_property_initial_value(Fly
     return CSS::GuaranteedInvalidStyleValue::create();
 }
 
-GC::Ptr<Element> ElementByIdMap::get(FlyString const& element_id) const
+void Document::did_change_custom_property_registrations()
 {
-    if (auto elements = m_map.get(element_id); elements.has_value() && !elements->is_empty()) {
-        if (auto element = elements->first())
-            return *element;
+    ++m_custom_property_registration_generation;
+
+    // Custom property registration changes can alter inheritance and initial values even when no selector matching
+    // changes. Registrations only move when a stylesheet containing an @property rule is added/removed or when
+    // CSS.registerProperty() is called, so a full document restyle is cheap enough in practice.
+    invalidate_style(DOM::StyleInvalidationReason::Other);
+}
+
+void Document::build_registered_properties_cache()
+{
+    HashMap<FlyString, CSS::CustomPropertyRegistration> cached_registered_properties_from_css_property_rules;
+    for_each_active_css_style_sheet([&](CSS::CSSStyleSheet const& style_sheet) {
+        style_sheet.for_each_effective_rule(TraversalOrder::Preorder, [&](CSS::CSSRule const& rule) {
+            if (auto* property_rule = as_if<CSS::CSSPropertyRule>(rule))
+                cached_registered_properties_from_css_property_rules.set(property_rule->name(), property_rule->to_registration());
+        });
+    });
+
+    if (cached_registered_properties_from_css_property_rules != m_cached_registered_properties_from_css_property_rules)
+        did_change_custom_property_registrations();
+
+    m_cached_registered_properties_from_css_property_rules = move(cached_registered_properties_from_css_property_rules);
+}
+
+void Document::ensure_cookie_version_index(URL::URL const& new_url, URL::URL const& old_url)
+{
+    auto new_domain = HTTP::Cookie::canonicalize_domain(new_url);
+    if (!new_domain.has_value()) {
+        m_cookie_version_index = {};
+        return;
     }
-    return {};
+
+    if (m_cookie_version_index.has_value() && *new_domain == HTTP::Cookie::canonicalize_domain(old_url))
+        return;
+
+    page().client().page_did_request_document_cookie_version_index(unique_id(), *new_domain);
+    m_cookie_version_index = {};
 }
 
 StringView to_string(SetNeedsLayoutReason reason)
@@ -6997,6 +8263,50 @@ void Document::remove_pending_css_import_rule(Badge<CSS::CSSImportRule>, GC::Ref
 void Document::exit_pointer_lock()
 {
     dbgln("FIXME: exit_pointer_lock()");
+}
+
+static bool contains_named_namespace(CSS::SelectorList const& selectors)
+{
+    for (auto const& selector : selectors) {
+        for (auto const& compound_selector : selector->compound_selectors()) {
+            for (auto const& simple_selector : compound_selector.simple_selectors) {
+                if (simple_selector.value.has<CSS::Selector::SimpleSelector::QualifiedName>()) {
+                    if (simple_selector.qualified_name().namespace_type == CSS::Selector::SimpleSelector::QualifiedName::NamespaceType::Named)
+                        return true;
+                }
+
+                if (simple_selector.value.has<CSS::Selector::SimpleSelector::PseudoClassSelector>()) {
+                    if (contains_named_namespace(simple_selector.pseudo_class().argument_selector_list))
+                        return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+Optional<CSS::SelectorList> const& Document::parse_or_cache_selector_list(StringView selector_text) const
+{
+    static constexpr size_t MAX_SELECTOR_QUERY_CACHE_SIZE = 512;
+
+    auto selector_text_string = MUST(String::from_utf8(selector_text));
+
+    if (auto it = m_selector_query_cache.find(selector_text_string); it != m_selector_query_cache.end())
+        return it->value;
+
+    auto maybe_selectors = parse_selector(CSS::Parser::ParsingParams { *this }, selector_text);
+
+    // "Note: Support for namespaces within selectors is not planned and will not be added."
+    if (maybe_selectors.has_value() && contains_named_namespace(maybe_selectors.value()))
+        maybe_selectors.clear();
+
+    if (m_selector_query_cache.size() >= MAX_SELECTOR_QUERY_CACHE_SIZE)
+        m_selector_query_cache.remove(m_selector_query_cache.begin());
+
+    m_selector_query_cache.set(selector_text_string, move(maybe_selectors));
+    auto it = m_selector_query_cache.find(selector_text_string);
+    VERIFY(it != m_selector_query_cache.end());
+    return it->value;
 }
 
 }

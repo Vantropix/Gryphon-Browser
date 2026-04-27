@@ -31,9 +31,11 @@ public:
 
     virtual ValueComparingNonnullRefPtr<StyleValue const> absolutized(ComputationContext const&) const override;
 
-    virtual String to_string(SerializationMode) const override;
+    virtual void serialize(StringBuilder&, SerializationMode) const override;
 
     bool properties_equal(OpenTypeTaggedStyleValue const&) const;
+
+    virtual bool is_computationally_independent() const override { return m_value->is_computationally_independent(); }
 
 private:
     explicit OpenTypeTaggedStyleValue(Mode mode, FlyString tag, ValueComparingNonnullRefPtr<StyleValue const> value)

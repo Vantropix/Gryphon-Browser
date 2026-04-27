@@ -1,21 +1,27 @@
 /*
  * Copyright (c) 2019-2022, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2022-2024, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2022-2026, Sam Atkins <sam@ladybird.org>
  * Copyright (c) 2024-2025, Tim Ledbetter <tim.ledbetter@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <LibURL/Parser.h>
-#include <LibWeb/Bindings/CSSStyleSheetPrototype.h>
+#include <LibWeb/Bindings/CSSStyleSheet.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/CSSCounterStyleRule.h>
 #include <LibWeb/CSS/CSSImportRule.h>
+#include <LibWeb/CSS/CSSKeyframesRule.h>
+#include <LibWeb/CSS/CSSStyleRule.h>
 #include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/FontComputer.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/StyleComputer.h>
+#include <LibWeb/CSS/StyleSheetInvalidation.h>
 #include <LibWeb/CSS/StyleSheetList.h>
 #include <LibWeb/DOM/Document.h>
+#include <LibWeb/DOM/StyleElementBase.h>
+#include <LibWeb/HTML/HTMLLinkElement.h>
 #include <LibWeb/HTML/Scripting/TemporaryExecutionContext.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/Platform/EventLoopPlugin.h>
@@ -37,7 +43,7 @@ WebIDL::ExceptionOr<GC::Ref<CSSStyleSheet>> CSSStyleSheet::construct_impl(JS::Re
     auto sheet = create(realm, CSSRuleList::create(realm), CSS::MediaList::create(realm, {}), {});
 
     // 2. Set sheet’s location to the base URL of the associated Document for the current principal global object.
-    auto associated_document = as<HTML::Window>(HTML::current_principal_global_object()).document();
+    auto associated_document = as<HTML::Window>(realm.global_object()).document();
     sheet->set_location(associated_document->base_url());
 
     // 3. Set sheet’s stylesheet base URL to the baseURL attribute value from options.
@@ -129,7 +135,8 @@ void CSSStyleSheet::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_namespace_rules);
     visitor.visit(m_import_rules);
     visitor.visit(m_owning_documents_or_shadow_roots);
-    visitor.visit(m_associated_font_loaders);
+    for (auto& subresource : m_critical_subresources)
+        subresource.visit_edges(visitor);
 }
 
 // https://www.w3.org/TR/cssom/#dom-cssstylesheet-insertrule
@@ -159,7 +166,12 @@ WebIDL::ExceptionOr<unsigned> CSSStyleSheet::insert_rule(StringView rule, unsign
         // NOTE: The spec doesn't say where to set the parent style sheet, so we'll do it here.
         parsed_rule->set_parent_style_sheet(this);
 
-        invalidate_owners(DOM::StyleInvalidationReason::StyleSheetInsertRule);
+        if (!constructed() && owner_node() && owner_node()->is_html_style_element() && parsed_rule->type() == CSSRule::Type::Keyframes)
+            invalidate_owners_for_inserted_keyframes_rule(*this, as<CSSKeyframesRule>(*parsed_rule));
+        else if (!constructed() && owner_node() && owner_node()->is_html_style_element() && parsed_rule->type() == CSSRule::Type::Style)
+            invalidate_owners_for_inserted_style_rule(*this, as<CSSStyleRule>(*parsed_rule), DOM::StyleInvalidationReason::StyleSheetInsertRule);
+        else
+            invalidate_owners(DOM::StyleInvalidationReason::StyleSheetInsertRule);
     }
 
     return result;
@@ -175,9 +187,10 @@ WebIDL::ExceptionOr<void> CSSStyleSheet::delete_rule(unsigned index)
         return WebIDL::NotAllowedError::create(realm(), "Can't call delete_rule() on non-modifiable stylesheets."_utf16);
 
     // 3. Remove a CSS rule in the CSS rules at index.
+    auto previous_sheet_effects = determine_shadow_root_stylesheet_effects(*this);
     auto result = m_rules->remove_a_css_rule(index);
     if (!result.is_exception()) {
-        invalidate_owners(DOM::StyleInvalidationReason::StyleSheetDeleteRule);
+        invalidate_owners(DOM::StyleInvalidationReason::StyleSheetDeleteRule, &previous_sheet_effects);
     }
     return result;
 }
@@ -207,6 +220,7 @@ GC::Ref<WebIDL::Promise> CSSStyleSheet::replace(String text)
     // 4. In parallel, do these steps:
     Platform::EventLoopPlugin::the().deferred_invoke(GC::create_function(realm.heap(), [&realm, this, text = move(text), promise = GC::Root(promise)] {
         HTML::TemporaryExecutionContext execution_context { realm, HTML::TemporaryExecutionContext::CallbacksEnabled::Yes };
+        auto previous_sheet_effects = determine_shadow_root_stylesheet_effects(*this);
 
         // 1. Let rules be the result of running parse a stylesheet’s contents from text.
         auto rules = CSS::Parser::Parser::create(make_parsing_params(), text).parse_as_stylesheet_contents();
@@ -218,8 +232,13 @@ GC::Ref<WebIDL::Promise> CSSStyleSheet::replace(String text)
                 rules_without_import.append(rule);
         }
 
+        // NOTE: The spec doesn't say where to set the parent style sheet, so we'll do it here.
+        for (auto& rule : rules_without_import)
+            rule->set_parent_style_sheet(this);
+
         // 3. Set sheet’s CSS rules to rules.
         m_rules->set_rules({}, rules_without_import);
+        invalidate_owners(DOM::StyleInvalidationReason::StyleSheetReplace, &previous_sheet_effects);
 
         // 4. Unset sheet’s disallow modification flag.
         set_disallow_modification(false);
@@ -241,6 +260,7 @@ WebIDL::ExceptionOr<void> CSSStyleSheet::replace_sync(StringView text)
         return WebIDL::NotAllowedError::create(realm(), "Can't call replaceSync() on non-modifiable stylesheets"_utf16);
 
     // 2. Let rules be the result of running parse a stylesheet’s contents from text.
+    auto previous_sheet_effects = determine_shadow_root_stylesheet_effects(*this);
     auto rules = CSS::Parser::Parser::create(make_parsing_params(), text).parse_as_stylesheet_contents();
 
     // 3. If rules contains one or more @import rules, remove those rules from rules.
@@ -257,6 +277,7 @@ WebIDL::ExceptionOr<void> CSSStyleSheet::replace_sync(StringView text)
 
     // 4. Set sheet’s CSS rules to rules.
     m_rules->set_rules({}, rules_without_import);
+    invalidate_owners(DOM::StyleInvalidationReason::StyleSheetReplace, &previous_sheet_effects);
 
     return {};
 }
@@ -318,14 +339,23 @@ void CSSStyleSheet::for_each_effective_keyframes_at_rule(Function<void(CSSKeyfra
     });
 }
 
+void CSSStyleSheet::for_each_effective_counter_style_at_rule(Function<void(CSSCounterStyleRule const&)> const& callback) const
+{
+    for_each_effective_rule(TraversalOrder::Preorder, [&](CSSRule const& rule) {
+        if (rule.type() == CSSRule::Type::CounterStyle)
+            callback(static_cast<CSSCounterStyleRule const&>(rule));
+    });
+}
+
 void CSSStyleSheet::add_owning_document_or_shadow_root(DOM::Node& document_or_shadow_root)
 {
     VERIFY(document_or_shadow_root.is_document() || document_or_shadow_root.is_shadow_root());
     m_owning_documents_or_shadow_roots.set(document_or_shadow_root);
 
-    // All owning documents or shadow roots must be part of the same document so we only need to load this style
-    // sheet's fonts against the document of the first
-    if (this->owning_documents_or_shadow_roots().size() == 1)
+    // CSSOM's "add a CSS style sheet" steps bail out once the disabled flag is set, so ownership alone should not
+    // make a disabled sheet observable in the destination document. Delay CSS-connected font activation until the
+    // sheet actually becomes enabled.
+    if (!disabled() && this->owning_documents_or_shadow_roots().size() == 1)
         document_or_shadow_root.document().font_computer().load_fonts_from_sheet(*this);
 
     for (auto const& import_rule : m_import_rules) {
@@ -349,13 +379,91 @@ void CSSStyleSheet::remove_owning_document_or_shadow_root(DOM::Node& document_or
     }
 }
 
-void CSSStyleSheet::invalidate_owners(DOM::StyleInvalidationReason reason)
+void CSSStyleSheet::set_disabled(bool disabled)
+{
+    if (this->disabled() == disabled)
+        return;
+
+    auto previous_sheet_effects = determine_shadow_root_stylesheet_effects(*this);
+    auto document = owning_document();
+    // When a stylesheet is disabled we stop evaluating its media queries, so both the cached top-level match bit
+    // and the MediaList's internal state can go stale across viewport changes. Clear the cache for both
+    // directions, and eagerly refresh on re-enable so subsequent rule-cache rebuilds see the current media state
+    // instead of the pre-disable one.
+    m_did_match = {};
+    StyleSheet::set_disabled(disabled);
+
+    if (!disabled) {
+        if (document) {
+            evaluate_media_queries(*document);
+            document->font_computer().load_fonts_from_sheet(*this);
+            load_pending_image_resources(*document);
+        }
+    } else if (document) {
+        document->font_computer().unload_fonts_from_sheet(*this);
+    }
+
+    invalidate_owners(DOM::StyleInvalidationReason::StyleSheetDisabledStateChange, &previous_sheet_effects);
+}
+
+void CSSStyleSheet::for_each_owning_style_scope(Function<void(StyleScope&)> const& callback) const
+{
+    for (auto& document_or_shadow_root : m_owning_documents_or_shadow_roots) {
+        auto& style_scope = document_or_shadow_root->is_shadow_root()
+            ? as<DOM::ShadowRoot>(*document_or_shadow_root).style_scope()
+            : document_or_shadow_root->document().style_scope();
+
+        callback(style_scope);
+    }
+}
+
+void CSSStyleSheet::invalidate_owners(DOM::StyleInvalidationReason reason, ShadowRootStylesheetEffects const* previous_sheet_effects)
 {
     m_did_match = {};
+
     for (auto& document_or_shadow_root : m_owning_documents_or_shadow_roots) {
-        document_or_shadow_root->invalidate_style(reason);
-        auto& style_scope = document_or_shadow_root->is_shadow_root() ? as<DOM::ShadowRoot>(*document_or_shadow_root).style_scope() : document_or_shadow_root->document().style_scope();
+        auto& style_scope = document_or_shadow_root->is_shadow_root()
+            ? as<DOM::ShadowRoot>(*document_or_shadow_root).style_scope()
+            : document_or_shadow_root->document().style_scope();
+
         style_scope.invalidate_rule_cache();
+        style_scope.node().invalidate_style(reason);
+
+        auto* shadow_root = as_if<DOM::ShadowRoot>(style_scope.node());
+        if (!shadow_root)
+            continue;
+
+        invalidate_assigned_elements_for_dirty_slots(*shadow_root);
+
+        auto* host = shadow_root->host();
+        if (!host)
+            continue;
+
+        auto effects = determine_shadow_root_stylesheet_effects(*shadow_root);
+        if (effects.may_match_light_dom_under_shadow_host && !effects.may_match_shadow_host) {
+            host->invalidate_style(reason);
+        } else if (effects.may_match_light_dom_under_shadow_host) {
+            host->root().invalidate_style(reason);
+        } else if (effects.may_affect_assigned_nodes_via_slots) {
+            host->invalidate_style(reason);
+        } else if (effects.may_match_shadow_host) {
+            host->invalidate_style(reason);
+            shadow_root->set_needs_style_update(true);
+        } else if (previous_sheet_effects) {
+            // `replaceSync("")`, `deleteRule()`, or disabling the last host-reaching rule can remove all evidence of
+            // host-side effects from the post-mutation stylesheet set. Fall back to the pre-mutation snapshot so the
+            // host side still gets the right invalidation.
+            if (previous_sheet_effects->may_match_light_dom_under_shadow_host && !previous_sheet_effects->may_match_shadow_host) {
+                host->invalidate_style(reason);
+            } else if (previous_sheet_effects->may_match_light_dom_under_shadow_host) {
+                host->root().invalidate_style(reason);
+            } else if (previous_sheet_effects->may_affect_assigned_nodes_via_slots) {
+                host->invalidate_style(reason);
+            } else if (previous_sheet_effects->may_match_shadow_host) {
+                host->invalidate_style(reason);
+                shadow_root->set_needs_style_update(true);
+            }
+        }
     }
 }
 
@@ -368,6 +476,18 @@ GC::Ptr<DOM::Document> CSSStyleSheet::owning_document() const
         return element->document();
 
     return nullptr;
+}
+
+void CSSStyleSheet::load_pending_image_resources(DOM::Document& document)
+{
+    if (disabled())
+        return;
+
+    auto pending = move(m_pending_image_values);
+    for (auto const& weak_image_value : pending) {
+        if (auto* image_value = weak_image_value.ptr())
+            image_value->load_any_resources(document);
+    }
 }
 
 bool CSSStyleSheet::evaluate_media_queries(DOM::Document const& document)
@@ -462,13 +582,58 @@ Optional<String> CSSStyleSheet::source_text(Badge<DOM::Document>) const
     return m_source_text;
 }
 
-bool CSSStyleSheet::has_associated_font_loader(FontLoader& font_loader) const
+void CSSStyleSheet::add_critical_subresource(Subresource& subresource)
 {
-    for (auto& loader : m_associated_font_loaders) {
-        if (loader.ptr() == &font_loader)
-            return true;
+    m_critical_subresources.append(subresource);
+}
+
+void CSSStyleSheet::remove_critical_subresource(Subresource& subresource)
+{
+    m_critical_subresources.remove_first_matching([&](auto const& it) { return &it == &subresource; });
+    check_if_loading_completed();
+}
+
+CSSStyleSheet::LoadingState CSSStyleSheet::loading_state() const
+{
+    bool any_loading = false;
+    bool any_errors = false;
+
+    for (auto const& subresource : m_critical_subresources) {
+        switch (subresource.loading_state()) {
+        case LoadingState::Unloaded:
+        case LoadingState::Loading:
+            any_loading = true;
+            break;
+        case LoadingState::Loaded:
+            break;
+        case LoadingState::Error:
+            any_errors = true;
+            break;
+        }
     }
-    return false;
+
+    if (any_loading)
+        return LoadingState::Loading;
+
+    if (any_errors)
+        return LoadingState::Error;
+
+    return LoadingState::Loaded;
+}
+
+void CSSStyleSheet::check_if_loading_completed()
+{
+    auto state = loading_state();
+    if (state == LoadingState::Loaded || state == LoadingState::Error) {
+        // We're finished loading, so propagate that to our owner.
+        if (auto* style_element = as_if<DOM::StyleElementBase>(owner_node())) {
+            style_element->finished_loading_critical_subresources(state == LoadingState::Error ? DOM::StyleElementBase::AnyFailed::Yes : DOM::StyleElementBase::AnyFailed::No);
+        } else if (auto* link_element = as_if<HTML::HTMLLinkElement>(owner_node())) {
+            link_element->finished_loading_critical_style_subresources(state == LoadingState::Error ? HTML::HTMLLinkElement::AnyFailed::Yes : HTML::HTMLLinkElement::AnyFailed::No);
+        } else if (auto* import_rule = as_if<CSSImportRule>(owner_rule().ptr())) {
+            import_rule->set_loading_state(state);
+        }
+    }
 }
 
 Parser::ParsingParams CSSStyleSheet::make_parsing_params() const
@@ -481,6 +646,30 @@ Parser::ParsingParams CSSStyleSheet::make_parsing_params() const
 
     parsing_params.declared_namespaces = declared_namespaces();
     return parsing_params;
+}
+
+StringView CSSStyleSheet::loading_state_name(LoadingState loading_state)
+{
+    switch (loading_state) {
+    case LoadingState::Unloaded:
+        return "Unloaded"sv;
+    case LoadingState::Loading:
+        return "Loading"sv;
+    case LoadingState::Loaded:
+        return "Loaded"sv;
+    case LoadingState::Error:
+        return "Error"sv;
+    }
+    VERIFY_NOT_REACHED();
+}
+
+void CSSStyleSheet::Subresource::set_loading_state(LoadingState loading_state)
+{
+    m_loading_state = loading_state;
+    if (loading_state == LoadingState::Loaded || loading_state == LoadingState::Error) {
+        if (auto style_sheet = parent_style_sheet_for_subresource())
+            style_sheet->check_if_loading_completed();
+    }
 }
 
 }

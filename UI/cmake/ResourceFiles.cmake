@@ -20,6 +20,7 @@ set(16x16_ICONS
     filetype-sound.png
     filetype-video.png
     find.png
+    fullscreen.png
     go-forward.png
     history.png
     layers.png
@@ -69,13 +70,17 @@ list(TRANSFORM INTERNAL_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladyb
 
 set(ABOUT_PAGES
     about.html
+    bookmarks.html
     newtab.html
     processes.html
     settings.html
+    version.html
+    webui.css
 )
 list(TRANSFORM ABOUT_PAGES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/about-pages/")
 
 set(ABOUT_SETTINGS_RESOURCES
+    browsing-behavior.js
     default-zoom-level.js
     languages.js
     network.js
@@ -89,7 +94,6 @@ list(TRANSFORM ABOUT_SETTINGS_RESOURCES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res
 set(WEB_TEMPLATES
     directory.html
     error.html
-    version.html
 )
 list(TRANSFORM WEB_TEMPLATES PREPEND "${LADYBIRD_SOURCE_DIR}/Base/res/ladybird/templates/")
 

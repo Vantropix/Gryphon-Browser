@@ -7,6 +7,7 @@
  */
 
 #include <AK/Utf8View.h>
+#include <LibGC/WeakHashSet.h>
 #include <LibIPC/File.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Accessor.h>
@@ -19,11 +20,16 @@
 #include <LibTextCodec/Decoder.h>
 #include <LibURL/Origin.h>
 #include <LibWeb/Bindings/ExceptionOrUtils.h>
+#include <LibWeb/Bindings/Window.h>
 #include <LibWeb/Bindings/WindowExposedInterfaces.h>
-#include <LibWeb/Bindings/WindowPrototype.h>
+#include <LibWeb/CSS/CSSStyleProperties.h>
 #include <LibWeb/CSS/MediaQueryList.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/Screen.h>
+#include <LibWeb/CSS/StyleValues/IntegerStyleValue.h>
+#include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
+#include <LibWeb/CSS/StyleValues/NumberStyleValue.h>
+#include <LibWeb/CSS/StyleValues/ResolutionStyleValue.h>
 #include <LibWeb/CookieStore/CookieStore.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/Element.h>
@@ -38,6 +44,7 @@
 #include <LibWeb/HTML/DocumentState.h>
 #include <LibWeb/HTML/EventHandler.h>
 #include <LibWeb/HTML/EventLoop/EventLoop.h>
+#include <LibWeb/HTML/External.h>
 #include <LibWeb/HTML/Focus.h>
 #include <LibWeb/HTML/HTMLEmbedElement.h>
 #include <LibWeb/HTML/HTMLFormElement.h>
@@ -67,13 +74,36 @@
 #include <LibWeb/Painting/PaintableBox.h>
 #include <LibWeb/RequestIdleCallback/IdleDeadline.h>
 #include <LibWeb/Selection/Selection.h>
+#include <LibWeb/Speech/SpeechSynthesis.h>
 #include <LibWeb/StorageAPI/StorageBottle.h>
 #include <LibWeb/StorageAPI/StorageEndpoint.h>
+#include <LibWeb/ViewTransition/ViewTransition.h>
 #include <LibWeb/WebIDL/AbstractOperations.h>
 
 namespace Web::HTML {
 
 GC_DEFINE_ALLOCATOR(Window);
+
+static GC::WeakHashSet<Window>& all_windows()
+{
+    static GC::WeakHashSet<Window> windows;
+    return windows;
+}
+
+void Window::for_each_active(Function<IterationDecision(Window&)> callback)
+{
+    auto windows = all_windows();
+    for (auto& window : windows) {
+        if (!window.m_associated_document)
+            continue;
+
+        if (!window.m_associated_document->is_fully_active())
+            continue;
+
+        if (callback(window) == IterationDecision::Break)
+            break;
+    }
+}
 
 // https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#run-the-animation-frame-callbacks
 void run_animation_frame_callbacks(DOM::Document& document, double now)
@@ -112,6 +142,8 @@ Window::Window(JS::Realm& realm)
         .has_legacy_unenumerable_named_properties_interface_extended_attribute = true,
         .has_global_interface_extended_attribute = true,
     };
+
+    all_windows().set(*this);
 }
 
 void Window::visit_edges(JS::Cell::Visitor& visitor)
@@ -126,24 +158,28 @@ void Window::visit_edges(JS::Cell::Visitor& visitor)
     visitor.visit(m_location);
     visitor.visit(m_navigator);
     visitor.visit(m_navigation);
-    visitor.visit(m_custom_element_registry);
     visitor.visit(m_animation_frame_callback_driver);
     visitor.visit(m_pdf_viewer_plugin_objects);
     visitor.visit(m_pdf_viewer_mime_type_objects);
     visitor.visit(m_close_watcher_manager);
     visitor.visit(m_cookie_store);
+    visitor.visit(m_speech_synthesis);
     visitor.visit(m_locationbar);
     visitor.visit(m_menubar);
     visitor.visit(m_personalbar);
     visitor.visit(m_scrollbars);
     visitor.visit(m_statusbar);
     visitor.visit(m_toolbar);
+    visitor.visit(m_external);
+    for (auto& descriptor : m_cross_origin_property_descriptor_map)
+        descriptor.value.visit_edges(visitor);
 }
 
 void Window::finalize()
 {
     Base::finalize();
     WindowOrWorkerGlobalScopeMixin::finalize();
+    all_windows().remove(*this);
 }
 
 Window::~Window() = default;
@@ -316,62 +352,62 @@ Optional<CSS::MediaFeatureValue> Window::query_media_feature(CSS::MediaFeatureID
     // https://www.w3.org/TR/mediaqueries-5/#media-descriptor-table
     switch (media_feature) {
     case CSS::MediaFeatureID::AnyHover:
-        return CSS::MediaFeatureValue(CSS::Keyword::Hover);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Hover));
     case CSS::MediaFeatureID::AnyPointer:
-        return CSS::MediaFeatureValue(CSS::Keyword::Fine);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Fine));
     case CSS::MediaFeatureID::AspectRatio:
-        return CSS::MediaFeatureValue(CSS::Ratio(inner_width(), inner_height()));
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ratio, CSS::RatioStyleValue::create(CSS::NumberStyleValue::create(inner_width()), CSS::NumberStyleValue::create(inner_height())));
     case CSS::MediaFeatureID::Color:
-        return CSS::MediaFeatureValue(8);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Integer, CSS::IntegerStyleValue::create(8));
     case CSS::MediaFeatureID::ColorGamut:
-        return CSS::MediaFeatureValue(CSS::Keyword::Srgb);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Srgb));
     case CSS::MediaFeatureID::ColorIndex:
-        return CSS::MediaFeatureValue(0);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Integer, CSS::IntegerStyleValue::create(0));
     case CSS::MediaFeatureID::DeviceAspectRatio: {
         auto screen_area = page().client().screen_rect();
-        return CSS::MediaFeatureValue(CSS::Ratio(screen_area.width().value(), screen_area.height().value()));
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ratio, CSS::RatioStyleValue::create(CSS::NumberStyleValue::create(screen_area.width().value()), CSS::NumberStyleValue::create(screen_area.height().value())));
     }
     case CSS::MediaFeatureID::DeviceHeight:
-        return CSS::MediaFeatureValue(CSS::Length::make_px(page().web_exposed_screen_area().height()));
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Length, CSS::LengthStyleValue::create(CSS::Length::make_px(page().web_exposed_screen_area().height())));
     case CSS::MediaFeatureID::DeviceWidth:
-        return CSS::MediaFeatureValue(CSS::Length::make_px(page().web_exposed_screen_area().width()));
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Length, CSS::LengthStyleValue::create(CSS::Length::make_px(page().web_exposed_screen_area().width())));
     case CSS::MediaFeatureID::DisplayMode:
         // FIXME: Detect if window is fullscreen
-        return CSS::MediaFeatureValue(CSS::Keyword::Browser);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Browser));
     case CSS::MediaFeatureID::DynamicRange:
-        return CSS::MediaFeatureValue(CSS::Keyword::Standard);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Standard));
     case CSS::MediaFeatureID::EnvironmentBlending:
-        return CSS::MediaFeatureValue(CSS::Keyword::Opaque);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Opaque));
     case CSS::MediaFeatureID::ForcedColors:
-        return CSS::MediaFeatureValue(CSS::Keyword::None);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::None));
     case CSS::MediaFeatureID::Grid:
-        return CSS::MediaFeatureValue(0);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Integer, CSS::IntegerStyleValue::create(0));
     case CSS::MediaFeatureID::Height:
-        return CSS::MediaFeatureValue(CSS::Length::make_px(inner_height()));
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Length, CSS::LengthStyleValue::create(CSS::Length::make_px(inner_height())));
     case CSS::MediaFeatureID::HorizontalViewportSegments:
-        return CSS::MediaFeatureValue(1);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Integer, CSS::IntegerStyleValue::create(1));
     case CSS::MediaFeatureID::Hover:
-        return CSS::MediaFeatureValue(CSS::Keyword::Hover);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Hover));
     case CSS::MediaFeatureID::InvertedColors:
-        return CSS::MediaFeatureValue(CSS::Keyword::None);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::None));
     case CSS::MediaFeatureID::Monochrome:
-        return CSS::MediaFeatureValue(0);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Integer, CSS::IntegerStyleValue::create(0));
     case CSS::MediaFeatureID::NavControls:
-        return CSS::MediaFeatureValue(CSS::Keyword::Back);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Back));
     case CSS::MediaFeatureID::Orientation:
-        return CSS::MediaFeatureValue(inner_height() >= inner_width() ? CSS::Keyword::Portrait : CSS::Keyword::Landscape);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(inner_height() >= inner_width() ? CSS::Keyword::Portrait : CSS::Keyword::Landscape));
     case CSS::MediaFeatureID::OverflowBlock:
-        return CSS::MediaFeatureValue(CSS::Keyword::Scroll);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Scroll));
     case CSS::MediaFeatureID::OverflowInline:
-        return CSS::MediaFeatureValue(CSS::Keyword::Scroll);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Scroll));
     case CSS::MediaFeatureID::Pointer:
-        return CSS::MediaFeatureValue(CSS::Keyword::Fine);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Fine));
     case CSS::MediaFeatureID::PrefersColorScheme: {
         switch (page().preferred_color_scheme()) {
         case CSS::PreferredColorScheme::Light:
-            return CSS::MediaFeatureValue(CSS::Keyword::Light);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Light));
         case CSS::PreferredColorScheme::Dark:
-            return CSS::MediaFeatureValue(CSS::Keyword::Dark);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Dark));
         default:
             VERIFY_NOT_REACHED();
         }
@@ -379,52 +415,52 @@ Optional<CSS::MediaFeatureValue> Window::query_media_feature(CSS::MediaFeatureID
     case CSS::MediaFeatureID::PrefersContrast:
         switch (page().preferred_contrast()) {
         case CSS::PreferredContrast::Less:
-            return CSS::MediaFeatureValue(CSS::Keyword::Less);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Less));
         case CSS::PreferredContrast::More:
-            return CSS::MediaFeatureValue(CSS::Keyword::More);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::More));
         case CSS::PreferredContrast::NoPreference:
-            return CSS::MediaFeatureValue(CSS::Keyword::NoPreference);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::NoPreference));
         case CSS::PreferredContrast::Auto:
         default:
             // FIXME: Fallback to system settings
-            return CSS::MediaFeatureValue(CSS::Keyword::NoPreference);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::NoPreference));
         }
     case CSS::MediaFeatureID::PrefersReducedData:
         // FIXME: Make this a preference
-        return CSS::MediaFeatureValue(CSS::Keyword::NoPreference);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::NoPreference));
     case CSS::MediaFeatureID::PrefersReducedMotion:
         switch (page().preferred_motion()) {
         case CSS::PreferredMotion::NoPreference:
-            return CSS::MediaFeatureValue(CSS::Keyword::NoPreference);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::NoPreference));
         case CSS::PreferredMotion::Reduce:
-            return CSS::MediaFeatureValue(CSS::Keyword::Reduce);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Reduce));
         case CSS::PreferredMotion::Auto:
         default:
             // FIXME: Fallback to system settings
-            return CSS::MediaFeatureValue(CSS::Keyword::NoPreference);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::NoPreference));
         }
     case CSS::MediaFeatureID::PrefersReducedTransparency:
         // FIXME: Make this a preference
-        return CSS::MediaFeatureValue(CSS::Keyword::NoPreference);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::NoPreference));
     case CSS::MediaFeatureID::Resolution:
-        return CSS::MediaFeatureValue(CSS::Resolution::make_dots_per_pixel(device_pixel_ratio()));
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Resolution, CSS::ResolutionStyleValue::create(CSS::Resolution::make_dots_per_pixel(device_pixel_ratio())));
     case CSS::MediaFeatureID::Scan:
         // FIXME: Detect this from the display, if we can. Most displays aren't scanning and should return None.
-        return CSS::MediaFeatureValue(CSS::Keyword::None);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::None));
     case CSS::MediaFeatureID::Scripting:
         if (associated_document().is_scripting_enabled())
-            return CSS::MediaFeatureValue(CSS::Keyword::Enabled);
-        return CSS::MediaFeatureValue(CSS::Keyword::None);
+            return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Enabled));
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::None));
     case CSS::MediaFeatureID::Update:
-        return CSS::MediaFeatureValue(CSS::Keyword::Fast);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Fast));
     case CSS::MediaFeatureID::VerticalViewportSegments:
-        return CSS::MediaFeatureValue(1);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Integer, CSS::IntegerStyleValue::create(1));
     case CSS::MediaFeatureID::VideoColorGamut:
-        return CSS::MediaFeatureValue(CSS::Keyword::Srgb);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Srgb));
     case CSS::MediaFeatureID::VideoDynamicRange:
-        return CSS::MediaFeatureValue(CSS::Keyword::Standard);
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Ident, CSS::KeywordStyleValue::create(CSS::Keyword::Standard));
     case CSS::MediaFeatureID::Width:
-        return CSS::MediaFeatureValue(CSS::Length::make_px(inner_width()));
+        return CSS::MediaFeatureValue(CSS::MediaFeatureValue::Type::Length, CSS::LengthStyleValue::create(CSS::Length::make_px(inner_width())));
 
     default:
         break;
@@ -683,7 +719,7 @@ BrowsingContext* Window::browsing_context()
 GC::Ptr<Navigable> Window::navigable() const
 {
     // A Window's navigable is the navigable whose active document is the Window's associated Document's, or null if there is no such navigable.
-    return Navigable::navigable_with_active_document(*m_associated_document);
+    return m_associated_document->navigable();
 }
 
 // https://html.spec.whatwg.org/multipage/system-state.html#pdf-viewer-plugin-objects
@@ -731,11 +767,28 @@ Vector<GC::Ref<MimeType>> Window::pdf_viewer_mime_type_objects()
     return m_pdf_viewer_mime_type_objects;
 }
 
+static bool s_test_mode = false;
+
+bool Window::in_test_mode()
+{
+    return s_test_mode;
+}
+
+void Window::set_enable_test_mode(bool exposed)
+{
+    s_test_mode = exposed;
+}
+
 static bool s_internals_object_exposed = false;
 
 void Window::set_internals_object_exposed(bool exposed)
 {
     s_internals_object_exposed = exposed;
+}
+
+bool Window::is_internals_object_exposed()
+{
+    return s_internals_object_exposed;
 }
 
 WebIDL::ExceptionOr<void> Window::initialize_web_interfaces(Badge<WindowEnvironmentSettingsObject>)
@@ -1071,7 +1124,6 @@ GC::Ptr<WindowProxy const> Window::parent() const
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-frameelement
-// https://whatpr.org/html/9893/nav-history-apis.html#dom-frameelement
 GC::Ptr<DOM::Element const> Window::frame_element() const
 {
     // 1. Let current be this's node navigable.
@@ -1088,8 +1140,8 @@ GC::Ptr<DOM::Element const> Window::frame_element() const
     if (!container)
         return {};
 
-    // 5. If container's node document's origin is not same origin-domain with the current principal settings object's origin, then return null.
-    if (!container->document().origin().is_same_origin_domain(current_principal_settings_object().origin()))
+    // 5. If container's node document's origin is not same origin-domain with the current settings object's origin, then return null.
+    if (!container->document().origin().is_same_origin_domain(current_settings_object().origin()))
         return {};
 
     // 6. Return container.
@@ -1133,6 +1185,14 @@ GC::Ref<CookieStore::CookieStore> Window::cookie_store()
     if (!m_cookie_store)
         m_cookie_store = realm.create<CookieStore::CookieStore>(realm, page().client());
     return *m_cookie_store;
+}
+
+// https://wicg.github.io/speech-api/#tts-section
+GC::Ref<Speech::SpeechSynthesis> Window::speech_synthesis()
+{
+    if (!m_speech_synthesis)
+        m_speech_synthesis = Speech::SpeechSynthesis::create(realm());
+    return *m_speech_synthesis;
 }
 
 // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html#dom-alert
@@ -1207,8 +1267,8 @@ WebIDL::ExceptionOr<void> Window::window_post_message_steps(JS::Value message, W
                 return;
         }
 
-        // 2. Let origin be the serialization of incumbentSettings's origin.
-        auto origin = incumbent_settings.origin().serialize();
+        // 2. Let origin be the incumbentSettings's origin.
+        auto const& origin = incumbent_settings.origin();
 
         // 3. Let source be the WindowProxy object corresponding to incumbentSettings's global object (a Window object).
         auto& source = as<WindowProxy>(incumbent_settings.realm().global_environment().global_this_value());
@@ -1219,7 +1279,7 @@ WebIDL::ExceptionOr<void> Window::window_post_message_steps(JS::Value message, W
         auto deserialize_record_or_error = structured_deserialize_with_transfer(serialize_with_transfer_result, target_realm);
 
         // If this throws an exception, catch it, fire an event named messageerror at targetWindow, using MessageEvent,
-        // with the origin attribute initialized to origin and the source attribute initialized to source, and then return.
+        // with its origin initialized to origin and the source attribute initialized to source, and then return.
         if (deserialize_record_or_error.is_exception()) {
             MessageEventInit message_event_init {};
             message_event_init.origin = origin;
@@ -1244,9 +1304,9 @@ WebIDL::ExceptionOr<void> Window::window_post_message_steps(JS::Value message, W
             }
         }
 
-        // 7. Fire an event named message at targetWindow, using MessageEvent, with the origin attribute initialized to origin,
-        //    the source attribute initialized to source, the data attribute initialized to messageClone, and the ports attribute
-        //    initialized to newPorts.
+        // 7. Fire an event named message at targetWindow, using MessageEvent, with its origin initialized to origin,
+        //    the source attribute initialized to source, the data attribute initialized to messageClone, and the ports
+        //    attribute initialized to newPorts.
         MessageEventInit message_event_init {};
         message_event_init.origin = origin;
         message_event_init.source = GC::make_root(source);
@@ -1513,38 +1573,41 @@ GC::Ref<WebIDL::Promise> Window::scroll(ScrollToOptions const& options)
     auto const document = navigable->active_document();
     VERIFY(document);
 
-    // NB:  Make sure layout is up-to-date before looking at scrollable overflow metrics.
-    document->update_layout(DOM::UpdateLayoutReason::WindowScroll);
+    // OPTIMIZATION: If we're scrolling to (0, 0), we don't need to do any of the overflow calculations.
+    //               This also means we don't need to update layout in that case.
+    if (x != 0 || y != 0) {
+        // NB: Make sure layout is up-to-date before looking at scrollable overflow metrics.
+        document->update_layout(DOM::UpdateLayoutReason::WindowScroll);
 
-    VERIFY(document->paintable_box());
-    auto scrolling_area = document->paintable_box()->scrollable_overflow_rect()->to_type<float>();
+        VERIFY(document->paintable_box());
+        auto scrolling_area = document->paintable_box()->scrollable_overflow_rect()->to_type<float>();
 
-    // 7. FIXME: For now we always assume overflow direction is rightward
-    // -> If the viewport has rightward overflow direction
-    //    Let x be max(0, min(x, viewport scrolling area width - viewport width)).
-    x = max(0.0f, min(x, scrolling_area.width() - viewport_width));
-    // -> If the viewport has leftward overflow direction
-    //    Let x be min(0, max(x, viewport width - viewport scrolling area width)).
+        // 7. FIXME: For now we always assume overflow direction is rightward
+        // -> If the viewport has rightward overflow direction
+        //    Let x be max(0, min(x, viewport scrolling area width - viewport width)).
+        x = max(0.0f, min(x, scrolling_area.width() - viewport_width));
+        // -> If the viewport has leftward overflow direction
+        //    Let x be min(0, max(x, viewport width - viewport scrolling area width)).
 
-    // 8. FIXME: For now we always assume overflow direction is downward
-    // -> If the viewport has downward overflow direction
-    //    Let y be max(0, min(y, viewport scrolling area height - viewport height)).
-    y = max(0.0f, min(y, scrolling_area.height() - viewport_height));
-    // -> If the viewport has upward overflow direction
-    //    Let y be min(0, max(y, viewport height - viewport scrolling area height)).
+        // 8. FIXME: For now we always assume overflow direction is downward
+        // -> If the viewport has downward overflow direction
+        //    Let y be max(0, min(y, viewport scrolling area height - viewport height)).
+        y = max(0.0f, min(y, scrolling_area.height() - viewport_height));
+        // -> If the viewport has upward overflow direction
+        //    Let y be min(0, max(y, viewport height - viewport scrolling area height)).
+    }
 
     // FIXME: 9. Let position be the scroll position the viewport would have by aligning the x-coordinate x of the viewport
     //           scrolling area with the left of the viewport and aligning the y-coordinate y of the viewport scrolling area
     //           with the top of the viewport.
     auto position = Gfx::FloatPoint { x, y };
 
-    // FIXME: We need an execution context to resolve promises, are we missing one in a caller?
-    TemporaryExecutionContext temporary_execution_context { realm() };
-
     // 10. If position is the same as the viewport’s current scroll position, and the viewport does not have an ongoing
     //     smooth scroll, return a resolved Promise and abort the remaining steps.
-    if (position == viewport_rect.location())
+    if (position == viewport_rect.location()) {
+        TemporaryExecutionContext temporary_execution_context { realm() };
         return WebIDL::create_resolved_promise(realm(), JS::js_undefined());
+    }
 
     // 11. Let document be the viewport’s associated Document.
     // NB: document is already defined above.
@@ -1552,7 +1615,7 @@ GC::Ref<WebIDL::Promise> Window::scroll(ScrollToOptions const& options)
     // 12. Perform a scroll of the viewport to position, document’s root element as the associated element, if there is
     //     one, or null otherwise, and the scroll behavior being the value of the behavior dictionary member of options.
     //     Let scrollPromise be the Promise returned from this step.
-    auto scroll_promise = navigable->scroll_viewport_by_delta({ x, y });
+    auto scroll_promise = navigable->perform_a_scroll_of_the_viewport({ x, y });
 
     // 13. Return scrollPromise.
     return scroll_promise;
@@ -1757,6 +1820,15 @@ void Window::release_events()
     // Do nothing.
 }
 
+// https://html.spec.whatwg.org/multipage/obsolete.html#dom-external
+GC::Ref<External> Window::external()
+{
+    // The external attribute of the Window interface must return an instance of the External interface
+    if (!m_external)
+        m_external = realm().create<External>(realm());
+    return *m_external;
+}
+
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-navigation
 GC::Ref<Navigation> Window::navigation()
 {
@@ -1774,12 +1846,15 @@ GC::Ref<Navigation> Window::navigation()
 // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-window-customelements
 GC::Ref<CustomElementRegistry> Window::custom_elements()
 {
-    auto& realm = this->realm();
+    // The Window customElements getter steps are:
 
-    // The customElements attribute of the Window interface must return the CustomElementRegistry object for that Window object.
-    if (!m_custom_element_registry)
-        m_custom_element_registry = realm.create<CustomElementRegistry>(realm);
-    return GC::Ref { *m_custom_element_registry };
+    // 1. Assert: this's associated Document's custom element registry is a CustomElementRegistry object.
+    // Note: A Window's associated Document is always created with a new CustomElementRegistry object.
+    auto registry = associated_document().custom_element_registry();
+    VERIFY(registry);
+
+    // 2. Return this's associated Document's custom element registry.
+    return *registry;
 }
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#document-tree-child-navigable-target-name-property-set
@@ -1929,8 +2004,8 @@ Window::NamedObjects Window::named_objects(StringView name)
         if (auto element_name = element->name(); element_name.has_value() && *element_name == name)
             objects.elements.append(*element);
     }
-    associated_document().element_by_id().for_each_element_with_id(name, [&](auto element) {
-        objects.elements.append(*element);
+    associated_document().element_by_id().for_each_element_with_id(name, associated_document(), [&](auto& element) {
+        objects.elements.append(element);
     });
 
     return objects;

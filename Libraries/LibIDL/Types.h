@@ -12,11 +12,10 @@
 
 #include <AK/ByteString.h>
 #include <AK/HashMap.h>
+#include <AK/HashTable.h>
 #include <AK/NonnullRefPtr.h>
 #include <AK/SourceGenerator.h>
-#include <AK/StringBuilder.h>
 #include <AK/Tuple.h>
-#include <AK/TypeCasts.h>
 
 namespace IDL {
 
@@ -41,9 +40,11 @@ struct CppType {
     SequenceStorageType sequence_storage_type;
 };
 
+class Context;
 class ParameterizedType;
 class UnionType;
 class Interface;
+struct Module;
 
 class Type : public RefCounted<Type> {
 public:
@@ -136,7 +137,7 @@ public:
     // https://webidl.spec.whatwg.org/#dfn-distinguishable
     bool is_distinguishable_from(Interface const&, Type const& other) const;
 
-    bool is_json(Interface const&) const;
+    bool is_json(Context const&) const;
 
     bool is_restricted_floating_point() const { return m_name.is_one_of("float", "double"); }
     bool is_unrestricted_floating_point() const { return m_name.is_one_of("unrestricted float", "unrestricted double"); }
@@ -209,6 +210,7 @@ struct Dictionary {
     ByteString parent_name;
     Vector<DictionaryMember> members;
     HashMap<ByteString, ByteString> extended_attributes;
+    ByteString module_own_path;
     bool is_original_definition { true };
 };
 
@@ -218,6 +220,7 @@ struct Typedef {
 };
 
 struct Enumeration {
+    ByteString module_own_path;
     OrderedHashTable<ByteString> values;
     OrderedHashMap<ByteString, ByteString> translated_cpp_names;
     HashMap<ByteString, ByteString> extended_attributes;
@@ -241,7 +244,7 @@ public:
 
     virtual ~ParameterizedType() override = default;
 
-    void generate_sequence_from_iterable(SourceGenerator& generator, ByteString const& cpp_name, ByteString const& iterable_cpp_name, ByteString const& iterator_method_cpp_name, IDL::Interface const&, size_t recursion_depth) const;
+    void generate_sequence_from_iterable(SourceGenerator& generator, ByteString const& cpp_name, ByteString const& iterable_cpp_name, ByteString const& iterator_method_cpp_name, Context const&, size_t recursion_depth) const;
 
     Vector<NonnullRefPtr<Type const>> const& parameters() const { return m_parameters; }
     Vector<NonnullRefPtr<Type const>>& parameters() { return m_parameters; }
@@ -263,7 +266,11 @@ class Interface {
     AK_MAKE_NONMOVABLE(Interface);
 
 public:
-    explicit Interface() = default;
+    explicit Interface(Context& context)
+        : context(context)
+    {
+    }
+    void dump();
 
     ByteString name;
     ByteString parent_name;
@@ -272,6 +279,8 @@ public:
 
     bool is_namespace { false };
     bool is_mixin { false };
+    bool is_callback_interface { false };
+    bool is_partial { false };
 
     HashMap<ByteString, ByteString> extended_attributes;
 
@@ -297,6 +306,10 @@ public:
     Optional<NonnullRefPtr<Type const>> set_entry_type;
     bool is_set_readonly { false };
 
+    Optional<NonnullRefPtr<Type const>> map_key_type;
+    Optional<NonnullRefPtr<Type const>> map_value_type;
+    bool is_map_readonly { false };
+
     Optional<Function> named_property_getter;
     Optional<Function> named_property_setter;
 
@@ -305,12 +318,10 @@ public:
 
     Optional<Function> named_property_deleter;
 
-    HashMap<ByteString, Dictionary> dictionaries;
-    HashMap<ByteString, Vector<Dictionary>> partial_dictionaries;
-    HashMap<ByteString, Enumeration> enumerations;
-    HashMap<ByteString, Typedef> typedefs;
-    HashMap<ByteString, Interface*> mixins;
-    HashMap<ByteString, CallbackFunction> callback_functions;
+    Context& context;
+
+    OrderedHashTable<ByteString> own_dictionaries;
+    OrderedHashTable<ByteString> own_enumerations;
 
     // Added for convenience after parsing
     ByteString fully_qualified_name;
@@ -319,12 +330,8 @@ public:
     ByteString prototype_base_class;
     ByteString namespace_class;
     ByteString global_mixin_class;
-    HashMap<ByteString, HashTable<ByteString>> included_mixins;
 
     ByteString module_own_path;
-    Vector<NonnullOwnPtr<Interface>> partial_interfaces;
-    Vector<NonnullOwnPtr<Interface>> partial_namespaces;
-    Vector<Interface&> imported_modules;
 
     OrderedHashMap<ByteString, Vector<Function&>> overload_sets;
     OrderedHashMap<ByteString, Vector<Function&>> static_overload_sets;
@@ -339,12 +346,14 @@ public:
     // https://webidl.spec.whatwg.org/#dfn-legacy-platform-object
     bool is_legacy_platform_object() const { return !extended_attributes.contains("Global") && (supports_indexed_properties() || supports_named_properties()); }
 
-    bool will_generate_code() const
-    {
-        return !name.is_empty() || any_of(dictionaries, [](auto& entry) { return entry.value.is_original_definition; }) || any_of(enumerations, [](auto& entry) { return entry.value.is_original_definition; });
-    }
+    bool will_generate_code() const;
 
     void extend_with_partial_interface(Interface const&);
+};
+
+struct Module {
+    ByteString module_own_path;
+    Optional<Interface&> interface;
 };
 
 class UnionType : public Type {
@@ -422,6 +431,33 @@ public:
 
 private:
     Vector<NonnullRefPtr<Type const>> m_member_types;
+};
+
+class Context {
+public:
+    Interface& add_interface(NonnullOwnPtr<Interface>);
+    Interface& add_mixin(NonnullOwnPtr<Interface>);
+    Module& add_module(NonnullOwnPtr<Module>);
+    Module* find_parsed_module(ByteString const& module_path);
+    void resolve();
+
+    HashMap<ByteString, Interface*> interfaces;
+    Vector<NonnullOwnPtr<Interface>> owned_interfaces;
+    HashMap<ByteString, Dictionary> dictionaries;
+    HashMap<ByteString, Vector<Dictionary>> partial_dictionaries;
+    HashMap<ByteString, Enumeration> enumerations;
+    HashMap<ByteString, Typedef> typedefs;
+    HashMap<ByteString, CallbackFunction> callback_functions;
+    HashMap<ByteString, Interface*> mixins;
+
+    Vector<NonnullOwnPtr<Interface>> owned_mixins;
+    Vector<NonnullOwnPtr<Interface>> partial_interfaces;
+    Vector<NonnullOwnPtr<Interface>> partial_mixins;
+    Vector<NonnullOwnPtr<Interface>> partial_namespaces;
+
+    HashMap<ByteString, HashTable<ByteString>> included_mixins;
+
+    Vector<NonnullOwnPtr<Module>> owned_modules;
 };
 
 // https://webidl.spec.whatwg.org/#dfn-optionality-value

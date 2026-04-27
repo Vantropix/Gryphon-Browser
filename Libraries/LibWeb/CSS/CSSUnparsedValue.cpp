@@ -5,7 +5,7 @@
  */
 
 #include "CSSUnparsedValue.h"
-#include <LibWeb/Bindings/CSSUnparsedValuePrototype.h>
+#include <LibWeb/Bindings/CSSUnparsedValue.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/CSSVariableReferenceValue.h>
 #include <LibWeb/CSS/Parser/Parser.h>
@@ -87,11 +87,8 @@ Optional<JS::Value> CSSUnparsedValue::item_value(size_t index) const
 
 static WebIDL::ExceptionOr<CSSUnparsedSegment> unparsed_segment_from_js_value(JS::VM& vm, JS::Value& value)
 {
-    if (value.is_object()) {
-        if (auto* variable_reference = as_if<CSSVariableReferenceValue>(value.as_object())) {
-            return GC::Ref { *variable_reference };
-        }
-    }
+    if (auto variable_reference = value.as_if<CSSVariableReferenceValue>())
+        return GC::Ref { *variable_reference };
     return TRY(value.to_string(vm));
 }
 
@@ -187,7 +184,13 @@ WebIDL::ExceptionOr<NonnullRefPtr<StyleValue const>> CSSUnparsedValue::create_an
     auto string = TRY(to_string());
     auto parser = Parser::Parser::create(Parser::ParsingParams {}, string);
     auto component_values = parser.parse_as_list_of_component_values();
-    return UnresolvedStyleValue::create(move(component_values));
+
+    Parser::SubstitutionFunctionsPresence substitution_presence;
+
+    if (Parser::Parser::collect_arbitrary_substitution_function_presence(component_values, substitution_presence).is_error())
+        return WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid arbitrary substitution function syntax"_string };
+
+    return UnresolvedStyleValue::create(move(component_values), substitution_presence);
 }
 
 }

@@ -15,8 +15,11 @@
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/Completion.h>
+#include <LibJS/Runtime/ExecutionContext.h>
 #include <LibJS/Runtime/StringConstructor.h>
+#include <LibJS/Runtime/VM.h>
 #include <LibJS/Runtime/ValueInlines.h>
+#include <LibJS/SourceRange.h>
 
 namespace JS {
 
@@ -180,17 +183,17 @@ static ThrowCompletionOr<GC::Ref<Object>> create_table_row(Realm& realm, Value r
 
     // 3. If `tabularDataItem` is a list, then:
     if (TRY(tabular_data_item.is_array(vm))) {
-        auto& array = tabular_data_item.as_array();
+        auto& array_like = tabular_data_item.as_object();
 
         // 3.1. Let `indices` be get the indices of `tabularDataItem`
-        auto& indices = array.indexed_properties();
+        auto length = TRY(length_of_array_like(vm, array_like));
 
         // 3.2. For each `index` of `indices`
-        for (auto const& prop : indices) {
-            PropertyKey key(prop.index());
+        for (size_t i = 0; i < length; ++i) {
+            PropertyKey key(i);
 
             // 3.2.1. Let `value` be `tabularDataItem[index]`
-            Value value = TRY(array.get(key));
+            Value value = TRY(array_like.get(key));
 
             // 3.2.2. If `properties` is not empty and `properties` does not contain `index`, continue
             if (properties.size() > 0 && !properties.contains(key)) {
@@ -205,11 +208,9 @@ static ThrowCompletionOr<GC::Ref<Object>> create_table_row(Realm& realm, Value r
         }
     }
     // 4. Otherwise, if `tabularDataItem` is a map, then:
-    else if (tabular_data_item.is_object()) {
-        auto& object = tabular_data_item.as_object();
-
+    else if (auto object = tabular_data_item.as_if<Object>()) {
         // 4.1. For each `key` -> `value` of `tabularDataItem`
-        object.enumerate_object_properties([&](Value key_v) -> Optional<Completion> {
+        object->enumerate_object_properties([&](Value key_v) -> Optional<Completion> {
             auto key = TRY(PropertyKey::from_value(vm, key_v));
 
             // 4.1.1. If `properties` is not empty and `properties` does not contain `key`, continue
@@ -218,7 +219,7 @@ static ThrowCompletionOr<GC::Ref<Object>> create_table_row(Realm& realm, Value r
             }
 
             // 4.1.2. Set `row[key]` to `value`
-            TRY(row->set(key, TRY(object.get(key)), Object::ShouldThrowExceptions::No));
+            TRY(row->set(key, TRY(object->get(key)), Object::ShouldThrowExceptions::No));
 
             // 4.1.3. If `finalColumns` does not contain `key`, append `key` to `finalColumns`
             add_column(key);
@@ -255,11 +256,12 @@ ThrowCompletionOr<Value> Console::table()
         HashMap<PropertyKey, bool> properties;
 
         if (TRY(properties_arg.is_array(vm))) {
-            auto& properties_array = properties_arg.as_array().indexed_properties();
-            auto* properties_storage = properties_array.storage();
-            for (auto const& col : properties_array) {
-                auto col_name = properties_storage->get(col.index()).value().value;
-                properties.set(TRY(PropertyKey::from_value(vm, col_name)), true);
+            auto& properties_arr = properties_arg.as_object();
+            auto properties_length = TRY(length_of_array_like(vm, properties_arr));
+            for (size_t index = 0; index < properties_length; ++index) {
+                auto value = TRY(properties_arr.get(index));
+                if (!value.is_undefined())
+                    properties.set(TRY(PropertyKey::from_value(vm, value)), true);
             }
         }
 
@@ -273,17 +275,17 @@ ThrowCompletionOr<Value> Console::table()
 
         // 3. If `tabularData` is a list, then:
         if (TRY(tabular_data.is_array(vm))) {
-            auto& array = tabular_data.as_array();
+            auto& array_like = tabular_data.as_object();
 
             // 3.1. Let `indices` be get the indices of `tabularData`
-            auto& indices = array.indexed_properties();
+            auto length = TRY(length_of_array_like(vm, array_like));
 
             // 3.2. For each `index` of `indices`
-            for (auto const& prop : indices) {
-                PropertyKey index(prop.index());
+            for (size_t idx = 0; idx < length; ++idx) {
+                PropertyKey index(idx);
 
                 // 3.2.1. Let `value` be `tabularData[index]`
-                Value value = TRY(array.get(index));
+                Value value = TRY(array_like.get(index));
 
                 // 3.2.2. Perform create table row with `value`, `key`, `finalColumns`, and `properties` that returns `row`
                 auto row = TRY(create_table_row(realm(), Value(index.as_number()), value, final_columns, visited_columns, properties));
@@ -294,13 +296,11 @@ ThrowCompletionOr<Value> Console::table()
 
         }
         // 4. Otherwise, if `tabularData` is a map, then:
-        else if (tabular_data.is_object()) {
-            auto& object = tabular_data.as_object();
-
+        else if (auto object = tabular_data.as_if<Object>()) {
             // 4.1. For each `key` -> `value` of `tabularData`
-            object.enumerate_object_properties([&](Value key) -> Optional<Completion> {
+            object->enumerate_object_properties([&](Value key) -> Optional<Completion> {
                 auto index = TRY(PropertyKey::from_value(vm, key));
-                auto value = TRY(object.get(index));
+                auto value = TRY(object->get(index));
 
                 // 4.1.1. Perform create table row with `key`, `value`, `finalColumns`, and `properties` that returns `row`
                 auto row = TRY(create_table_row(realm(), key, value, final_columns, visited_columns, properties));
@@ -347,13 +347,28 @@ ThrowCompletionOr<Value> Console::trace()
 
     // 1. Let trace be some implementation-defined, potentially-interactive representation of the callstack from where this function was called.
     Console::Trace trace;
-    auto& execution_context_stack = vm.execution_context_stack();
-    // NOTE: -2 to skip the console.trace() execution context
-    for (ssize_t i = execution_context_stack.size() - 2; i >= 0; --i) {
-        auto function_name = execution_context_stack[i]->function ? execution_context_stack[i]->function->name_for_call_stack() : ""_utf16;
-        trace.stack.append(function_name.is_empty()
-                ? "<anonymous>"_string
-                : function_name.to_utf8());
+    auto stack_trace = vm.stack_trace();
+
+    // NOTE: Skip the first frame (console.trace() itself)
+    for (size_t i = 1; i < stack_trace.size(); ++i) {
+        auto const& element = stack_trace[i];
+        auto* context = element.execution_context;
+
+        Console::TraceFrame frame;
+
+        auto function_name = (context && context->function) ? context->function->name_for_call_stack() : ""_utf16;
+        frame.function_name = function_name.is_empty() ? "<anonymous>"_string : function_name.to_utf8();
+
+        if (element.source_range.has_value()) {
+            auto const& source_range = *element.source_range;
+            if (!source_range.filename().is_empty()) {
+                frame.source_file = MUST(String::from_byte_string(source_range.filename()));
+                frame.line = source_range.start.line;
+                frame.column = source_range.start.column;
+            }
+        }
+
+        trace.stack.append(move(frame));
     }
 
     // 2. Optionally, let formattedData be the result of Formatter(data), and incorporate formattedData as a label for trace.
@@ -504,8 +519,12 @@ ThrowCompletionOr<Value> Console::group()
     String group_label {};
     auto data = vm_arguments();
     if (!data.is_empty()) {
-        auto formatted_data = TRY(m_client->formatter(data));
-        group_label = TRY(value_vector_to_string(formatted_data));
+        if (m_client) {
+            auto formatted_data = TRY(m_client->formatter(data));
+            group_label = TRY(value_vector_to_string(formatted_data));
+        } else {
+            group_label = TRY(value_vector_to_string(data));
+        }
     }
     // ... Otherwise, let groupLabel be an implementation-chosen label representing a group.
     else {
@@ -538,8 +557,12 @@ ThrowCompletionOr<Value> Console::group_collapsed()
     String group_label {};
     auto data = vm_arguments();
     if (!data.is_empty()) {
-        auto formatted_data = TRY(m_client->formatter(data));
-        group_label = TRY(value_vector_to_string(formatted_data));
+        if (m_client) {
+            auto formatted_data = TRY(m_client->formatter(data));
+            group_label = TRY(value_vector_to_string(formatted_data));
+        } else {
+            group_label = TRY(value_vector_to_string(data));
+        }
     }
     // ... Otherwise, let groupLabel be an implementation-chosen label representing a group.
     else {
@@ -730,10 +753,10 @@ void Console::output_debug_message(LogLevel log_level, StringView output) const
     }
 }
 
-void Console::report_exception(JS::Error const& exception, bool in_promise) const
+void Console::report_exception(String const& name, String const& message, JS::ErrorData const& error_data, bool in_promise) const
 {
     if (m_client)
-        m_client->report_exception(exception, in_promise);
+        m_client->report_exception(name, message, error_data, in_promise);
 }
 
 ThrowCompletionOr<String> Console::value_vector_to_string(GC::RootVector<Value> const& values)

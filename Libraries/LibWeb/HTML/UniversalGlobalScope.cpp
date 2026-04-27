@@ -144,7 +144,7 @@ GC::Ref<WebIDL::CallbackType> UniversalGlobalScopeMixin::byte_length_queuing_str
         };
 
         // 2. Let F be ! CreateBuiltinFunction(steps, 1, "size", « », globalObject’s relevant Realm).
-        auto function = JS::NativeFunction::create(realm, move(steps), 1, "size"_utf16_fly_string, &realm);
+        auto function = JS::NativeFunction::create(realm, Function<JS::ThrowCompletionOr<JS::Value>(JS::VM&)> { move(steps) }, 1, "size"_utf16_fly_string, &realm);
 
         // 3. Set globalObject’s byte length queuing strategy size function to a Function that represents a reference to F, with callback context equal to globalObject’s relevant settings object.
         // FIXME: Update spec comment to pass globalObject's relevant realm once Streams spec is updated for ShadowRealm spec
@@ -185,8 +185,6 @@ bool UniversalGlobalScopeMixin::remove_from_about_to_be_notified_rejected_promis
 // https://html.spec.whatwg.org/multipage/webappapis.html#notify-about-rejected-promises
 void UniversalGlobalScopeMixin::notify_about_rejected_promises(Badge<EventLoop>)
 {
-    auto& realm = this_impl().realm();
-
     // 1. Let list be a copy of settings object's about-to-be-notified rejected promises list.
     auto list = m_about_to_be_notified_rejected_promises_list;
 
@@ -201,7 +199,7 @@ void UniversalGlobalScopeMixin::notify_about_rejected_promises(Badge<EventLoop>)
     auto& global = this_impl();
 
     // 5. Queue a global task on the DOM manipulation task source given global to run the following substep:
-    queue_global_task(Task::Source::DOMManipulation, global, GC::create_function(realm.heap(), [this, &global, list = move(list)] {
+    queue_global_task(Task::Source::DOMManipulation, global, GC::create_function(global.heap(), [this, &global, list = move(list)] {
         auto& realm = global.realm();
 
         // 1. For each promise p in list:
@@ -240,6 +238,18 @@ void UniversalGlobalScopeMixin::notify_about_rejected_promises(Badge<EventLoop>)
                 HTML::report_exception_to_console(promise->result(), realm, ErrorInPromise::Yes);
         }
     }));
+}
+
+static bool s_experimental_interfaces_exposed = false;
+
+void UniversalGlobalScopeMixin::set_experimental_interfaces_exposed(bool exposed)
+{
+    s_experimental_interfaces_exposed = exposed;
+}
+
+bool UniversalGlobalScopeMixin::expose_experimental_interfaces()
+{
+    return s_experimental_interfaces_exposed;
 }
 
 }

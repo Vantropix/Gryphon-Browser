@@ -11,11 +11,12 @@
 #include <AK/String.h>
 #include <AK/Tuple.h>
 #include <LibJS/Heap/Cell.h>
-#include <LibWeb/Bindings/NavigationPrototype.h>
+#include <LibWeb/Bindings/Navigation.h>
 #include <LibWeb/DOM/DocumentLoadEventDelayer.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/ActivateTab.h>
+#include <LibWeb/HTML/DocumentState.h>
 #include <LibWeb/HTML/HistoryHandlingBehavior.h>
 #include <LibWeb/HTML/InitialInsertion.h>
 #include <LibWeb/HTML/NavigationObserver.h>
@@ -35,6 +36,16 @@
 
 namespace Web::HTML {
 
+struct PopulateSessionHistoryEntryDocumentOutput;
+
+enum class HistoryStepResult {
+    InitiatorDisallowed,
+    CanceledByBeforeUnload,
+    CanceledByNavigate,
+    Applied,
+};
+using OnApplyHistoryStepComplete = GC::Function<void(HistoryStepResult)>;
+
 // https://html.spec.whatwg.org/multipage/browsing-the-web.html#target-snapshot-params
 struct TargetSnapshotParams {
     SandboxingFlagSet sandboxing_flags {};
@@ -46,12 +57,14 @@ class WEB_API Navigable : public JS::Cell {
     GC_DECLARE_ALLOCATOR(Navigable);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~Navigable() override;
 
     using NullOrError = Optional<String>;
     using NavigationParamsVariant = Variant<NullOrError, GC::Ref<NavigationParams>, GC::Ref<NonFetchSchemeNavigationParams>>;
 
-    ErrorOr<void> initialize_navigable(GC::Ref<DocumentState> document_state, GC::Ptr<Navigable> parent);
+    void initialize_navigable(NonnullRefPtr<DocumentState> document_state, GC::Ptr<Navigable> parent, GC::Ref<DOM::Document> document);
 
     void register_navigation_observer(Badge<NavigationObserver>, NavigationObserver&);
     void unregister_navigation_observer(Badge<NavigationObserver>, NavigationObserver&);
@@ -73,21 +86,26 @@ public:
     void set_delaying_load_events(bool value);
     bool is_delaying_load_events() const { return m_delaying_the_load_event.has_value(); }
 
-    GC::Ptr<SessionHistoryEntry> active_session_history_entry() const { return m_active_session_history_entry; }
-    void set_active_session_history_entry(GC::Ptr<SessionHistoryEntry> entry) { m_active_session_history_entry = entry; }
-    GC::Ptr<SessionHistoryEntry> current_session_history_entry() const { return m_current_session_history_entry; }
-    void set_current_session_history_entry(GC::Ptr<SessionHistoryEntry> entry) { m_current_session_history_entry = entry; }
+    void set_navigation_load_event_guard(DOM::Document& parent_doc);
+    void clear_navigation_load_event_guard();
 
-    Vector<GC::Ref<SessionHistoryEntry>>& get_session_history_entries() const;
+    RefPtr<SessionHistoryEntry> active_session_history_entry() const;
+    void set_active_session_history_entry(RefPtr<SessionHistoryEntry>);
+    RefPtr<SessionHistoryEntry> current_session_history_entry() const;
+    void set_current_session_history_entry(RefPtr<SessionHistoryEntry>);
 
-    void activate_history_entry(GC::Ptr<SessionHistoryEntry>);
+    Vector<NonnullRefPtr<SessionHistoryEntry>>& get_session_history_entries() const;
+
+    void activate_history_entry(RefPtr<SessionHistoryEntry>, GC::Ref<DOM::Document>);
 
     GC::Ptr<DOM::Document> active_document() const;
+    Optional<UniqueNodeID> active_document_id() const;
+    void set_active_document(GC::Ptr<DOM::Document>);
     GC::Ptr<BrowsingContext> active_browsing_context();
     GC::Ptr<WindowProxy> active_window_proxy();
     GC::Ptr<Window> active_window();
 
-    GC::Ptr<SessionHistoryEntry> get_the_target_history_entry(int target_step) const;
+    RefPtr<SessionHistoryEntry> get_the_target_history_entry(int target_step) const;
 
     String target_name() const;
 
@@ -110,8 +128,6 @@ public:
 
     GC::Ptr<Navigable> find_a_navigable_by_target_name(StringView name);
 
-    static GC::Ptr<Navigable> navigable_with_active_document(GC::Ref<DOM::Document>);
-
     enum class Traversal {
         Tag
     };
@@ -120,16 +136,25 @@ public:
     void set_ongoing_navigation(Variant<Empty, Traversal, String> ongoing_navigation);
 
     void populate_session_history_entry_document(
-        GC::Ptr<SessionHistoryEntry> entry,
-        SourceSnapshotParams const& source_snapshot_params,
+        URL::URL url,
+        Variant<Empty, String, POSTResource> document_resource,
+        Fetch::Infrastructure::Request::ReferrerType request_referrer,
+        ReferrerPolicy::ReferrerPolicy request_referrer_policy,
+        Optional<URL::Origin> initiator_origin,
+        Optional<URL::Origin> origin,
+        Variant<SerializedPolicyContainer, DocumentState::Client> history_policy_container,
+        Optional<URL::URL> about_base_url,
+        String navigable_target_name,
+        bool reload_pending,
+        bool ever_populated,
+        GC::Ref<SourceSnapshotParams> source_snapshot_params,
         TargetSnapshotParams const& target_snapshot_params,
         UserNavigationInvolvement user_involvement,
-        NonnullRefPtr<Core::Promise<Empty>> signal_to_continue_session_history_processing,
-        Optional<String> navigation_id = {},
-        NavigationParamsVariant navigation_params = Navigable::NullOrError {},
-        ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type = ContentSecurityPolicy::Directives::Directive::NavigationType::Other,
-        bool allow_POST = false,
-        GC::Ptr<GC::Function<void()>> completion_steps = {});
+        Optional<String> navigation_id,
+        NavigationParamsVariant navigation_params,
+        ContentSecurityPolicy::Directives::Directive::NavigationType csp_navigation_type,
+        bool allow_POST,
+        GC::Ptr<GC::Function<void(GC::Ptr<PopulateSessionHistoryEntryDocumentOutput>)>> completion_steps);
 
     struct NavigateParams {
         URL::URL url;
@@ -155,11 +180,12 @@ public:
 
     bool allowed_by_sandboxing_to_navigate(Navigable const& target, SourceSnapshotParams const&);
 
-    void reload(UserNavigationInvolvement = UserNavigationInvolvement::None);
+    void reload(Optional<SerializationRecord> navigation_api_state = {}, UserNavigationInvolvement = UserNavigationInvolvement::None);
 
     // https://github.com/whatwg/html/issues/9690
     [[nodiscard]] bool has_been_destroyed() const { return m_has_been_destroyed; }
-    void set_has_been_destroyed() { m_has_been_destroyed = true; }
+    void set_has_been_destroyed();
+    void remove_from_all_navigables();
 
     CSSPixelPoint to_top_level_position(CSSPixelPoint);
     CSSPixelRect to_top_level_rect(CSSPixelRect const&);
@@ -167,8 +193,11 @@ public:
     CSSPixelPoint viewport_scroll_offset() const { return m_viewport_scroll_offset; }
     CSSPixelRect viewport_rect() const { return { m_viewport_scroll_offset, m_viewport_size }; }
     CSSPixelSize viewport_size() const { return m_viewport_size; }
-    void set_viewport_size(CSSPixelSize);
-    void perform_scroll_of_viewport(CSSPixelPoint position);
+    void set_viewport_size(CSSPixelSize, InvalidateDisplayList = InvalidateDisplayList::No);
+    void perform_scroll_of_viewport_scrolling_box(CSSPixelPoint position);
+    void clamp_viewport_scroll_offset();
+
+    Painting::BackingStoreManager& backing_store_manager() { return *m_backing_store_manager; }
 
     // https://html.spec.whatwg.org/multipage/webappapis.html#rendering-opportunity
     [[nodiscard]] bool has_a_rendering_opportunity() const;
@@ -196,18 +225,21 @@ public:
     void inform_the_navigation_api_about_child_navigable_destruction();
 
     bool has_pending_navigations() const { return !m_pending_navigations.is_empty(); }
+    void clear_pending_navigations() { m_pending_navigations.clear(); }
 
-    bool is_ready_to_paint() const;
     void ready_to_paint();
+    void record_display_list_and_scroll_state(PaintConfig);
     void paint_next_frame();
-    void start_display_list_rendering(Gfx::PaintingSurface&, PaintConfig, Function<void()>&& callback);
+    void render_screenshot(Gfx::PaintingSurface&, PaintConfig, Function<void()>&& callback);
 
     bool needs_repaint() const { return m_needs_repaint; }
     void set_needs_repaint() { m_needs_repaint = true; }
 
     [[nodiscard]] bool has_inclusive_ancestor_with_visibility_hidden() const;
 
-    RefPtr<Gfx::SkiaBackendContext> skia_backend_context() const;
+    RenderingThread& rendering_thread() { return m_rendering_thread; }
+
+    NonnullRefPtr<Painting::ExternalContentSource> external_content_source() const;
 
     void set_pending_set_browser_zoom_request(bool value) { m_pending_set_browser_zoom_request = value; }
     bool pending_set_browser_zoom_request() const { return m_pending_set_browser_zoom_request; }
@@ -219,8 +251,8 @@ public:
     template<typename T>
     bool fast_is() const = delete;
 
-    void scroll_viewport_by_delta_without_promise(CSSPixelPoint delta);
     GC::Ref<WebIDL::Promise> scroll_viewport_by_delta(CSSPixelPoint delta);
+    GC::Ref<WebIDL::Promise> perform_a_scroll_of_the_viewport(CSSPixelPoint position);
     void reset_zoom();
 
 protected:
@@ -250,16 +282,23 @@ private:
     GC::Ptr<Navigable> m_parent;
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#nav-current-history-entry
-    GC::Ptr<SessionHistoryEntry> m_current_session_history_entry;
+    RefPtr<SessionHistoryEntry> m_current_session_history_entry;
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#nav-active-history-entry
-    GC::Ptr<SessionHistoryEntry> m_active_session_history_entry;
+    RefPtr<SessionHistoryEntry> m_active_session_history_entry;
+
+    // AD-HOC: Direct reference to the active document, decoupled from session history.
+    //         This is the authoritative source for active_document().
+    GC::Ptr<DOM::Document> m_active_document;
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#is-closing
     bool m_closing { false };
 
     // https://html.spec.whatwg.org/multipage/document-sequences.html#delaying-load-events-mode
     Optional<DOM::DocumentLoadEventDelayer> m_delaying_the_load_event;
+
+    // AD-HOC: Guards the parent document's load event delay count during cross-document navigation.
+    Optional<DOM::DocumentLoadEventDelayer> m_navigation_load_event_guard;
 
     // Implied link between navigable and its container.
     GC::Ptr<NavigableContainer> m_container;
@@ -283,16 +322,36 @@ private:
     bool m_needs_repaint { true };
     bool m_pending_set_browser_zoom_request { false };
     bool m_should_show_line_box_borders { false };
-    i32 m_number_of_queued_rasterization_tasks { 0 };
     GC::Ref<Painting::BackingStoreManager> m_backing_store_manager;
-    RefPtr<Gfx::SkiaBackendContext> m_skia_backend_context;
     RenderingThread m_rendering_thread;
+    RefPtr<Painting::ExternalContentSource> m_external_content_source;
+};
+
+struct PopulateSessionHistoryEntryDocumentOutput final : public JS::Cell {
+    GC_CELL(PopulateSessionHistoryEntryDocumentOutput, JS::Cell);
+    GC_DECLARE_ALLOCATOR(PopulateSessionHistoryEntryDocumentOutput);
+
+public:
+    GC::Ptr<DOM::Document> document;
+
+    Navigable::NavigationParamsVariant navigation_params { Navigable::NullOrError {} };
+    bool save_extra_document_state = true;
+
+    Optional<URL::URL> redirected_url;
+    Optional<SerializationRecord> classic_history_api_state;
+    RefPtr<DocumentState> replacement_document_state;
+    bool resource_cleared = false;
+
+    void apply_to(NonnullRefPtr<SessionHistoryEntry> entry);
+
+private:
+    virtual void visit_edges(Cell::Visitor&) override;
 };
 
 WEB_API HashTable<GC::RawRef<Navigable>>& all_navigables();
 
 bool navigation_must_be_a_replace(URL::URL const& url, DOM::Document const& document);
-void finalize_a_cross_document_navigation(GC::Ref<Navigable>, HistoryHandlingBehavior, UserNavigationInvolvement, GC::Ref<SessionHistoryEntry>);
+void finalize_a_cross_document_navigation(GC::Ref<Navigable>, HistoryHandlingBehavior, UserNavigationInvolvement, NonnullRefPtr<SessionHistoryEntry>, GC::Ptr<DOM::Document> pending_document, GC::Ref<OnApplyHistoryStepComplete> on_complete);
 void perform_url_and_history_update_steps(DOM::Document& document, URL::URL new_url, Optional<SerializationRecord> = {}, HistoryHandlingBehavior history_handling = HistoryHandlingBehavior::Replace);
 
 }

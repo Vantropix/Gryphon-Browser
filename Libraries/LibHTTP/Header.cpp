@@ -1,10 +1,13 @@
 /*
  * Copyright (c) 2024, Andreas Kling <andreas@ladybird.org>
  * Copyright (c) 2022-2023, Linus Groh <linusg@serenityos.org>
+ * Copyright (c) 2026, Shannon Booth <shannon@serenityos.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <AK/AllOf.h>
+#include <AK/AnyOf.h>
 #include <AK/GenericLexer.h>
 #include <AK/QuickSort.h>
 #include <LibHTTP/HTTP.h>
@@ -12,7 +15,6 @@
 #include <LibHTTP/Method.h>
 #include <LibIPC/Decoder.h>
 #include <LibIPC/Encoder.h>
-#include <LibRegex/Regex.h>
 #include <LibTextCodec/Decoder.h>
 #include <LibTextCodec/Encoder.h>
 
@@ -23,29 +25,57 @@ Header Header::isomorphic_encode(StringView name, StringView value)
     return { TextCodec::isomorphic_encode(name), TextCodec::isomorphic_encode(value) };
 }
 
+// https://www.rfc-editor.org/rfc/rfc9110.html#name-recipient-requirements
+static Optional<Vector<ByteString>> extract_token_headers(ByteString const& value)
+{
+    Vector<ByteString> result;
+    for (auto& part : value.split(',', SplitBehavior::Nothing)) {
+        auto trimmed = part.trim(HTTP_WHITESPACE, TrimMode::Both);
+        if (trimmed.is_empty())
+            continue;
+        if (!is_header_name(trimmed))
+            return {};
+        result.append(move(trimmed));
+    }
+    return result;
+}
+
 // https://fetch.spec.whatwg.org/#extract-header-values
 Optional<Vector<ByteString>> Header::extract_header_values() const
 {
-    // FIXME: 1. If parsing header’s value, per the ABNF for header’s name, fails, then return failure.
-    // FIXME: 2. Return one or more values resulting from parsing header’s value, per the ABNF for header’s name.
+    // NB: There is some specification work to try and rework this function, see: https://github.com/whatwg/fetch/issues/814
 
-    // For now we only parse some headers that are of the ABNF list form "#something"
+    // 1. If parsing header’s value, per the ABNF for header’s name, fails, then return failure.
+    // 2. Return one or more values resulting from parsing header’s value, per the ABNF for header’s name.
+
+    // ABNF taken from:
+    //  * https://fetch.spec.whatwg.org/#http-new-header-syntax
+    //  * https://httpwg.org/specs/rfc9110.html#field.accept-ranges
+
+    // Access-Control-Expose-Headers = #field-name (field-name = token)
+    // Access-Control-Allow-Headers  = #field-name (field-name = token)
+    // Access-Control-Allow-Methods  = #method     (method = token)
     if (name.is_one_of_ignoring_ascii_case(
-            "Access-Control-Request-Headers"sv,
             "Access-Control-Expose-Headers"sv,
             "Access-Control-Allow-Headers"sv,
-            "Access-Control-Allow-Methods"sv)
-        && !value.is_empty()) {
-        Vector<ByteString> trimmed_values;
-
-        value.view().for_each_split_view(',', SplitBehavior::Nothing, [&](auto value) {
-            trimmed_values.append(value.trim(" \t"sv));
-        });
-
-        return trimmed_values;
+            "Access-Control-Allow-Methods"sv)) {
+        return extract_token_headers(value);
     }
 
-    // This always ignores the ABNF rules for now and returns the header value as a single list item.
+    // Access-Control-Request-Headers = 1#field-name      (field-name = token)
+    // Accept-Ranges                  = acceptable-ranges (acceptable-ranges = 1#range-unit, range-unit = token)
+    if (name.is_one_of_ignoring_ascii_case(
+            "Access-Control-Request-Headers"sv,
+            "Accept-Ranges"sv)) {
+        if (auto headers = extract_token_headers(value); headers.has_value()) {
+            if (headers->is_empty())
+                return {};
+            return headers;
+        }
+        return {};
+    }
+
+    // FIXME: What other headers should we handle here (or elsewhere?)
     return Vector { value };
 }
 
@@ -53,8 +83,7 @@ Optional<Vector<ByteString>> Header::extract_header_values() const
 bool is_header_name(StringView header_name)
 {
     // A header name is a byte sequence that matches the field-name token production.
-    Regex<ECMA262Parser> regex { R"~~~(^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$)~~~" };
-    return regex.has_match(header_name);
+    return !header_name.is_empty() && all_of(header_name, is_http_token_code_point);
 }
 
 // https://fetch.spec.whatwg.org/#header-value
@@ -78,7 +107,7 @@ bool is_header_value(StringView header_value)
 }
 
 // https://fetch.spec.whatwg.org/#concept-header-value-normalize
-ByteString normalize_header_value(StringView potential_value)
+StringView normalize_header_value(StringView potential_value)
 {
     // To normalize a byte sequence potentialValue, remove any leading and trailing HTTP whitespace bytes from
     // potentialValue.
@@ -216,7 +245,7 @@ Vector<String> get_decode_and_split_header_value(StringView value)
 Vector<ByteString> convert_header_names_to_a_sorted_lowercase_set(ReadonlySpan<ByteString> header_names)
 {
     // 1. Let headerNamesSet be a new ordered set.
-    HashTable<StringView, CaseInsensitiveStringTraits> header_names_seen;
+    HashTable<StringView, CaseInsensitiveASCIIStringTraits> header_names_seen;
     Vector<ByteString> header_names_set;
 
     // 2. For each name of headerNames, append the result of byte-lowercasing name to headerNamesSet.

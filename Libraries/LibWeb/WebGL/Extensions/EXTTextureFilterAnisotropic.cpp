@@ -5,25 +5,25 @@
  */
 
 #include <LibJS/Runtime/Realm.h>
-#include <LibWeb/Bindings/EXTTextureFilterAnisotropicPrototype.h>
+#include <LibWeb/Bindings/EXTTextureFilterAnisotropic.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/WebGL/Extensions/EXTTextureFilterAnisotropic.h>
 #include <LibWeb/WebGL/OpenGLContext.h>
+#include <LibWeb/WebGL/WebGLRenderingContextBase.h>
 
-namespace Web::WebGL::Extensions {
+namespace Web::WebGL {
 
 GC_DEFINE_ALLOCATOR(EXTTextureFilterAnisotropic);
 
-JS::ThrowCompletionOr<GC::Ptr<EXTTextureFilterAnisotropic>> EXTTextureFilterAnisotropic::create(JS::Realm& realm, WebGLRenderingContextBase* context)
+JS::ThrowCompletionOr<GC::Ref<JS::Object>> EXTTextureFilterAnisotropic::create(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase> context)
 {
     return realm.create<EXTTextureFilterAnisotropic>(realm, context);
 }
 
-EXTTextureFilterAnisotropic::EXTTextureFilterAnisotropic(JS::Realm& realm, WebGLRenderingContextBase* context)
+EXTTextureFilterAnisotropic::EXTTextureFilterAnisotropic(JS::Realm& realm, GC::Ref<WebGLRenderingContextBase> context)
     : PlatformObject(realm)
     , m_context(context)
 {
-    m_context->context().request_extension("GL_EXT_texture_filter_anisotropic");
 }
 
 void EXTTextureFilterAnisotropic::initialize(JS::Realm& realm)
@@ -35,7 +35,7 @@ void EXTTextureFilterAnisotropic::initialize(JS::Realm& realm)
 void EXTTextureFilterAnisotropic::visit_edges(Visitor& visitor)
 {
     Base::visit_edges(visitor);
-    visitor.visit(m_context->gc_cell());
+    visitor.visit(m_context);
 }
 
 }

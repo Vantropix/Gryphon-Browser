@@ -19,13 +19,14 @@
 #include <AK/Tuple.h>
 #include <LibCore/DirIterator.h>
 #include <LibCore/File.h>
-#include <LibJS/Bytecode/Interpreter.h>
-#include <LibJS/Lexer.h>
-#include <LibJS/Parser.h>
+#include <LibJS/ParserError.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/GlobalObject.h>
 #include <LibJS/Runtime/JSONObject.h>
+#include <LibJS/Runtime/Reference.h>
 #include <LibJS/Runtime/TypedArray.h>
+#include <LibJS/Runtime/VM.h>
+#include <LibJS/Runtime/ValueInlines.h>
 #include <LibJS/Runtime/WeakMap.h>
 #include <LibJS/Runtime/WeakSet.h>
 #include <LibJS/Script.h>
@@ -168,6 +169,7 @@ protected:
 
 class TestRunnerGlobalObject final : public JS::GlobalObject {
     JS_OBJECT(TestRunnerGlobalObject, JS::GlobalObject);
+    GC_DECLARE_ALLOCATOR(TestRunnerGlobalObject);
 
 public:
     TestRunnerGlobalObject(JS::Realm& realm)
@@ -176,6 +178,10 @@ public:
     }
     virtual void initialize(JS::Realm&) override;
     virtual ~TestRunnerGlobalObject() override = default;
+
+    JS_DECLARE_NATIVE_FUNCTION(report_test);
+
+    Function<void(String, JS::Value)> on_test_reported;
 };
 
 inline void TestRunnerGlobalObject::initialize(JS::Realm& realm)
@@ -183,6 +189,7 @@ inline void TestRunnerGlobalObject::initialize(JS::Realm& realm)
     Base::initialize(realm);
 
     define_direct_property("global"_utf16_fly_string, this, JS::Attribute::Enumerable);
+    define_native_function(realm, "__reportTest__"_utf16, report_test, 2, JS::default_attributes);
     for (auto& entry : s_exposed_global_functions) {
         define_native_function(
             realm,
@@ -192,6 +199,19 @@ inline void TestRunnerGlobalObject::initialize(JS::Realm& realm)
             },
             entry.value.length, JS::default_attributes);
     }
+}
+
+inline JS_DEFINE_NATIVE_FUNCTION(TestRunnerGlobalObject::report_test)
+{
+    auto const& self = as<TestRunnerGlobalObject>(vm.get_global_object());
+    if (!self.on_test_reported)
+        return JS::js_undefined();
+
+    auto test_name_value = vm.argument(0);
+    auto test_name = TRY(test_name_value.to_string(vm));
+    auto state_value = vm.argument(1);
+    self.on_test_reported(test_name, state_value);
+    return JS::js_undefined();
 }
 
 inline ByteBuffer load_entire_file(StringView path)
@@ -270,6 +290,34 @@ inline Vector<ByteString> TestRunner::get_test_paths() const
     return paths;
 }
 
+inline void print_test_timings(String test_name, JS::Value state_value)
+{
+    if (state_value.is_string()) {
+        auto state_string = state_value.as_string().utf8_string();
+        if (state_string == "pass"sv) {
+            print_modifiers({ FG_BOLD });
+            out("Finished: ");
+            print_modifiers({ CLEAR });
+            outln("{} (PASS)", test_name);
+        } else if (state_string == "fail"sv) {
+            print_modifiers({ FG_RED, FG_BOLD });
+            out("Finished: ");
+            print_modifiers({ CLEAR });
+            outln("{} (FAIL)", test_name);
+        } else if (state_string == "xfail"sv) {
+            print_modifiers({ FG_ORANGE, FG_BOLD });
+            out("Finished: ");
+            print_modifiers({ CLEAR });
+            outln("{} (XFAIL)", test_name);
+        } else if (state_string == "start"sv) {
+            print_modifiers({ BG_GREEN, FG_ORANGE });
+            out("Running: ");
+            print_modifiers({ CLEAR });
+            outln("{}", test_name);
+        }
+    }
+}
+
 inline JSFileResult TestRunner::run_file_test(ByteString const& test_path)
 {
     g_currently_running_test = test_path;
@@ -283,6 +331,9 @@ inline JSFileResult TestRunner::run_file_test(ByteString const& test_path)
         [&](JS::Realm& realm_) -> JS::GlobalObject* {
             realm = &realm_;
             global_object = realm->create<TestRunnerGlobalObject>(*realm);
+            if (this->needs_timings()) {
+                global_object->on_test_reported = print_test_timings;
+            }
             return global_object;
         },
         nullptr));
@@ -338,15 +389,18 @@ inline JSFileResult TestRunner::run_file_test(ByteString const& test_path)
     auto test_script = result.release_value();
 
     g_vm->push_execution_context(global_execution_context);
-    MUST(g_vm->bytecode_interpreter().run(*test_script));
+    MUST(g_vm->run(*test_script));
     g_vm->pop_execution_context();
 
     auto file_script = parse_script(test_path, *realm);
     JS::ThrowCompletionOr<JS::Value> top_level_result { JS::js_undefined() };
-    if (file_script.is_error())
+    if (file_script.is_error()) {
+        m_counts.suites_failed++;
+        m_counts.files_total++;
         return { test_path, file_script.error() };
+    }
     g_vm->push_execution_context(global_execution_context);
-    top_level_result = g_vm->bytecode_interpreter().run(file_script.value());
+    top_level_result = g_vm->run(file_script.value());
     g_vm->pop_execution_context();
 
     g_vm->push_execution_context(global_execution_context);
@@ -362,9 +416,9 @@ inline JSFileResult TestRunner::run_file_test(ByteString const& test_path)
     // Collect logged messages
     auto user_output = MUST(realm->global_object().get("__UserOutput__"_utf16_fly_string));
 
-    auto& arr = user_output.as_array();
-    for (auto& entry : arr.indexed_properties()) {
-        auto message = MUST(arr.get(entry.index()));
+    auto& arr = user_output.as_array_exotic_object();
+    for (u32 i = 0; i < arr.indexed_array_like_size(); ++i) {
+        auto message = MUST(arr.get(i));
         file_result.logged_messages.append(message.to_string_without_side_effects().to_byte_string());
     }
 

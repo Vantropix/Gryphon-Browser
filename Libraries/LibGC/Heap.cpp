@@ -1,31 +1,39 @@
 /*
  * Copyright (c) 2020-2025, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2023, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+ * Copyright (c) 2023-2025, Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <AK/Badge.h>
+#include <AK/BinarySearch.h>
 #include <AK/Debug.h>
 #include <AK/Function.h>
 #include <AK/HashTable.h>
 #include <AK/JsonArray.h>
 #include <AK/JsonObject.h>
+#include <AK/LexicalPath.h>
 #include <AK/Platform.h>
 #include <AK/StackInfo.h>
+#include <AK/StackUnwinder.h>
 #include <AK/TemporaryChange.h>
 #include <LibCore/ElapsedTimer.h>
+#include <LibCore/File.h>
+#include <LibCore/StandardPaths.h>
 #include <LibGC/CellAllocator.h>
 #include <LibGC/Heap.h>
 #include <LibGC/HeapBlock.h>
 #include <LibGC/NanBoxedValue.h>
 #include <LibGC/Root.h>
 #include <LibGC/Weak.h>
-#include <LibGC/WeakInlines.h>
 #include <setjmp.h>
 
 #ifdef HAS_ADDRESS_SANITIZER
 #    include <sanitizer/asan_interface.h>
+#endif
+
+#ifdef LIBGC_HAS_CPPTRACE
+#    include <cpptrace/cpptrace.hpp>
 #endif
 
 namespace GC {
@@ -150,6 +158,12 @@ public:
         m_work_queue.append(cell);
     }
 
+    virtual void visit_impl(ReadonlySpan<NanBoxedValue> values) override
+    {
+        for (auto const& value : values)
+            visit(value);
+    }
+
     virtual void visit_possible_values(ReadonlyBytes bytes) override
     {
         HashMap<FlatPtr, HeapRoot> possible_pointers;
@@ -159,10 +173,13 @@ public:
             add_possible_value(possible_pointers, raw_pointer_sized_values[i], HeapRoot { .type = HeapRoot::Type::HeapFunctionCapturedPointer }, m_min_block_address, m_max_block_address);
 
         for_each_cell_among_possible_pointers(m_all_live_heap_blocks, possible_pointers, [&](Cell* cell, FlatPtr) {
+            if (cell->state() != Cell::State::Live)
+                return;
+
             if (m_node_being_visited)
                 m_node_being_visited->edges.set(reinterpret_cast<FlatPtr>(cell));
 
-            if (m_graph.get(reinterpret_cast<FlatPtr>(&cell)).has_value())
+            if (m_graph.get(reinterpret_cast<FlatPtr>(cell)).has_value())
                 return;
             m_work_queue.append(*cell);
         });
@@ -191,26 +208,41 @@ public:
             auto node = AK::JsonObject();
             if (it.value.root_origin.has_value()) {
                 auto type = it.value.root_origin->type;
-                auto location = it.value.root_origin->location;
+                auto const* location = it.value.root_origin->location;
                 switch (type) {
+                case HeapRoot::Type::ConservativeVector:
+                    node.set("root"sv, "ConservativeVector"sv);
+                    break;
+                case HeapRoot::Type::HeapFunctionCapturedPointer:
+                    node.set("root"sv, "HeapFunctionCapturedPointer"sv);
+                    break;
+                case HeapRoot::Type::MustSurviveGC:
+                    node.set("root"sv, "MustSurviveGC"sv);
+                    break;
                 case HeapRoot::Type::Root:
                     node.set("root"sv, MUST(String::formatted("Root {} {}:{}", location->function_name(), location->filename(), location->line_number())));
                     break;
                 case HeapRoot::Type::RootVector:
                     node.set("root"sv, "RootVector"sv);
                     break;
+                case HeapRoot::Type::RootHashMap:
+                    node.set("root"sv, "RootHashMap"sv);
+                    break;
                 case HeapRoot::Type::RegisterPointer:
                     node.set("root"sv, "RegisterPointer"sv);
+                    if (it.value.root_origin->stack_frame_index.has_value())
+                        node.set("stack_frame_index"sv, it.value.root_origin->stack_frame_index.value());
                     break;
                 case HeapRoot::Type::StackPointer:
                     node.set("root"sv, "StackPointer"sv);
+                    if (it.value.root_origin->stack_frame_index.has_value())
+                        node.set("stack_frame_index"sv, it.value.root_origin->stack_frame_index.value());
                     break;
                 case HeapRoot::Type::VM:
                     node.set("root"sv, "VM"sv);
                     break;
-                default:
-                    VERIFY_NOT_REACHED();
                 }
+                VERIFY(node.has("root"sv));
             }
             node.set("class_name"sv, it.value.class_name);
             node.set("edges"sv, edges);
@@ -240,10 +272,25 @@ private:
 AK::JsonObject Heap::dump_graph()
 {
     HashMap<Cell*, HeapRoot> roots;
-    gather_roots(roots);
+    HashTable<HeapBlock*> all_live_heap_blocks;
+    Vector<StackFrameInfo> stack_frames;
+    gather_roots(roots, all_live_heap_blocks, &stack_frames);
     GraphConstructorVisitor visitor(*this, roots);
     visitor.visit_all_cells();
-    return visitor.dump();
+    auto graph = visitor.dump();
+
+    if (!stack_frames.is_empty()) {
+        AK::JsonArray stack_frames_array;
+        for (auto const& frame : stack_frames) {
+            AK::JsonObject frame_object;
+            frame_object.set("label"sv, frame.label);
+            frame_object.set("size"sv, frame.size_bytes);
+            stack_frames_array.must_append(move(frame_object));
+        }
+        graph.set("stack_frames"sv, move(stack_frames_array));
+    }
+
+    return graph;
 }
 
 void Heap::collect_garbage(CollectionType collection_type, bool print_report)
@@ -263,8 +310,9 @@ void Heap::collect_garbage(CollectionType collection_type, bool print_report)
                 return;
             }
             HashMap<Cell*, HeapRoot> roots;
-            gather_roots(roots);
-            mark_live_cells(roots);
+            HashTable<HeapBlock*> all_live_heap_blocks;
+            gather_roots(roots, all_live_heap_blocks);
+            mark_live_cells(roots, all_live_heap_blocks);
         }
         finalize_unmarked_cells();
         sweep_weak_blocks();
@@ -325,10 +373,10 @@ void Heap::dump_allocators()
         total_in_committed_blocks += blocks.size() * HeapBlock::BLOCK_SIZE;
 
         StringBuilder builder;
-        if (allocator.class_name().is_null())
-            builder.appendff("generic ({}b)", allocator.cell_size());
+        if (allocator.class_name().has_value())
+            builder.appendff("{} ({}b)", allocator.class_name().value(), allocator.cell_size());
         else
-            builder.appendff("{} ({}b)", allocator.class_name(), allocator.cell_size());
+            builder.appendff("generic ({}b)", allocator.cell_size());
 
         builder.appendff(" x {}", total_live_cells);
 
@@ -357,10 +405,29 @@ void Heap::enqueue_post_gc_task(AK::Function<void()> task)
     m_post_gc_tasks.append(move(task));
 }
 
-void Heap::gather_roots(HashMap<Cell*, HeapRoot>& roots)
+void Heap::register_sweep_callback(AK::Function<void()> callback)
 {
+    m_sweep_callbacks.append(move(callback));
+}
+
+void Heap::gather_roots(HashMap<Cell*, HeapRoot>& roots, HashTable<HeapBlock*>& all_live_heap_blocks, Vector<StackFrameInfo>* out_stack_frames)
+{
+    for_each_block([&](auto& block) {
+        all_live_heap_blocks.set(&block);
+
+        if (block.overrides_must_survive_garbage_collection()) {
+            block.template for_each_cell_in_state<Cell::State::Live>([&](Cell* cell) {
+                if (cell->must_survive_garbage_collection()) {
+                    roots.set(cell, HeapRoot { .type = HeapRoot::Type::MustSurviveGC });
+                }
+            });
+        }
+
+        return IterationDecision::Continue;
+    });
+
     m_gather_embedder_roots(roots);
-    gather_conservative_roots(roots);
+    gather_conservative_roots(roots, all_live_heap_blocks, out_stack_frames);
 
     for (auto& root : m_roots)
         roots.set(root.cell(), HeapRoot { .type = HeapRoot::Type::Root, .location = &root.source_location() });
@@ -400,7 +467,7 @@ void Heap::gather_asan_fake_stack_roots(HashMap<FlatPtr, HeapRoot>&, FlatPtr, Fl
 }
 #endif
 
-NO_SANITIZE_ADDRESS void Heap::gather_conservative_roots(HashMap<Cell*, HeapRoot>& roots)
+NO_SANITIZE_ADDRESS void Heap::gather_conservative_roots(HashMap<Cell*, HeapRoot>& roots, HashTable<HeapBlock*> const& all_live_heap_blocks, Vector<StackFrameInfo>* out_stack_frames)
 {
     FlatPtr dummy;
 
@@ -420,10 +487,101 @@ NO_SANITIZE_ADDRESS void Heap::gather_conservative_roots(HashMap<Cell*, HeapRoot
         add_possible_value(possible_pointers, raw_jmp_buf[i], HeapRoot { .type = HeapRoot::Type::RegisterPointer }, min_block_address, max_block_address);
 
     auto stack_reference = bit_cast<FlatPtr>(&dummy);
+    auto stack_top = m_stack_info.top();
 
-    for (FlatPtr stack_address = stack_reference; stack_address < m_stack_info.top(); stack_address += sizeof(FlatPtr)) {
+    // Build frame boundary map for annotation if requested.
+    // Each entry maps a frame pointer address to the stack frame index in out_stack_frames.
+    struct FrameBoundary {
+        FlatPtr start;
+        u32 frame_index;
+    };
+    Vector<FrameBoundary> frame_boundaries;
+
+#ifdef LIBGC_HAS_CPPTRACE
+    if (out_stack_frames) {
+        // Walk the frame pointer chain to collect frame boundaries and return addresses.
+        Vector<FlatPtr> frame_starts;
+        std::vector<cpptrace::frame_ptr> return_addresses;
+
+        FlatPtr current_fp = bit_cast<FlatPtr>(__builtin_frame_address(0));
+        AK::unwind_stack_from_frame_pointer(
+            current_fp,
+            [&](FlatPtr address) -> Optional<FlatPtr> {
+                if (address < stack_reference || address >= stack_top)
+                    return {};
+                return *reinterpret_cast<FlatPtr*>(address);
+            },
+            [&](AK::StackFrame frame) -> IterationDecision {
+                // Ensure the previous FP is above the current one (stack grows downward).
+                if (frame.previous_frame_pointer != 0 && frame.previous_frame_pointer <= current_fp)
+                    return IterationDecision::Break;
+                frame_starts.append(current_fp);
+                return_addresses.push_back(static_cast<cpptrace::frame_ptr>(frame.return_address) - 1);
+                current_fp = frame.previous_frame_pointer;
+                return IterationDecision::Continue;
+            });
+
+        if (!frame_starts.is_empty()) {
+            auto resolved = cpptrace::raw_trace { move(return_addresses) }.resolve();
+
+            auto format_frame_label = [](cpptrace::stacktrace_frame const& frame) -> String {
+                StringBuilder label;
+                if (!frame.symbol.empty()) {
+                    label.append(StringView(frame.symbol.c_str(), frame.symbol.length()));
+                    if (frame.line.has_value()) {
+                        auto filename = StringView { frame.filename.c_str(), frame.filename.length() };
+                        auto last_slash = filename.find_last('/');
+                        if (last_slash.has_value())
+                            filename = filename.substring_view(*last_slash + 1);
+                        label.appendff(" {}:{}", filename, frame.line.value());
+                    }
+                }
+                return MUST(label.to_string());
+            };
+
+            // resolve() may expand inline frames, so there can be more resolved
+            // frames than return addresses. We want the non-inline frame for each
+            // return address, since that represents the actual function whose
+            // locals occupy the stack range.
+            frame_boundaries.ensure_capacity(frame_starts.size());
+            size_t raw_frame_index = 0;
+            for (size_t i = 0; i < resolved.frames.size() && raw_frame_index < frame_starts.size(); ++i) {
+                auto const& frame = resolved.frames[i];
+                if (frame.is_inline) {
+                    out_stack_frames->append({ .label = format_frame_label(frame) });
+                    continue;
+                }
+
+                auto frame_label_index = static_cast<u32>(out_stack_frames->size());
+                auto frame_start = frame_starts[raw_frame_index];
+                auto frame_end = frame_starts.get(raw_frame_index + 1).value_or(stack_top);
+                out_stack_frames->append({ .label = format_frame_label(frame), .size_bytes = frame_end - frame_start });
+                frame_boundaries.append({ frame_start, frame_label_index });
+                ++raw_frame_index;
+            }
+        }
+    }
+#else
+    (void)out_stack_frames;
+#endif
+
+    // Find the frame index for a given stack address. Frame boundaries are sorted ascending
+    // by start address. We want the last boundary whose start is <= the address.
+    auto frame_index_for_stack_address = [&](FlatPtr address) -> Optional<u32> {
+        if (frame_boundaries.is_empty())
+            return {};
+        if (address < frame_boundaries[0].start || address >= stack_top)
+            return {};
+        size_t nearby = 0;
+        binary_search(frame_boundaries, address, &nearby, [](FlatPtr addr, FrameBoundary const& boundary) {
+            return static_cast<int>(addr - boundary.start);
+        });
+        return frame_boundaries[nearby].frame_index;
+    };
+
+    for (FlatPtr stack_address = stack_reference; stack_address < stack_top; stack_address += sizeof(FlatPtr)) {
         auto data = *reinterpret_cast<FlatPtr*>(stack_address);
-        add_possible_value(possible_pointers, data, HeapRoot { .type = HeapRoot::Type::StackPointer }, min_block_address, max_block_address);
+        add_possible_value(possible_pointers, data, HeapRoot { .type = HeapRoot::Type::StackPointer, .stack_frame_index = frame_index_for_stack_address(stack_address) }, min_block_address, max_block_address);
         gather_asan_fake_stack_roots(possible_pointers, data, min_block_address, max_block_address);
     }
 
@@ -432,12 +590,6 @@ NO_SANITIZE_ADDRESS void Heap::gather_conservative_roots(HashMap<Cell*, HeapRoot
             add_possible_value(possible_pointers, possible_value, HeapRoot { .type = HeapRoot::Type::ConservativeVector }, min_block_address, max_block_address);
         }
     }
-
-    HashTable<HeapBlock*> all_live_heap_blocks;
-    for_each_block([&](auto& block) {
-        all_live_heap_blocks.set(&block);
-        return IterationDecision::Continue;
-    });
 
     for_each_cell_among_possible_pointers(all_live_heap_blocks, possible_pointers, [&](Cell* cell, FlatPtr possible_pointer) {
         if (cell->state() == Cell::State::Live) {
@@ -451,15 +603,11 @@ NO_SANITIZE_ADDRESS void Heap::gather_conservative_roots(HashMap<Cell*, HeapRoot
 
 class MarkingVisitor final : public Cell::Visitor {
 public:
-    explicit MarkingVisitor(Heap& heap, HashMap<Cell*, HeapRoot> const& roots)
+    explicit MarkingVisitor(Heap& heap, HashMap<Cell*, HeapRoot> const& roots, HashTable<HeapBlock*> const& all_live_heap_blocks)
         : m_heap(heap)
+        , m_all_live_heap_blocks(all_live_heap_blocks)
     {
         m_heap.find_min_and_max_block_addresses(m_min_block_address, m_max_block_address);
-        m_heap.for_each_block([&](auto& block) {
-            m_all_live_heap_blocks.set(&block);
-            return IterationDecision::Continue;
-        });
-
         for (auto* root : roots.keys()) {
             visit(root);
         }
@@ -473,6 +621,23 @@ public:
 
         cell.set_marked(true);
         m_work_queue.append(cell);
+    }
+
+    virtual void visit_impl(ReadonlySpan<NanBoxedValue> values) override
+    {
+        m_work_queue.grow_capacity(m_work_queue.size() + values.size());
+
+        for (auto value : values) {
+            if (!value.is_cell())
+                continue;
+            auto& cell = value.as_cell();
+            if (cell.is_marked())
+                continue;
+            dbgln_if(HEAP_DEBUG, "  ! {}", &cell);
+
+            cell.set_marked(true);
+            m_work_queue.unchecked_append(cell);
+        }
     }
 
     virtual void visit_possible_values(ReadonlyBytes bytes) override
@@ -503,27 +668,16 @@ public:
 private:
     Heap& m_heap;
     Vector<Ref<Cell>> m_work_queue;
-    HashTable<HeapBlock*> m_all_live_heap_blocks;
+    HashTable<HeapBlock*> const& m_all_live_heap_blocks;
     FlatPtr m_min_block_address;
     FlatPtr m_max_block_address;
 };
 
-void Heap::mark_live_cells(HashMap<Cell*, HeapRoot> const& roots)
+void Heap::mark_live_cells(HashMap<Cell*, HeapRoot> const& roots, HashTable<HeapBlock*> const& all_live_heap_blocks)
 {
     dbgln_if(HEAP_DEBUG, "mark_live_cells:");
 
-    MarkingVisitor visitor(*this, roots);
-
-    for_each_block([&](auto& block) {
-        block.template for_each_cell_in_state<Cell::State::Live>([&](Cell* cell) {
-            if (cell_must_survive_garbage_collection(*cell)) {
-                cell->set_marked(true);
-                cell->visit_edges(visitor);
-            }
-        });
-        return IterationDecision::Continue;
-    });
-
+    MarkingVisitor visitor(*this, roots, all_live_heap_blocks);
     visitor.mark_all_live_cells();
 
     for (auto& inverse_root : m_uprooted_cells)
@@ -532,16 +686,11 @@ void Heap::mark_live_cells(HashMap<Cell*, HeapRoot> const& roots)
     m_uprooted_cells.clear();
 }
 
-bool Heap::cell_must_survive_garbage_collection(Cell const& cell)
-{
-    if (!cell.overrides_must_survive_garbage_collection({}))
-        return false;
-    return cell.must_survive_garbage_collection();
-}
-
 void Heap::finalize_unmarked_cells()
 {
     for_each_block([&](auto& block) {
+        if (!block.overrides_finalize())
+            return IterationDecision::Continue;
         block.template for_each_cell_in_state<Cell::State::Live>([](Cell* cell) {
             if (!cell->is_marked())
                 cell->finalize();
@@ -602,6 +751,9 @@ void Heap::sweep_dead_cells(bool print_report, Core::ElapsedTimer const& measure
 
     for (auto& weak_container : m_weak_containers)
         weak_container.remove_dead_cells({});
+
+    for (auto& callback : m_sweep_callbacks)
+        callback();
 
     for (auto* block : empty_blocks) {
         dbgln_if(HEAP_DEBUG, " - HeapBlock empty @ {}: cell_size={}", block, block->cell_size());

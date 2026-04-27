@@ -73,7 +73,8 @@ static ThrowCompletionOr<Optional<PropertyDescriptor>> string_get_own_property(S
 
     // 6. Let str be S.[[StringData]].
     // 7. Assert: Type(str) is String.
-    auto str = string.primitive_string().utf16_string_view();
+    auto& primitive_string = string.primitive_string();
+    auto str = primitive_string.utf16_string_view();
 
     // 8. Let len be the length of str.
     auto length = str.length_in_code_units();
@@ -83,7 +84,7 @@ static ThrowCompletionOr<Optional<PropertyDescriptor>> string_get_own_property(S
         return Optional<PropertyDescriptor> {};
 
     // 10. Let resultStr be the substring of str from ℝ(index) to ℝ(index) + 1.
-    auto result_str = PrimitiveString::create(vm, str.substring_view(index.as_index(), 1));
+    auto result_str = PrimitiveString::create(vm, primitive_string, index.as_index(), 1);
 
     // 11. Return the PropertyDescriptor { [[Value]]: resultStr, [[Writable]]: false, [[Enumerable]]: true, [[Configurable]]: false }.
     return PropertyDescriptor {
@@ -117,7 +118,7 @@ ThrowCompletionOr<bool> StringObject::internal_define_own_property(PropertyKey c
     // 2. If stringDesc is not undefined, then
     if (string_descriptor.has_value()) {
         // a. Let extensible be S.[[Extensible]].
-        auto extensible = m_is_extensible;
+        auto extensible = this->extensible();
 
         // b. Return IsCompatiblePropertyDescriptor(extensible, Desc, stringDesc).
         return is_compatible_property_descriptor(extensible, property_descriptor, string_descriptor);
@@ -147,10 +148,13 @@ ThrowCompletionOr<GC::RootVector<Value>> StringObject::internal_own_property_key
     }
 
     // 6. For each own property key P of O such that P is an array index and ! ToIntegerOrInfinity(P) ≥ len, in ascending numeric index order, do
-    for (auto& entry : indexed_properties()) {
-        if (entry.index() >= length) {
-            // a. Add P as the last element of keys.
-            keys.append(PrimitiveString::create_from_unsigned_integer(vm, entry.index()));
+    {
+        auto indices = indexed_indices();
+        for (auto index : indices) {
+            if (index >= length) {
+                // a. Add P as the last element of keys.
+                keys.append(PrimitiveString::create_from_unsigned_integer(vm, index));
+            }
         }
     }
 

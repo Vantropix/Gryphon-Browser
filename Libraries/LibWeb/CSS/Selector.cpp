@@ -17,19 +17,11 @@ static bool component_value_contains_nesting_selector(Parser::ComponentValue con
     if (component_value.is_delim('&'))
         return true;
 
-    if (component_value.is_block()) {
-        for (auto const& child_value : component_value.block().value) {
-            if (component_value_contains_nesting_selector(child_value))
-                return true;
-        }
-    }
+    if (component_value.is_block())
+        return component_value.block().value.contains(component_value_contains_nesting_selector);
 
-    if (component_value.is_function()) {
-        for (auto const& child_value : component_value.function().value) {
-            if (component_value_contains_nesting_selector(child_value))
-                return true;
-        }
-    }
+    if (component_value.is_function())
+        return component_value.function().value.contains(component_value_contains_nesting_selector);
 
     return false;
 }
@@ -89,8 +81,9 @@ Selector::Selector(Vector<CompoundSelector>&& compound_selectors)
     if (!m_compound_selectors.is_empty()) {
         for (auto const& simple_selector : m_compound_selectors.last().simple_selectors) {
             if (simple_selector.type == SimpleSelector::Type::PseudoElement) {
-                m_pseudo_element = simple_selector.pseudo_element();
-                break;
+                if (simple_selector.pseudo_element().type() == PseudoElement::Part)
+                    m_contains_part_pseudo_element = true;
+                m_target_pseudo_element = simple_selector.pseudo_element();
             }
         }
     }
@@ -630,21 +623,23 @@ String Selector::serialize() const
         //    followed by the combinator ">", "+", "~", ">>", "||", as appropriate, followed by another
         //    single SPACE (U+0020) if the combinator was not whitespace, to s.
         if (i != compound_selectors().size() - 1) {
-            s.append(' ');
-            // Note: The combinator that appears between parts `i` and `i+1` appears with the `i+1` selector,
-            //       so we have to check that one.
+            // NB: The combinator that appears between parts `i` and `i+1` appears with the `i+1` selector,
+            //     so we have to check that one.
             switch (compound_selectors()[i + 1].combinator) {
-            case Selector::Combinator::ImmediateChild:
-                s.append("> "sv);
+            case Combinator::Descendant:
+                s.append(' ');
                 break;
-            case Selector::Combinator::NextSibling:
-                s.append("+ "sv);
+            case Combinator::ImmediateChild:
+                s.append(" > "sv);
                 break;
-            case Selector::Combinator::SubsequentSibling:
-                s.append("~ "sv);
+            case Combinator::NextSibling:
+                s.append(" + "sv);
                 break;
-            case Selector::Combinator::Column:
-                s.append("|| "sv);
+            case Combinator::SubsequentSibling:
+                s.append(" ~ "sv);
+                break;
+            case Combinator::Column:
+                s.append(" || "sv);
                 break;
             default:
                 break;
@@ -658,6 +653,22 @@ String Selector::serialize() const
     }
 
     return MUST(s.to_string());
+}
+
+// https://drafts.csswg.org/selectors-4/#single-colon-pseudos
+bool is_legacy_single_colon_pseudo_element(PseudoElement pseudo_element)
+{
+    // The four Level 2 pseudo-elements (::before, ::after, ::first-line, and ::first-letter) may, for legacy reasons,
+    // be written with only a single ":" character at their front, making them resemble a <pseudo-class-selector>.
+    switch (pseudo_element) {
+    case PseudoElement::After:
+    case PseudoElement::Before:
+    case PseudoElement::FirstLetter:
+    case PseudoElement::FirstLine:
+        return true;
+    default:
+        return false;
+    }
 }
 
 // https://www.w3.org/TR/cssom/#serialize-a-group-of-selectors
@@ -694,11 +705,9 @@ bool Selector::contains_unknown_webkit_pseudo_element() const
     for (auto const& compound_selector : m_compound_selectors) {
         for (auto const& simple_selector : compound_selector.simple_selectors) {
             if (simple_selector.type == SimpleSelector::Type::PseudoClass) {
-                for (auto const& child_selector : simple_selector.pseudo_class().argument_selector_list) {
-                    if (child_selector->contains_unknown_webkit_pseudo_element()) {
-                        return true;
-                    }
-                }
+                auto const& selector_list = simple_selector.pseudo_class().argument_selector_list;
+                if (selector_list.contains([](auto const& s) { return s->contains_unknown_webkit_pseudo_element(); }))
+                    return true;
             }
             if (simple_selector.type == SimpleSelector::Type::PseudoElement && simple_selector.pseudo_element().type() == PseudoElement::UnknownWebKit)
                 return true;

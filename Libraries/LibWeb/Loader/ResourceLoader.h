@@ -17,7 +17,7 @@
 #include <LibRequests/RequestTimingInfo.h>
 #include <LibURL/URL.h>
 #include <LibWeb/Forward.h>
-#include <LibWeb/Loader/UserAgent.h>
+#include <LibWeb/Loader/NavigatorCompatibilityMode.h>
 
 namespace Web {
 
@@ -26,6 +26,7 @@ class WEB_API ResourceLoader : public Core::EventReceiver {
 
 public:
     static void initialize(GC::Heap&, NonnullRefPtr<Requests::RequestClient>);
+    static bool is_initialized();
     static ResourceLoader& the();
 
     void set_client(NonnullRefPtr<Requests::RequestClient>);
@@ -34,7 +35,7 @@ public:
     using OnDataReceived = GC::Function<void(ReadonlyBytes data)>;
     using OnComplete = GC::Function<void(bool success, Requests::RequestTimingInfo const& timing_info, Optional<StringView> error_message)>;
 
-    void load(LoadRequest&, GC::Root<OnHeadersReceived>, GC::Root<OnDataReceived>, GC::Root<OnComplete>);
+    RefPtr<Requests::Request> load(LoadRequest&, GC::Root<OnHeadersReceived>, GC::Root<OnDataReceived>, GC::Root<OnComplete>);
 
     RefPtr<Requests::RequestClient>& request_client() { return m_request_client; }
 

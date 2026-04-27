@@ -18,6 +18,14 @@
 #include <AK/Vector.h>
 #include <ctype.h>
 
+TEST_CASE(short_ascii_literal_is_constexpr)
+{
+    // The _string UDL folds short ASCII literals to a compile-time constant.
+    static constexpr String s = "foo"_string;
+    EXPECT_EQ(s, "foo"sv);
+    EXPECT_EQ(s.bytes().size(), 3u);
+}
+
 TEST_CASE(construct_empty)
 {
     String empty;
@@ -193,6 +201,24 @@ TEST_CASE(with_replacement_character)
 
     auto string7 = String::from_utf8_with_replacement_character("\xED\xA0\x80WHF!"sv); // U+D800
     EXPECT_EQ(string7, "\ufffdWHF!"sv);
+}
+
+TEST_CASE(from_utf16_be_with_replacement_character)
+{
+    // UTF-16 BE for "A" is 0x00 0x41
+    Array<u8, 2> valid_be { 0x00, 0x41 };
+    auto string1 = MUST(String::from_utf16_be_with_replacement_character(valid_be));
+    EXPECT_EQ(string1, "A"sv);
+
+    // Invalid surrogate pair in BE: high surrogate 0xD800 without low surrogate
+    // In BE: 0xD8 0x00
+    Array<u8, 2> invalid_be { 0xD8, 0x00 };
+    auto string2 = MUST(String::from_utf16_be_with_replacement_character(invalid_be));
+    EXPECT_EQ(string2, "\ufffd"sv);
+
+    // Same bytes interpreted as LE would be 0x00D8 which is valid (U+00D8 = Ø)
+    auto string3 = MUST(String::from_utf16_le_with_replacement_character(invalid_be));
+    EXPECT_EQ(string3, "Ø"sv);
 }
 
 TEST_CASE(from_code_points)

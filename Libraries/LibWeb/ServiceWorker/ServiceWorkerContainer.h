@@ -7,8 +7,8 @@
 
 #pragma once
 
-#include <LibWeb/Bindings/ServiceWorkerRegistrationPrototype.h>
-#include <LibWeb/Bindings/WorkerPrototype.h>
+#include <LibWeb/Bindings/ServiceWorkerRegistration.h>
+#include <LibWeb/Bindings/Worker.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/TrustedTypes/TrustedScript.h>
 #include <LibWeb/TrustedTypes/TrustedScriptURL.h>
@@ -40,6 +40,8 @@ public:
 
     GC::Ref<WebIDL::Promise> get_registration(String const& client_url);
 
+    GC::Ref<WebIDL::Promise> ready();
+
 #undef __ENUMERATE
 #define __ENUMERATE(attribute_name, event_name)       \
     void set_##attribute_name(WebIDL::CallbackType*); \
@@ -56,6 +58,7 @@ private:
     void start_register(Optional<URL::URL> scope_url, Optional<URL::URL> script_url, GC::Ref<WebIDL::Promise>, HTML::EnvironmentSettingsObject&, URL::URL referrer, Bindings::WorkerType, Bindings::ServiceWorkerUpdateViaCache);
 
     GC::Ref<HTML::EnvironmentSettingsObject> m_service_worker_client;
+    GC::Ptr<WebIDL::Promise> m_ready_promise;
 };
 
 }

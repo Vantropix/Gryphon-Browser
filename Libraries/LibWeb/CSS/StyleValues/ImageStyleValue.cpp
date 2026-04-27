@@ -8,6 +8,7 @@
  */
 
 #include <LibGfx/ImmutableBitmap.h>
+#include <LibWeb/CSS/CSSStyleSheet.h>
 #include <LibWeb/CSS/ComputedValues.h>
 #include <LibWeb/CSS/Fetch.h>
 #include <LibWeb/CSS/StyleValues/ImageStyleValue.h>
@@ -15,6 +16,7 @@
 #include <LibWeb/DOMURL/DOMURL.h>
 #include <LibWeb/HTML/DecodedImageData.h>
 #include <LibWeb/HTML/PotentialCORSRequest.h>
+#include <LibWeb/HTML/Scripting/Environments.h>
 #include <LibWeb/HTML/SharedResourceRequest.h>
 #include <LibWeb/Painting/DisplayListRecorder.h>
 #include <LibWeb/Painting/DisplayListRecordingContext.h>
@@ -56,28 +58,32 @@ void ImageStyleValue::load_any_resources(DOM::Document& document)
         return;
     m_document = &document;
 
-    if (m_style_sheet) {
-        m_resource_request = fetch_an_external_image_for_a_stylesheet(m_url, { *m_style_sheet });
-    } else {
-        m_resource_request = fetch_an_external_image_for_a_stylesheet(m_url, { document });
-    }
+    RuleOrDeclaration rule_or_declaration {
+        .environment_settings_object = document.relevant_settings_object(),
+        .value = RuleOrDeclaration::Rule {
+            .parent_style_sheet = m_style_sheet,
+        }
+    };
+
+    m_resource_request = fetch_an_external_image_for_a_stylesheet(m_url, rule_or_declaration, m_style_sheet ? *m_style_sheet->owning_document() : document);
+
     if (m_resource_request) {
         m_resource_request->add_callbacks(
-            [this, weak_this = make_weak_ptr()] {
-                if (!weak_this || !m_document)
+            weak_callback(*this, [](auto& self) {
+                if (!self.m_document)
                     return;
 
-                for (auto* client : m_clients)
-                    client->image_style_value_did_update(*this);
+                for (auto* client : self.m_clients)
+                    client->image_style_value_did_update(self);
 
-                auto image_data = m_resource_request->image_data();
+                auto image_data = self.m_resource_request->image_data();
                 if (image_data->is_animated() && image_data->frame_count() > 1) {
-                    m_timer = Platform::Timer::create(m_document->heap());
-                    m_timer->set_interval(image_data->frame_duration(0));
-                    m_timer->on_timeout = GC::create_function(m_document->heap(), [this] { animate(); });
-                    m_timer->start();
+                    self.m_timer = Platform::Timer::create(self.m_document->heap());
+                    self.m_timer->set_interval(image_data->frame_duration(0));
+                    self.m_timer->on_timeout = GC::create_function(self.m_document->heap(), [ptr = &self] { ptr->animate(); });
+                    self.m_timer->start();
                 }
-            },
+            }),
             nullptr);
     }
 }
@@ -91,6 +97,7 @@ void ImageStyleValue::animate()
         return;
 
     m_current_frame_index = (m_current_frame_index + 1) % image_data->frame_count();
+    m_current_frame_index = image_data->notify_frame_advanced(m_current_frame_index);
     auto current_frame_duration = image_data->frame_duration(m_current_frame_index);
 
     if (current_frame_duration != m_timer->interval())
@@ -118,9 +125,9 @@ Gfx::ImmutableBitmap const* ImageStyleValue::bitmap(size_t frame_index, Gfx::Int
     return nullptr;
 }
 
-String ImageStyleValue::to_string(SerializationMode) const
+void ImageStyleValue::serialize(StringBuilder& builder, SerializationMode) const
 {
-    return m_url.to_string();
+    builder.append(m_url.to_string());
 }
 
 bool ImageStyleValue::equals(StyleValue const& other) const
@@ -188,6 +195,9 @@ void ImageStyleValue::set_style_sheet(GC::Ptr<CSSStyleSheet> style_sheet)
 {
     Base::set_style_sheet(style_sheet);
     m_style_sheet = style_sheet;
+
+    if (m_style_sheet)
+        m_style_sheet->register_pending_image_value(*this);
 }
 
 ValueComparingNonnullRefPtr<StyleValue const> ImageStyleValue::absolutized(ComputationContext const&) const

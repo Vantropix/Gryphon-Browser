@@ -37,6 +37,8 @@ public:
     static Size make_fit_content();
     static Size make_none();
 
+    static Size from_style_value(NonnullRefPtr<StyleValue const> const&);
+
     bool is_auto() const { return m_type == Type::Auto; }
     bool is_calculated() const { return m_type == Type::Calculated; }
     bool is_length() const { return m_type == Type::Length; }
@@ -84,6 +86,7 @@ public:
         return m_length_percentage;
     }
 
+    void serialize(StringBuilder&, SerializationMode) const;
     String to_string(SerializationMode) const;
     bool operator==(Size const&) const = default;
 

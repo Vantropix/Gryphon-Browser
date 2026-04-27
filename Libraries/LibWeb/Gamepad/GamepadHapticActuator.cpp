@@ -5,6 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentObserver.h>
 #include <LibWeb/Gamepad/Gamepad.h>
 #include <LibWeb/Gamepad/GamepadHapticActuator.h>
@@ -147,7 +148,7 @@ GC::Ref<WebIDL::Promise> GamepadHapticActuator::play_effect(Bindings::GamepadHap
         return WebIDL::create_rejected_promise_from_exception(realm, WebIDL::SimpleException { WebIDL::SimpleExceptionType::TypeError, "Invalid effect"_string });
 
     // 2. Let document be the current settings object's relevant global object's associated Document.
-    auto& window = as<HTML::Window>(HTML::current_principal_settings_object().global_object());
+    auto& window = as<HTML::Window>(HTML::current_settings_object().global_object());
     auto& document = window.associated_document();
 
     // 3. If document is null or document is not fully active or document's visibility state is "hidden", return a
@@ -224,7 +225,7 @@ GC::Ref<WebIDL::Promise> GamepadHapticActuator::reset()
     auto& realm = this->realm();
 
     // 1. Let document be the current settings object's relevant global object's associated Document.
-    auto& window = as<HTML::Window>(HTML::current_principal_settings_object().global_object());
+    auto& window = as<HTML::Window>(HTML::current_settings_object().global_object());
     auto& document = window.associated_document();
 
     // 2. If document is null or document is not fully active or document's visibility state is "hidden", return a
@@ -319,16 +320,28 @@ void GamepadHapticActuator::issue_haptic_effect(Bindings::GamepadHapticEffectTyp
     // increase compatibility. For example, an effect intended for a rumble motor may be transformed into a
     // waveform-based effect for a device that supports waveform haptics but lacks rumble motors.
     m_playing_effect_timer = Platform::Timer::create_single_shot(heap, static_cast<int>(params.start_delay), GC::create_function(heap, [this, type, params, on_complete, &heap] {
+        // NOTE: We pass duration=0 (infinite) to SDL and handle the duration ourselves. This avoids a race condition
+        //       where SDL's expiration check (in SDL_UpdateJoysticks) and our Platform::Timer resolve at slightly
+        //       different times, potentially causing the stop signal to be missed before the promise resolves.
         switch (type) {
         case Bindings::GamepadHapticEffectType::DualRumble:
-            SDL_RumbleGamepad(m_gamepad->sdl_gamepad(), params.strong_magnitude * NumericLimits<u16>::max(), params.weak_magnitude * NumericLimits<u16>::max(), params.duration);
+            SDL_RumbleGamepad(m_gamepad->sdl_gamepad(), params.strong_magnitude * NumericLimits<u16>::max(), params.weak_magnitude * NumericLimits<u16>::max(), 0);
             break;
         case Bindings::GamepadHapticEffectType::TriggerRumble:
-            SDL_RumbleGamepadTriggers(m_gamepad->sdl_gamepad(), params.left_trigger * NumericLimits<u16>::max(), params.right_trigger * NumericLimits<u16>::max(), params.duration);
+            SDL_RumbleGamepadTriggers(m_gamepad->sdl_gamepad(), params.left_trigger * NumericLimits<u16>::max(), params.right_trigger * NumericLimits<u16>::max(), 0);
             break;
         }
 
-        m_playing_effect_timer = Platform::Timer::create_single_shot(heap, params.duration, GC::create_function(heap, [on_complete] {
+        m_playing_effect_timer = Platform::Timer::create_single_shot(heap, params.duration, GC::create_function(heap, [this, type, on_complete] {
+            // Explicitly stop the rumble before completing, ensuring the stop signal is sent synchronously.
+            switch (type) {
+            case Bindings::GamepadHapticEffectType::DualRumble:
+                SDL_RumbleGamepad(m_gamepad->sdl_gamepad(), 0, 0, 0);
+                break;
+            case Bindings::GamepadHapticEffectType::TriggerRumble:
+                SDL_RumbleGamepadTriggers(m_gamepad->sdl_gamepad(), 0, 0, 0);
+                break;
+            }
             on_complete->function()();
         }));
 

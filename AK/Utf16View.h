@@ -11,7 +11,6 @@
 #include <AK/Format.h>
 #include <AK/Forward.h>
 #include <AK/IterationDecision.h>
-#include <AK/MemMem.h>
 #include <AK/Optional.h>
 #include <AK/Span.h>
 #include <AK/String.h>
@@ -152,13 +151,17 @@ class Utf16View {
 public:
     using Iterator = Utf16CodePointIterator;
 
-    Utf16View() = default;
+    constexpr Utf16View()
+        : m_string { .ascii = "" }
+    {
+    }
     ~Utf16View() = default;
 
     constexpr Utf16View(char16_t const* string, size_t length_in_code_units)
         : m_string { .utf16 = string }
         , m_length_in_code_units(length_in_code_units)
     {
+        VERIFY(string != nullptr);
         m_length_in_code_units |= 1uz << Detail::UTF16_FLAG;
     }
 
@@ -258,8 +261,6 @@ public:
 
         if (has_ascii_storage() && other.has_ascii_storage()) {
             result = __builtin_memcmp(m_string.ascii, other.m_string.ascii, length);
-        } else if (!has_ascii_storage() && !other.has_ascii_storage()) {
-            result = __builtin_memcmp(m_string.utf16, other.m_string.utf16, length * sizeof(char16_t));
         } else {
             for (size_t i = 0; i < length; ++i) {
                 auto this_code_unit = code_unit_at(i);
@@ -327,13 +328,6 @@ public:
         return string_hash(m_string.utf16, length_in_code_units());
     }
 
-    [[nodiscard]] constexpr bool is_null() const
-    {
-        if (has_ascii_storage())
-            return m_string.ascii == nullptr;
-        return m_string.utf16 == nullptr;
-    }
-
     [[nodiscard]] constexpr bool is_empty() const { return length_in_code_units() == 0; }
 
     [[nodiscard]] bool is_ascii() const;
@@ -385,6 +379,16 @@ public:
             return code_point;
 
         return UnicodeUtils::decode_utf16_surrogate_pair(code_point, second);
+    }
+
+    [[nodiscard]] constexpr u32 previous_code_point_at(size_t& index) const
+    {
+        VERIFY(index > 0);
+        VERIFY(index <= length_in_code_units());
+        --index;
+        if (index > 0 && UnicodeUtils::is_utf16_low_surrogate(code_unit_at(index)) && UnicodeUtils::is_utf16_high_surrogate(code_unit_at(index - 1)))
+            --index;
+        return code_point_at(index);
     }
 
     [[nodiscard]] size_t code_unit_offset_of(size_t code_point_offset) const;
@@ -485,6 +489,7 @@ public:
     }
 
     Optional<size_t> find_code_unit_offset(char16_t needle, size_t start_offset = 0) const;
+    Optional<size_t> find_last_code_point_offset(u32 needle, size_t end_offset = NumericLimits<size_t>::max()) const;
 
     constexpr Optional<size_t> find_code_unit_offset(Utf16View const& needle, size_t start_offset = 0) const
     {

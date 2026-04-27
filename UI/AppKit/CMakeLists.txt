@@ -3,6 +3,8 @@ add_library(ladybird_impl STATIC
     Application/ApplicationDelegate.mm
     Application/EventLoopImplementationMacOS.mm
     Interface/Autocomplete.mm
+    Interface/BookmarkFolder.mm
+    Interface/BookmarksBar.mm
     Interface/Event.mm
     Interface/InfoBar.mm
     Interface/LadybirdWebView.mm
@@ -26,7 +28,7 @@ target_compile_features(ladybird_impl PUBLIC cxx_std_23)
 add_executable(ladybird MACOSX_BUNDLE
    main.mm
 )
-target_link_libraries(ladybird_impl PUBLIC "-framework Cocoa -framework UniformTypeIdentifiers" LibUnicode)
+target_link_libraries(ladybird_impl PUBLIC "-framework Cocoa -framework Metal -framework QuartzCore -framework UniformTypeIdentifiers" LibUnicode)
 target_link_libraries(ladybird PRIVATE ladybird_impl)
 
 create_ladybird_bundle(ladybird)

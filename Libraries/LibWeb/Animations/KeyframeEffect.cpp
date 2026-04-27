@@ -10,13 +10,14 @@
 #include <LibWeb/Animations/Animation.h>
 #include <LibWeb/Animations/KeyframeEffect.h>
 #include <LibWeb/Animations/PseudoElementParsing.h>
-#include <LibWeb/Bindings/KeyframeEffectPrototype.h>
+#include <LibWeb/Bindings/KeyframeEffect.h>
 #include <LibWeb/CSS/ComputedProperties.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
 #include <LibWeb/CSS/StyleComputer.h>
 #include <LibWeb/CSS/StyleValues/KeywordStyleValue.h>
 #include <LibWeb/DOM/AbstractElement.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/Layout/Node.h>
 #include <LibWeb/Painting/Paintable.h>
 #include <LibWeb/WebIDL/ExceptionOr.h>
@@ -894,6 +895,8 @@ WebIDL::ExceptionOr<void> KeyframeEffect::set_keyframes(Optional<GC::Root<JS::Ob
     for (auto& keyframe : m_keyframes) {
         Animations::KeyframeEffect::KeyFrameSet::ResolvedKeyFrame resolved_keyframe;
         resolved_keyframe.composite = keyframe.composite;
+        if (auto const* easing = keyframe.easing.get_pointer<CSS::EasingFunction>())
+            resolved_keyframe.easing = *easing;
 
         auto key = static_cast<u64>(keyframe.computed_offset.value() * 100 * AnimationKeyFrameKeyScaleFactor);
 
@@ -966,9 +969,21 @@ Bindings::CompositeOperation css_animation_composition_to_bindings_composite_ope
         return Bindings::CompositeOperation::Add;
     case CSS::AnimationComposition::Replace:
         return Bindings::CompositeOperation::Replace;
-    default:
-        VERIFY_NOT_REACHED();
     }
+    VERIFY_NOT_REACHED();
+}
+
+Bindings::CompositeOperationOrAuto css_animation_composition_to_bindings_composite_operation_or_auto(CSS::AnimationComposition composition)
+{
+    switch (composition) {
+    case CSS::AnimationComposition::Accumulate:
+        return Bindings::CompositeOperationOrAuto::Accumulate;
+    case CSS::AnimationComposition::Add:
+        return Bindings::CompositeOperationOrAuto::Add;
+    case CSS::AnimationComposition::Replace:
+        return Bindings::CompositeOperationOrAuto::Replace;
+    }
+    VERIFY_NOT_REACHED();
 }
 
 }

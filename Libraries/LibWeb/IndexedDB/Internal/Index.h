@@ -34,6 +34,9 @@ public:
     [[nodiscard]] AK::ReadonlySpan<IndexRecord> records() const { return m_records; }
     [[nodiscard]] KeyPath const& key_path() const { return m_key_path; }
 
+    [[nodiscard]] bool is_deleted() const { return m_deleted; }
+    void set_deleted(bool deleted) { m_deleted = deleted; }
+
     [[nodiscard]] bool has_record_with_key(GC::Ref<Key> key);
     void clear_records();
     Optional<IndexRecord&> first_in_range(GC::Ref<IDBKeyRange> range);
@@ -41,9 +44,10 @@ public:
     GC::ConservativeVector<IndexRecord> last_n_in_range(GC::Ref<IDBKeyRange> range, Optional<WebIDL::UnsignedLong> count);
     u64 count_records_in_range(GC::Ref<IDBKeyRange> range);
     void store_a_record(IndexRecord const& record);
+    void remove_record(IndexRecord const& record);
     void remove_records_with_value_in_range(GC::Ref<IDBKeyRange> range);
 
-    HTML::SerializationRecord referenced_value(IndexRecord const& index_record) const;
+    HTML::SerializationRecord const& referenced_value(IndexRecord const& index_record) const;
 
 protected:
     virtual void visit_edges(Visitor&) override;
@@ -68,6 +72,8 @@ private:
 
     // The keys are derived from the referenced object store’s values using a key path.
     KeyPath m_key_path;
+
+    bool m_deleted { false };
 };
 
 }

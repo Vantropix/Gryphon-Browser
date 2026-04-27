@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include <LibWeb/Bindings/OfflineAudioContextPrototype.h>
+#include <LibWeb/Bindings/OfflineAudioContext.h>
 #include <LibWeb/HighResolutionTime/DOMHighResTimeStamp.h>
 #include <LibWeb/WebAudio/BaseAudioContext.h>
 #include <LibWeb/WebIDL/Types.h>
@@ -28,8 +28,11 @@ class OfflineAudioContext final : public BaseAudioContext {
 
 public:
     static WebIDL::ExceptionOr<GC::Ref<OfflineAudioContext>> construct_impl(JS::Realm&, OfflineAudioContextOptions const&);
-    static WebIDL::ExceptionOr<GC::Ref<OfflineAudioContext>> construct_impl(JS::Realm&,
-        WebIDL::UnsignedLong number_of_channels, WebIDL::UnsignedLong length, float sample_rate);
+    static WebIDL::ExceptionOr<GC::Ref<OfflineAudioContext>> construct_impl(
+        JS::Realm&,
+        WebIDL::UnsignedLong number_of_channels,
+        WebIDL::UnsignedLong length,
+        float sample_rate);
 
     virtual ~OfflineAudioContext() override;
 

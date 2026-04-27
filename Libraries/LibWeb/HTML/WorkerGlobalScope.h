@@ -15,6 +15,7 @@
 #include <LibWeb/Export.h>
 #include <LibWeb/Forward.h>
 #include <LibWeb/HTML/Scripting/Fetching.h>
+#include <LibWeb/HTML/Scripting/SerializedEnvironmentSettingsObject.h>
 #include <LibWeb/HTML/UniversalGlobalScope.h>
 #include <LibWeb/HTML/WindowOrWorkerGlobalScope.h>
 #include <LibWeb/HTML/WorkerLocation.h>
@@ -42,6 +43,10 @@ class WEB_API WorkerGlobalScope
     GC_DECLARE_ALLOCATOR(WorkerGlobalScope);
 
 public:
+    using Owner = Variant<SerializedDocument, SerializedWorkerGlobalScope>;
+
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     virtual ~WorkerGlobalScope() override;
 
     // ^WindowOrWorkerGlobalScopeMixin
@@ -65,6 +70,9 @@ public:
 
     // https://html.spec.whatwg.org/multipage/workers.html#dom-workerglobalscope-self
     GC::Ref<WorkerGlobalScope const> self() const { return *this; }
+
+    virtual Optional<URL::Origin> extract_an_origin() const override { return window_or_worker_global_scope_extract_an_origin(); }
+    virtual JS::ThrowCompletionOr<bool> internal_set_prototype_of(JS::Object* prototype) override;
 
     GC::Ref<WorkerLocation> location() const;
     GC::Ref<WorkerNavigator> navigator() const;
@@ -107,6 +115,9 @@ public:
     void initialize_policy_container(GC::Ref<Fetch::Infrastructure::Response const> response, GC::Ref<EnvironmentSettingsObject> environment);
     [[nodiscard]] ContentSecurityPolicy::Directives::Directive::Result run_csp_initialization() const;
 
+    auto& owner_set() { return m_owner_set; }
+    auto const& owner_set() const { return m_owner_set; }
+
 protected:
     explicit WorkerGlobalScope(JS::Realm&, GC::Ref<Web::Page>);
 
@@ -121,7 +132,7 @@ protected:
     GC::Ptr<MessagePort> m_internal_port;
 
 private:
-    virtual bool is_window_or_worker_global_scope_mixin() const final { return true; }
+    virtual bool is_universal_global_scope_mixin() const final { return true; }
 
     GC::Ptr<WorkerLocation> m_location;
     GC::Ptr<WorkerNavigator> m_navigator;
@@ -167,6 +178,10 @@ private:
 
     // https://drafts.csswg.org/css-font-loading/#font-source
     GC::Ptr<CSS::FontFaceSet> m_fonts;
+
+    // https://html.spec.whatwg.org/multipage/workers.html#concept-WorkerGlobalScope-owner-set
+    // A WorkerGlobalScope object has an associated owner set (a set of Document and WorkerGlobalScope objects). It is initially empty and populated when the worker is created or obtained.
+    Vector<Owner> m_owner_set;
 };
 
 }

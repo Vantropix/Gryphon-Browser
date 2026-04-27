@@ -88,10 +88,7 @@ GC_DEFINE_ALLOCATOR(PromiseHolder);
 static void add_message_event_listener(JS::Realm& realm, HTML::MessagePort& port, FlyString const& name, Function<void(JS::VM&, HTML::MessageEvent const&)> handler)
 {
     auto behavior = [handler = GC::create_function(realm.heap(), move(handler))](JS::VM& vm) {
-        auto event = vm.argument(0);
-        VERIFY(event.is_object());
-
-        auto& message_event = as<HTML::MessageEvent>(event.as_object());
+        auto& message_event = vm.argument(0).as<HTML::MessageEvent>();
         handler->function()(vm, message_event);
 
         return JS::js_undefined();
@@ -467,10 +464,9 @@ WebIDL::ExceptionOr<GC::Ref<JS::ArrayBuffer>> transfer_array_buffer(JS::Realm& r
 
     // 2. Let arrayBufferData be O.[[ArrayBufferData]].
     // 3. Let arrayBufferByteLength be O.[[ArrayBufferByteLength]].
-    auto array_buffer = buffer.buffer();
-
     // 4. Perform ? DetachArrayBuffer(O).
-    TRY(JS::detach_array_buffer(vm, buffer));
+    // NB: We steal the underlying bytes and detach atomically so the transfer is zero-copy.
+    auto array_buffer = TRY(buffer.detach_and_take_bytes(vm));
 
     // 5. Return a new ArrayBuffer object, created in the current Realm, whose [[ArrayBufferData]] internal slot value is arrayBufferData and whose [[ArrayBufferByteLength]] internal slot value is arrayBufferByteLength.
     return JS::ArrayBuffer::create(realm, move(array_buffer));

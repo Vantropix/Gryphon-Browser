@@ -10,6 +10,7 @@
 #include <AK/StringBuilder.h>
 #include <LibCore/ArgsParser.h>
 #include <LibCore/File.h>
+#include <LibCore/MappedFile.h>
 #include <LibIDL/ExposedTo.h>
 #include <LibIDL/IDLParser.h>
 #include <LibIDL/Types.h>
@@ -20,7 +21,6 @@ struct InterfaceSets {
     Vector<IDL::Interface&> window_exposed;
     Vector<IDL::Interface&> dedicated_worker_exposed;
     Vector<IDL::Interface&> shared_worker_exposed;
-    Vector<IDL::Interface&> shadow_realm_exposed;
     // TODO: service_worker_exposed
 };
 
@@ -68,7 +68,56 @@ static Optional<LegacyConstructor> const& lookup_legacy_constructor(IDL::Interfa
     return s_legacy_constructors.get(interface.name).value();
 }
 
-static ErrorOr<void> generate_intrinsic_definitions(StringView output_path, InterfaceSets const& interface_sets)
+static bool should_have_interface_object(IDL::Interface const& interface)
+{
+    if (interface.is_callback_interface)
+        return !interface.constants.is_empty();
+    return true;
+}
+
+static ErrorOr<void> generate_intrinsic_definitions_header(StringView output_path, InterfaceSets const& interface_sets)
+{
+    StringBuilder builder;
+    SourceGenerator generator(builder);
+
+    generator.append(R"~~~(
+#pragma once
+
+#include <AK/Types.h>
+
+namespace Web::Bindings {
+
+enum class InterfaceName : u16 {
+    Unknown = 0,
+)~~~");
+
+    for (size_t i = 0; i < interface_sets.intrinsics.size(); ++i) {
+        auto const& interface = interface_sets.intrinsics[i];
+        size_t index = i + 1; // 0 is reserved for Unknown
+
+        generator.set("interface_name", interface.name);
+        generator.set("index", String::number(index));
+
+        generator.append(R"~~~(
+    @interface_name@ = @index@,)~~~");
+    }
+
+    generator.append(R"~~~(
+};
+
+bool is_exposed(InterfaceName, JS::Realm&);
+
+}
+)~~~");
+
+    auto generated_intrinsics_path = LexicalPath(output_path).append("IntrinsicDefinitions.h"sv).string();
+    auto generated_intrinsics_file = TRY(Core::File::open(generated_intrinsics_path, Core::File::OpenMode::Write));
+    TRY(generated_intrinsics_file->write_until_depleted(generator.as_string_view().bytes()));
+
+    return {};
+}
+
+static ErrorOr<void> generate_intrinsic_definitions_implementation(StringView output_path, InterfaceSets const& interface_sets)
 {
     StringBuilder builder;
     SourceGenerator generator(builder);
@@ -77,31 +126,23 @@ static ErrorOr<void> generate_intrinsic_definitions(StringView output_path, Inte
 #include <LibGC/DeferGC.h>
 #include <LibJS/Runtime/Object.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/Bindings/PrincipalHostDefined.h>
 #include <LibWeb/Export.h>
 #include <LibWeb/HTML/Window.h>
 #include <LibWeb/HTML/DedicatedWorkerGlobalScope.h>
-#include <LibWeb/HTML/SharedWorkerGlobalScope.h>
-#include <LibWeb/HTML/ShadowRealmGlobalScope.h>)~~~");
+#include <LibWeb/HTML/SharedWorkerGlobalScope.h>)~~~");
 
     for (auto& interface : interface_sets.intrinsics) {
         auto gen = generator.fork();
-        gen.set("namespace_class", interface.namespace_class);
-        gen.set("prototype_class", interface.prototype_class);
-        gen.set("constructor_class", interface.constructor_class);
+        gen.set("bindings_name", interface.implemented_name);
 
-        if (interface.is_namespace) {
-            gen.append(R"~~~(
-#include <LibWeb/Bindings/@namespace_class@.h>)~~~");
-        } else {
-            gen.append(R"~~~(
-#include <LibWeb/Bindings/@constructor_class@.h>
-#include <LibWeb/Bindings/@prototype_class@.h>)~~~");
+        gen.append(R"~~~(
+#include <LibWeb/Bindings/@bindings_name@.h>)~~~");
 
-            if (auto const& legacy_constructor = lookup_legacy_constructor(interface); legacy_constructor.has_value()) {
-                gen.set("legacy_constructor_class", legacy_constructor->constructor_class);
-                gen.append(R"~~~(
+        if (auto const& legacy_constructor = lookup_legacy_constructor(interface); legacy_constructor.has_value()) {
+            gen.set("legacy_constructor_class", legacy_constructor->constructor_class);
+            gen.append(R"~~~(
 #include <LibWeb/Bindings/@legacy_constructor_class@.h>)~~~");
-            }
         }
     }
 
@@ -139,76 +180,116 @@ void Intrinsics::create_web_namespace<@namespace_class@>(JS::Realm& realm)
 )~~~");
     };
 
-    auto add_interface = [](SourceGenerator& gen, InterfaceSets const& interface_sets, StringView name, StringView prototype_class, StringView constructor_class, Optional<LegacyConstructor> const& legacy_constructor, StringView named_properties_class) {
+    generator.append(R"~~~(
+static constexpr bool is_secure_context_interface(InterfaceName name)
+{
+    switch (name) {)~~~");
+    for (auto const& interface : interface_sets.intrinsics) {
+        if (!interface.extended_attributes.contains("SecureContext"))
+            continue;
+
+        generator.set("secure_context_interface_name", interface.name);
+        generator.append(R"~~~(
+    case InterfaceName::@secure_context_interface_name@:)~~~");
+    }
+    generator.append(R"~~~(
+        return true;
+    default:
+        return false;
+    }
+}
+)~~~");
+
+    generator.append(R"~~~(
+static constexpr bool is_experimental_interface(InterfaceName name)
+{
+    switch (name) {)~~~");
+    for (auto const& interface : interface_sets.intrinsics) {
+        if (!interface.extended_attributes.contains("Experimental"))
+            continue;
+
+        generator.set("experimental_interface_name", interface.name);
+        generator.append(R"~~~(
+    case InterfaceName::@experimental_interface_name@:)~~~");
+    }
+    generator.append(R"~~~(
+        return true;
+    default:
+        return false;
+    }
+}
+)~~~");
+
+    auto generate_global_exposed = [&generator](StringView global_name, Vector<IDL::Interface&> const& interface_set) {
+        generator.set("global_name", global_name);
+        generator.append(R"~~~(
+static constexpr bool is_@global_name@_exposed(InterfaceName name)
+{
+    switch (name) {)~~~");
+        for (auto const& interface : interface_set) {
+            auto gen = generator.fork();
+            gen.set("interface_name", interface.name);
+            gen.append(R"~~~(
+    case InterfaceName::@interface_name@:)~~~");
+        }
+
+        generator.append(R"~~~(
+        return true;
+    default:
+        return false;
+    }
+}
+)~~~");
+    };
+
+    generate_global_exposed("window"sv, interface_sets.window_exposed);
+    generate_global_exposed("dedicated_worker"sv, interface_sets.dedicated_worker_exposed);
+    generate_global_exposed("shared_worker"sv, interface_sets.shared_worker_exposed);
+
+    // https://webidl.spec.whatwg.org/#dfn-exposed
+    generator.append(R"~~~(
+// An interface, callback interface, namespace, or member construct is exposed in a given realm realm if the following steps return true:
+// FIXME: Make this compatible with non-interface types.
+bool is_exposed(InterfaceName name, JS::Realm& realm)
+{
+    auto const& global_object = realm.global_object();
+
+    // 1. If construct’s exposure set is not *, and realm.[[GlobalObject]] does not implement an interface that is in construct’s exposure set, then return false.
+    if (is<HTML::Window>(global_object)) {
+       if (!is_window_exposed(name))
+           return false;
+    } else if (is<HTML::DedicatedWorkerGlobalScope>(global_object)) {
+       if (!is_dedicated_worker_exposed(name))
+           return false;
+    } else if (is<HTML::SharedWorkerGlobalScope>(global_object)) {
+        if (!is_shared_worker_exposed(name))
+            return false;
+    } else {
+        TODO(); // FIXME: ServiceWorkerGlobalScope and WorkletGlobalScope.
+    }
+
+    // 2. If realm’s settings object is not a secure context, and construct is conditionally exposed on
+    //    [SecureContext], then return false.
+    if (is_secure_context_interface(name) && HTML::is_non_secure_context(principal_host_defined_environment_settings_object(realm)))
+        return false;
+
+    // AD-HOC: Do not expose experimental interfaces unless instructed to do so.
+    if (!HTML::UniversalGlobalScopeMixin::expose_experimental_interfaces() && is_experimental_interface(name))
+        return false;
+
+    // FIXME: 3. If realm’s settings object’s cross-origin isolated capability is false, and construct is
+    //           conditionally exposed on [CrossOriginIsolated], then return false.
+
+    // 4. Return true.
+    return true;
+}
+
+)~~~");
+
+    auto add_interface = [](SourceGenerator& gen, StringView name, StringView prototype_class, StringView constructor_class, Optional<LegacyConstructor> const& legacy_constructor, StringView named_properties_class) {
         gen.set("interface_name", name);
         gen.set("prototype_class", prototype_class);
         gen.set("constructor_class", constructor_class);
-
-        // https://webidl.spec.whatwg.org/#dfn-exposed
-        // An interface, callback interface, namespace, or member construct is exposed in a given realm realm if the
-        // following steps return true:
-        // FIXME: Make this compatible with the non-interface types.
-        gen.append(R"~~~(
-template<>
-bool Intrinsics::is_interface_exposed<@prototype_class@>(JS::Realm& realm) const
-{
-    [[maybe_unused]] auto& global_object = realm.global_object();
-)~~~");
-
-        // 1. If construct’s exposure set is not *, and realm.[[GlobalObject]] does not implement an interface that is in construct’s exposure set, then return false.
-        auto window_exposed_iterator = interface_sets.window_exposed.find_if([&name](IDL::Interface const& interface) {
-            return interface.name == name;
-        });
-
-        if (window_exposed_iterator != interface_sets.window_exposed.end()) {
-            gen.append(R"~~~(
-    if (is<HTML::Window>(global_object))
-        return true;
-)~~~");
-        }
-
-        auto dedicated_worker_exposed_iterator = interface_sets.dedicated_worker_exposed.find_if([&name](IDL::Interface const& interface) {
-            return interface.name == name;
-        });
-
-        if (dedicated_worker_exposed_iterator != interface_sets.dedicated_worker_exposed.end()) {
-            gen.append(R"~~~(
-    if (is<HTML::DedicatedWorkerGlobalScope>(global_object))
-        return true;
-)~~~");
-        }
-
-        auto shared_worker_exposed_iterator = interface_sets.shared_worker_exposed.find_if([&name](IDL::Interface const& interface) {
-            return interface.name == name;
-        });
-
-        if (shared_worker_exposed_iterator != interface_sets.shared_worker_exposed.end()) {
-            gen.append(R"~~~(
-    if (is<HTML::SharedWorkerGlobalScope>(global_object))
-        return true;
-)~~~");
-        }
-
-        auto shadow_realm_exposed_iterator = interface_sets.shadow_realm_exposed.find_if([&name](IDL::Interface const& interface) {
-            return interface.name == name;
-        });
-
-        if (shadow_realm_exposed_iterator != interface_sets.shadow_realm_exposed.end()) {
-            gen.append(R"~~~(
-    if (is<HTML::ShadowRealmGlobalScope>(global_object))
-        return true;
-)~~~");
-        }
-
-        // FIXME: 2. If realm’s settings object is not a secure context, and construct is conditionally exposed on
-        //           [SecureContext], then return false.
-        // FIXME: 3. If realm’s settings object’s cross-origin isolated capability is false, and construct is
-        //           conditionally exposed on [CrossOriginIsolated], then return false.
-
-        gen.append(R"~~~(
-    return false;
-}
-)~~~");
 
         gen.append(R"~~~(
 template<>
@@ -240,7 +321,7 @@ WEB_API void Intrinsics::create_web_prototype_and_constructor<@prototype_class@>
             gen.set("legacy_constructor_class", legacy_constructor->constructor_class);
             gen.append(R"~~~(
     auto legacy_constructor = realm.create<@legacy_constructor_class@>(realm);
-    m_constructors.set("@legacy_interface_name@"_fly_string, legacy_constructor);)~~~");
+    m_constructors.set("@legacy_interface_name@"_fly_string, legacy_constructor.ptr());)~~~");
         }
 
         gen.append(R"~~~(
@@ -259,7 +340,7 @@ WEB_API void Intrinsics::create_web_prototype_and_constructor<@prototype_class@>
         if (interface.is_namespace)
             add_namespace(gen, interface.name, interface.namespace_class);
         else
-            add_interface(gen, interface_sets, interface.namespaced_name, interface.prototype_class, interface.constructor_class, lookup_legacy_constructor(interface), named_properties_class);
+            add_interface(gen, interface.namespaced_name, interface.prototype_class, interface.constructor_class, lookup_legacy_constructor(interface), named_properties_class);
     }
 
     generator.append(R"~~~(
@@ -311,28 +392,14 @@ static ErrorOr<void> generate_exposed_interface_implementation(StringView class_
 #include <LibJS/Runtime/Object.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/@global_object_name@ExposedInterfaces.h>
+#include <LibWeb/HTML/Scripting/Environments.h>
+#include <LibWeb/HTML/UniversalGlobalScope.h>
 )~~~");
     for (auto& interface : exposed_interfaces) {
         auto gen = generator.fork();
-        gen.set("namespace_class", interface.namespace_class);
-        gen.set("prototype_class", interface.prototype_class);
-        gen.set("constructor_class", interface.constructor_class);
-
-        if (interface.is_namespace) {
-            gen.append(R"~~~(#include <LibWeb/Bindings/@namespace_class@.h>
+        gen.set("bindings_name", interface.implemented_name);
+        gen.append(R"~~~(#include <LibWeb/Bindings/@bindings_name@.h>
 )~~~");
-        } else {
-
-            gen.append(R"~~~(#include <LibWeb/Bindings/@constructor_class@.h>
-#include <LibWeb/Bindings/@prototype_class@.h>
-)~~~");
-
-            if (auto const& legacy_constructor = lookup_legacy_constructor(interface); legacy_constructor.has_value()) {
-                gen.set("legacy_constructor_class", legacy_constructor->constructor_class);
-                gen.append(R"~~~(#include <LibWeb/Bindings/@legacy_constructor_class@.h>
-)~~~");
-            }
-        }
     }
 
     generator.append(R"~~~(
@@ -341,11 +408,32 @@ namespace Web::Bindings {
 void add_@global_object_snake_name@_exposed_interfaces(JS::Object& global)
 {
     static constexpr u8 attr = JS::Attribute::Writable | JS::Attribute::Configurable;
+
+    [[maybe_unused]] bool is_secure_context = HTML::is_secure_context(HTML::relevant_settings_object(global));
+    [[maybe_unused]] bool expose_experimental_interfaces = HTML::UniversalGlobalScopeMixin::expose_experimental_interfaces();
 )~~~");
 
-    auto add_interface = [](SourceGenerator& gen, StringView name, StringView prototype_class, Optional<LegacyConstructor> const& legacy_constructor, Optional<ByteString const&> legacy_alias_name) {
-        gen.set("interface_name", name);
-        gen.set("prototype_class", prototype_class);
+    auto add_interface = [class_name](SourceGenerator& gen, IDL::Interface const& interface) {
+        if (!should_have_interface_object(interface))
+            return;
+
+        auto legacy_constructor = lookup_legacy_constructor(interface);
+        Optional<ByteString const&> legacy_alias_name;
+        if (class_name == "Window"sv)
+            legacy_alias_name = interface.extended_attributes.get("LegacyWindowAlias"sv);
+
+        gen.set("interface_name", interface.namespaced_name);
+        gen.set("prototype_class", interface.prototype_class);
+
+        if (interface.extended_attributes.contains("SecureContext"sv)) {
+            gen.append(R"~~~(
+    if (is_secure_context) {)~~~");
+        }
+
+        if (interface.extended_attributes.contains("Experimental"sv)) {
+            gen.append(R"~~~(
+    if (expose_experimental_interfaces) {)~~~");
+        }
 
         gen.append(R"~~~(
     global.define_intrinsic_accessor("@interface_name@"_utf16_fly_string, attr, [](auto& realm) -> JS::Value { return &ensure_web_constructor<@prototype_class@>(realm, "@interface_name@"_fly_string); });)~~~");
@@ -371,6 +459,16 @@ void add_@global_object_snake_name@_exposed_interfaces(JS::Object& global)
             gen.append(R"~~~(
     global.define_intrinsic_accessor("@legacy_interface_name@"_utf16_fly_string, attr, [](auto& realm) -> JS::Value { return &ensure_web_constructor<@prototype_class@>(realm, "@legacy_interface_name@"_fly_string); });)~~~");
         }
+
+        if (interface.extended_attributes.contains("Experimental"sv)) {
+            gen.append(R"~~~(
+    })~~~");
+        }
+
+        if (interface.extended_attributes.contains("SecureContext"sv)) {
+            gen.append(R"~~~(
+    })~~~");
+        }
     };
 
     auto add_namespace = [](SourceGenerator& gen, StringView name, StringView namespace_class) {
@@ -390,11 +488,7 @@ void add_@global_object_snake_name@_exposed_interfaces(JS::Object& global)
             if (interface.extended_attributes.contains("LegacyNoInterfaceObject")) {
                 continue;
             }
-            if (class_name == "Window") {
-                add_interface(gen, interface.namespaced_name, interface.prototype_class, lookup_legacy_constructor(interface), interface.extended_attributes.get("LegacyWindowAlias"sv));
-            } else {
-                add_interface(gen, interface.namespaced_name, interface.prototype_class, lookup_legacy_constructor(interface), {});
-            }
+            add_interface(gen, interface);
         }
     }
 
@@ -416,26 +510,13 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
     Core::ArgsParser args_parser;
 
     StringView output_path;
-    Vector<ByteString> base_paths;
     Vector<ByteString> paths;
 
     args_parser.add_option(output_path, "Path to output generated files into", "output-path", 'o', "output-path");
-    args_parser.add_option(Core::ArgsParser::Option {
-        .argument_mode = Core::ArgsParser::OptionArgumentMode::Required,
-        .help_string = "Path to root of IDL file tree(s)",
-        .long_name = "base-path",
-        .short_name = 'b',
-        .value_name = "base-path",
-        .accept_value = [&](StringView s) {
-            base_paths.append(s);
-            return true;
-        },
-    });
     args_parser.add_positional_argument(paths, "Paths of every IDL file that could be Exposed", "paths");
     args_parser.parse(arguments);
 
     VERIFY(!paths.is_empty());
-    VERIFY(!base_paths.is_empty());
 
     if (paths.first().starts_with("@"sv)) {
         // Response file
@@ -456,54 +537,46 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
         }
     }
 
-    Vector<ByteString> lexical_bases;
-    for (auto const& base_path : base_paths) {
-        VERIFY(!base_path.is_empty());
-        lexical_bases.append(base_path);
-    }
-
     // Read in all IDL files, we must own the storage for all of these for the lifetime of the program
-    Vector<ByteString> file_contents;
+    Vector<NonnullOwnPtr<Core::MappedFile>> files;
+    files.ensure_capacity(paths.size());
     for (ByteString const& path : paths) {
-        auto file_or_error = Core::File::open(path, Core::File::OpenMode::Read);
+        auto file_or_error = Core::MappedFile::map(path, Core::MappedFile::Mode::ReadOnly);
         if (file_or_error.is_error()) {
             s_error_string = ByteString::formatted("Unable to open file {}", path);
             return Error::from_string_view(s_error_string.view());
         }
-        auto file = file_or_error.release_value();
-        auto string = MUST(file->read_until_eof());
-        file_contents.append(ByteString(ReadonlyBytes(string)));
+        files.append(file_or_error.release_value());
     }
-    VERIFY(paths.size() == file_contents.size());
+    VERIFY(paths.size() == files.size());
 
-    Vector<IDL::Parser> parsers;
     InterfaceSets interface_sets;
+    IDL::Context context;
 
     for (size_t i = 0; i < paths.size(); ++i) {
         auto const& path = paths[i];
-        IDL::Parser parser(path, file_contents[i], lexical_bases);
-        auto& interface = parser.parse();
-        if (interface.name.is_empty()) {
+        StringView file_contents = files[i]->bytes();
+        auto module = IDL::Parser::parse(path, file_contents, context);
+        if (!module.interface.has_value()) {
             s_error_string = ByteString::formatted("Interface for file {} missing", path);
             return Error::from_string_view(s_error_string.view());
         }
+        auto& interface = module.interface.value();
 
         TRY(add_to_interface_sets(interface, interface_sets));
-        parsers.append(move(parser));
     }
 
-    TRY(generate_intrinsic_definitions(output_path, interface_sets));
+    TRY(generate_intrinsic_definitions_header(output_path, interface_sets));
+    TRY(generate_intrinsic_definitions_implementation(output_path, interface_sets));
 
     TRY(generate_exposed_interface_header("Window"sv, output_path));
     TRY(generate_exposed_interface_header("DedicatedWorker"sv, output_path));
     TRY(generate_exposed_interface_header("SharedWorker"sv, output_path));
-    TRY(generate_exposed_interface_header("ShadowRealm"sv, output_path));
     // TODO: ServiceWorkerExposed.h
 
     TRY(generate_exposed_interface_implementation("Window"sv, output_path, interface_sets.window_exposed));
     TRY(generate_exposed_interface_implementation("DedicatedWorker"sv, output_path, interface_sets.dedicated_worker_exposed));
     TRY(generate_exposed_interface_implementation("SharedWorker"sv, output_path, interface_sets.shared_worker_exposed));
-    TRY(generate_exposed_interface_implementation("ShadowRealm"sv, output_path, interface_sets.shadow_realm_exposed));
     // TODO: ServiceWorkerExposed.cpp
 
     return 0;
@@ -530,9 +603,6 @@ ErrorOr<void> add_to_interface_sets(IDL::Interface& interface, InterfaceSets& in
 
     if (has_flag(whom, IDL::ExposedTo::SharedWorker))
         interface_sets.shared_worker_exposed.append(interface);
-
-    if (has_flag(whom, IDL::ExposedTo::ShadowRealm))
-        interface_sets.shadow_realm_exposed.append(interface);
 
     return {};
 }

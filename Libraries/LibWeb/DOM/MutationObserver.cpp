@@ -6,7 +6,7 @@
 
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/Bindings/MainThreadVM.h>
-#include <LibWeb/Bindings/MutationObserverPrototype.h>
+#include <LibWeb/Bindings/MutationObserver.h>
 #include <LibWeb/DOM/MutationObserver.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/HTML/Scripting/SimilarOriginWindowAgent.h>
@@ -14,6 +14,7 @@
 namespace Web::DOM {
 
 GC_DEFINE_ALLOCATOR(MutationObserver);
+GC_DEFINE_ALLOCATOR(RegisteredObserver);
 GC_DEFINE_ALLOCATOR(TransientRegisteredObserver);
 
 WebIDL::ExceptionOr<GC::Ref<MutationObserver>> MutationObserver::construct_impl(JS::Realm& realm, GC::Ptr<WebIDL::CallbackType> callback)
@@ -91,7 +92,8 @@ WebIDL::ExceptionOr<void> MutationObserver::observe(Node& target, MutationObserv
 
                 if (node->registered_observer_list()) {
                     node->registered_observer_list()->remove_all_matching([&registered_observer](RegisteredObserver& observer) {
-                        return is<TransientRegisteredObserver>(observer) && as<TransientRegisteredObserver>(observer).source().ptr() == registered_observer;
+                        auto* transient = as_if<TransientRegisteredObserver>(observer);
+                        return transient && transient->source().ptr() == registered_observer;
                     });
                 }
             }

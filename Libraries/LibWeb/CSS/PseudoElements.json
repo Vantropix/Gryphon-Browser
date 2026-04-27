@@ -2,6 +2,9 @@
   "-moz-meter-bar": {
     "alias-for": "slider-fill"
   },
+  "-moz-placeholder": {
+    "alias-for": "placeholder"
+  },
   "-moz-progress-bar": {
     "alias-for": "slider-fill"
   },
@@ -13,6 +16,9 @@
   },
   "-moz-range-thumb": {
     "alias-for": "slider-thumb"
+  },
+  "-webkit-input-placeholder": {
+    "alias-for": "placeholder"
   },
   "-webkit-meter-bar": {
     "alias-for": "slider-track"
@@ -30,19 +36,23 @@
     "alias-for": "slider-thumb"
   },
   "after": {
-    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-after"
+    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-after",
+    "is-tree-abiding": true
   },
   "backdrop": {
     "spec": "https://drafts.csswg.org/css-position-4/#selectordef-backdrop"
   },
   "before": {
-    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-before"
+    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-before",
+    "is-tree-abiding": true
   },
   "details-content": {
-    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-details-content"
+    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-details-content",
+    "is-element-backed": true
   },
   "file-selector-button": {
-    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-file-selector-button"
+    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-file-selector-button",
+    "is-element-backed": true
   },
   "first-letter": {
     "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-first-letter",
@@ -57,7 +67,8 @@
       "#margin-properties",
       "#padding-properties",
       "#border-properties",
-      "box-shadow"
+      "box-shadow",
+      "#custom-properties"
     ]
   },
   "first-line": {
@@ -69,20 +80,24 @@
       "#background-properties",
       "#inline-typesetting-properties",
       "#text-decoration-properties",
+      "#custom-properties",
       "FIXME: ruby-position",
       "#inline-layout-properties"
     ]
   },
   "marker": {
-    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-marker"
+    "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-marker",
+    "is-tree-abiding": true
   },
   "part": {
-    "spec": "https://drafts.csswg.org/css-shadow-parts/#selectordef-part",
+    "spec": "https://drafts.csswg.org/css-shadow-1/#selectordef-part",
     "type": "function",
-    "function-syntax": "<ident>+"
+    "function-syntax": "<ident>+",
+    "is-element-backed": true
   },
   "placeholder": {
     "spec": "https://drafts.csswg.org/css-pseudo-4/#selectordef-placeholder",
+    "is-tree-abiding": true,
     "property-whitelist": [
       "#font-properties",
       "color",
@@ -90,6 +105,7 @@
       "#background-properties",
       "#inline-typesetting-properties",
       "#text-decoration-properties",
+      "#custom-properties",
       "FIXME: ruby-position"
     ]
   },
@@ -116,9 +132,10 @@
     "spec": "https://drafts.csswg.org/css-forms-1/#selectordef-slider-track"
   },
   "slotted": {
-    "spec": "https://drafts.csswg.org/css-scoping/#slotted-pseudo",
+    "spec": "https://drafts.csswg.org/css-shadow-1/#slotted-pseudo",
     "type": "function",
-    "function-syntax": "<compound-selector>"
+    "function-syntax": "<compound-selector>",
+    "is-element-backed": true
   },
   "view-transition": {
     "spec": "https://drafts.csswg.org/css-view-transitions-1/#selectordef-view-transition",

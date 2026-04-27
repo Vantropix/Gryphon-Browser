@@ -15,11 +15,8 @@ namespace Web::Layout {
 GC_DEFINE_ALLOCATOR(RadioButton);
 
 RadioButton::RadioButton(DOM::Document& document, HTML::HTMLInputElement& element, GC::Ref<CSS::ComputedProperties> style)
-    : FormAssociatedLabelableNode(document, element, move(style))
+    : ReplacedBox(document, element, move(style))
 {
-    set_natural_width(12);
-    set_natural_height(12);
-    set_natural_aspect_ratio(1);
 }
 
 RadioButton::~RadioButton() = default;

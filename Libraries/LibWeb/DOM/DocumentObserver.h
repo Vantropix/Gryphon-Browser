@@ -17,10 +17,12 @@
 namespace Web::DOM {
 
 class WEB_API DocumentObserver final : public Bindings::PlatformObject {
-    WEB_PLATFORM_OBJECT(DocumentObserver, Bindings::PlatformObject);
+    WEB_NON_IDL_PLATFORM_OBJECT(DocumentObserver, Bindings::PlatformObject);
     GC_DECLARE_ALLOCATOR(DocumentObserver);
 
 public:
+    static constexpr bool OVERRIDES_FINALIZE = true;
+
     [[nodiscard]] GC::Ptr<GC::Function<void()>> document_became_active() const { return m_document_became_active; }
     void set_document_became_active(Function<void()>);
 

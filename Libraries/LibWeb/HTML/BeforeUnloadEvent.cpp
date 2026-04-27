@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
-#include <LibWeb/Bindings/BeforeUnloadEventPrototype.h>
+#include <LibWeb/Bindings/BeforeUnloadEvent.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/HTML/BeforeUnloadEvent.h>
 
@@ -14,7 +14,9 @@ GC_DEFINE_ALLOCATOR(BeforeUnloadEvent);
 
 GC::Ref<BeforeUnloadEvent> BeforeUnloadEvent::create(JS::Realm& realm, FlyString const& event_name, DOM::EventInit const& event_init)
 {
-    return realm.create<BeforeUnloadEvent>(realm, event_name, event_init);
+    auto event = realm.create<BeforeUnloadEvent>(realm, event_name, event_init);
+    event->set_is_trusted(true);
+    return event;
 }
 
 BeforeUnloadEvent::BeforeUnloadEvent(JS::Realm& realm, FlyString const& event_name, DOM::EventInit const& event_init)

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2020-2023, Linus Groh <linusg@serenityos.org>
- * Copyright (c) 2022-2024, Tim Flynn <trflynn89@ladybird.org>
+ * Copyright (c) 2022-2026, Tim Flynn <trflynn89@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -363,7 +363,7 @@ Crypto::SignedBigInteger get_utc_epoch_nanoseconds(Temporal::ISODateTime const& 
     return result;
 }
 
-static i64 clip_bigint_to_sane_time(Crypto::SignedBigInteger const& value)
+i64 clip_bigint_to_sane_time(Crypto::SignedBigInteger const& value)
 {
     static Crypto::SignedBigInteger const min_bigint { NumericLimits<i64>::min() };
     static Crypto::SignedBigInteger const max_bigint { NumericLimits<i64>::max() };
@@ -376,11 +376,10 @@ static i64 clip_bigint_to_sane_time(Crypto::SignedBigInteger const& value)
     if (value > max_bigint)
         return NumericLimits<i64>::max();
 
-    // FIXME: Can we do this without string conversion?
-    return MUST(value.to_base(10)).to_number<i64>().value();
+    return value.to_i64();
 }
 
-static i64 clip_double_to_sane_time(double value)
+i64 clip_double_to_sane_time(double value)
 {
     static constexpr auto min_double = static_cast<double>(NumericLimits<i64>::min());
     static constexpr auto max_double = static_cast<double>(NumericLimits<i64>::max());
@@ -419,7 +418,7 @@ Unicode::TimeZoneOffset get_named_time_zone_offset_nanoseconds(StringView time_z
 {
     // Since UnixDateTime::from_seconds_since_epoch() and UnixDateTime::from_nanoseconds_since_epoch() both take an i64, converting to
     // seconds first gives us a greater range. The TZDB doesn't have sub-second offsets.
-    auto seconds = epoch_nanoseconds.divided_by(Temporal::NANOSECONDS_PER_SECOND).quotient;
+    auto seconds = big_floor(epoch_nanoseconds, Temporal::NANOSECONDS_PER_SECOND);
     auto time = UnixDateTime::from_seconds_since_epoch(clip_bigint_to_sane_time(seconds));
 
     auto offset = Unicode::time_zone_offset(time_zone_identifier, time);
@@ -530,7 +529,11 @@ double utc_time(double time)
         // b. Let possibleInstants be GetNamedTimeZoneEpochNanoseconds(systemTimeZoneIdentifier, isoDateTime).
         auto possible_instants = get_named_time_zone_epoch_nanoseconds(system_time_zone_identifier, iso_date_time);
 
-        // c. NOTE: The following steps ensure that when t represents local time repeating multiple times at a negative time zone transition (e.g. when the daylight saving time ends or the time zone offset is decreased due to a time zone rule change) or skipped local time at a positive time zone transition (e.g. when the daylight saving time starts or the time zone offset is increased due to a time zone rule change), t is interpreted using the time zone offset before the transition.
+        // c. NOTE: The following steps ensure that when t represents local time repeating multiple times at a negative
+        //    time zone transition (e.g. when the daylight saving time ends or the time zone offset is decreased due to
+        //    a time zone rule change) or skipped local time at a positive time zone transition (e.g. when the daylight
+        //    saving time starts or the time zone offset is increased due to a time zone rule change), t is interpreted
+        //    using the time zone offset before the transition.
         Crypto::SignedBigInteger disambiguated_instant;
 
         // d. If possibleInstants is not empty, then
@@ -540,13 +543,22 @@ double utc_time(double time)
         }
         // e. Else,
         else {
-            // i. NOTE: t represents a local time skipped at a positive time zone transition (e.g. due to daylight saving time starting or a time zone rule change increasing the UTC offset).
-            // ii. Let possibleInstantsBefore be GetNamedTimeZoneEpochNanoseconds(systemTimeZoneIdentifier, TimeValueToISODateTimeRecord(tBefore)), where tBefore is the largest integral Number < t for which possibleInstantsBefore is not empty (i.e., tBefore represents the last local time before the transition).
-            // iii. Let disambiguatedInstant be the last element of possibleInstantsBefore.
+            // i. NOTE: t represents a local time skipped at a positive time zone transition (e.g. due to daylight
+            //    saving time starting or a time zone rule change increasing the UTC offset).
 
-            // FIXME: This branch currently cannot be reached with our implementation, because LibUnicode does not handle skipped time points.
-            //        When GetNamedTimeZoneEpochNanoseconds is updated to use a LibUnicode API which does handle them, implement these steps.
-            VERIFY_NOT_REACHED();
+            // ii. Let possibleInstantsBefore be GetNamedTimeZoneEpochNanoseconds(systemTimeZoneIdentifier, TimeValueToISODateTimeRecord(tBefore)),
+            //     where tBefore is the largest integral Number < t for which possibleInstantsBefore is not empty (i.e.,
+            //     tBefore represents the last local time before the transition).
+            // NB: We implement this by finding the next UTC offset transition after one day before the skipped time,
+            //     which is guaranteed to be before the gap. The last valid instant before the transition is one
+            //     nanosecond before the transition instant.
+            auto epoch_nanoseconds = get_utc_epoch_nanoseconds(iso_date_time);
+            auto day_before = epoch_nanoseconds.minus(Temporal::NANOSECONDS_PER_DAY);
+            auto transition = Temporal::get_named_time_zone_next_transition(system_time_zone_identifier, day_before);
+            VERIFY(transition.has_value());
+
+            // iii. Let disambiguatedInstant be the last element of possibleInstantsBefore.
+            disambiguated_instant = transition->minus(1_bigint);
         }
 
         // f. Let offsetNs be GetNamedTimeZoneOffsetNanoseconds(systemTimeZoneIdentifier, disambiguatedInstant).

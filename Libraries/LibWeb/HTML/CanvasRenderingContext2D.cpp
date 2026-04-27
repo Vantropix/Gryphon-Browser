@@ -18,10 +18,12 @@
 #include <LibJS/Runtime/TypedArray.h>
 #include <LibJS/Runtime/ValueInlines.h>
 #include <LibUnicode/Segmenter.h>
-#include <LibWeb/Bindings/CanvasRenderingContext2DPrototype.h>
+#include <LibWeb/Bindings/CanvasRenderingContext2D.h>
 #include <LibWeb/Bindings/Intrinsics.h>
 #include <LibWeb/CSS/Parser/Parser.h>
 #include <LibWeb/CSS/PropertyID.h>
+#include <LibWeb/CSS/StyleValues/FilterValueListStyleValue.h>
+#include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/CanvasRenderingContext2D.h>
 #include <LibWeb/HTML/HTMLCanvasElement.h>
 #include <LibWeb/HTML/HTMLImageElement.h>
@@ -32,7 +34,6 @@
 #include <LibWeb/HTML/ImageRequest.h>
 #include <LibWeb/HTML/Path2D.h>
 #include <LibWeb/HTML/TextMetrics.h>
-#include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/Infra/CharacterTypes.h>
 #include <LibWeb/Layout/TextNode.h>
 #include <LibWeb/Painting/Paintable.h>
@@ -210,9 +211,8 @@ WebIDL::ExceptionOr<void> CanvasRenderingContext2D::draw_image_internal(CanvasIm
 void CanvasRenderingContext2D::did_draw(Gfx::FloatRect const&)
 {
     // FIXME: Make use of the rect to reduce the invalidated area when possible.
-    if (!canvas_element().paintable())
-        return;
-    canvas_element().paintable()->set_needs_display(InvalidateDisplayList::No);
+    canvas_element().set_canvas_content_dirty();
+    canvas_element().set_needs_repaint(InvalidateDisplayList::No);
 }
 
 Gfx::Painter* CanvasRenderingContext2D::painter()
@@ -220,7 +220,7 @@ Gfx::Painter* CanvasRenderingContext2D::painter()
     allocate_painting_surface_if_needed();
     auto surface = canvas_element().surface();
     if (!m_painter && surface) {
-        canvas_element().document().invalidate_display_list();
+        canvas_element().set_needs_repaint();
         m_painter = make<Gfx::PainterSkia>(*canvas_element().surface());
     }
     return m_painter.ptr();
@@ -247,8 +247,7 @@ void CanvasRenderingContext2D::allocate_painting_surface_if_needed()
 
     auto color_type = m_context_attributes.alpha ? Gfx::BitmapFormat::BGRA8888 : Gfx::BitmapFormat::BGRx8888;
 
-    auto skia_backend_context = canvas_element().navigable()->traversable_navigable()->skia_backend_context();
-    m_surface = Gfx::PaintingSurface::create_with_size(skia_backend_context, canvas_element().bitmap_size_for_canvas(), color_type, Gfx::AlphaType::Premultiplied);
+    m_surface = Gfx::PaintingSurface::create_with_size(canvas_element().bitmap_size_for_canvas(), color_type, Gfx::AlphaType::Premultiplied);
     m_painter = nullptr;
 
     // https://html.spec.whatwg.org/multipage/canvas.html#the-canvas-settings:concept-canvas-alpha
@@ -260,6 +259,17 @@ void CanvasRenderingContext2D::allocate_painting_surface_if_needed()
     }
 }
 
+static float resolved_letter_spacing(CanvasState::DrawingState const& drawing_state, HTMLCanvasElement& canvas_element)
+{
+    // FIXME: Font relative lengths should be resolved against the context's font, not the canvas element's
+    CSS::Length::ResolutionContext context = [&] {
+        if (canvas_element.computed_properties())
+            return CSS::Length::ResolutionContext::for_element(DOM::AbstractElement { canvas_element });
+        return CSS::Length::ResolutionContext::for_document(canvas_element.document());
+    }();
+    return static_cast<float>(drawing_state.letter_spacing.to_px(context).to_double());
+}
+
 Gfx::Path CanvasRenderingContext2D::text_path(Utf16String const& text, float x, float y, Optional<double> max_width)
 {
     if (max_width.has_value() && max_width.value() <= 0)
@@ -269,7 +279,8 @@ Gfx::Path CanvasRenderingContext2D::text_path(Utf16String const& text, float x, 
 
     auto const& font_cascade_list = this->font_cascade_list();
     auto const& font = font_cascade_list->first();
-    auto glyph_runs = Gfx::shape_text({ x, y }, text.utf16_view(), *font_cascade_list);
+    auto glyph_runs = Gfx::shape_text({ x, y }, text.utf16_view(), *font_cascade_list,
+        resolved_letter_spacing(drawing_state, canvas_element()));
     Gfx::Path path;
     for (auto const& glyph_run : glyph_runs) {
         path.glyph_run(glyph_run);
@@ -325,16 +336,27 @@ Gfx::Path CanvasRenderingContext2D::text_path(Utf16String const& text, float x, 
     // Left is the default - no translation needed
 
     // Apply text baseline
-    // FIXME: Implement CanvasTextBaseline::Hanging, Bindings::CanvasTextAlign::Alphabetic and Bindings::CanvasTextAlign::Ideographic for real
-    //        right now they are just handled as textBaseline = top or bottom.
-    //        https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-textbaseline-hanging
-    // Default baseline of draw_text is top so do nothing by CanvasTextBaseline::Top and CanvasTextBaseline::Hanging
-    if (drawing_state.text_baseline == Bindings::CanvasTextBaseline::Middle) {
-        transform = Gfx::AffineTransform {}.set_translation({ 0, font.pixel_size() / 2 }).multiply(transform);
-    }
-    if (drawing_state.text_baseline == Bindings::CanvasTextBaseline::Top || drawing_state.text_baseline == Bindings::CanvasTextBaseline::Hanging) {
-        transform = Gfx::AffineTransform {}.set_translation({ 0, font.pixel_size() }).multiply(transform);
-    }
+    // https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-textbaseline
+    auto const& font_pixel_metrics = font.pixel_metrics();
+    auto baseline_y_offset = [&] {
+        switch (drawing_state.text_baseline) {
+        case Bindings::CanvasTextBaseline::Top:
+            return font_pixel_metrics.ascent;
+        case Bindings::CanvasTextBaseline::Hanging:
+            return font_pixel_metrics.ascent * 0.8f;
+        case Bindings::CanvasTextBaseline::Middle:
+            return (font_pixel_metrics.ascent - font_pixel_metrics.descent) / 2.0f;
+        case Bindings::CanvasTextBaseline::Alphabetic:
+            return 0.0f;
+        case Bindings::CanvasTextBaseline::Ideographic:
+        case Bindings::CanvasTextBaseline::Bottom:
+            return -font_pixel_metrics.descent;
+        }
+        VERIFY_NOT_REACHED();
+    }();
+
+    if (baseline_y_offset != 0.f)
+        transform = Gfx::AffineTransform {}.set_translation({ 0, baseline_y_offset }).multiply(transform);
 
     return path.copy_transformed(transform);
 }
@@ -688,6 +710,30 @@ GC::Ref<TextMetrics> CanvasRenderingContext2D::measure_text(Utf16String const& t
     auto metrics = TextMetrics::create(realm());
     // FIXME: Use the font that was used to create the glyphs in prepared_text.
     auto const& font = font_cascade_list()->first();
+    auto const& font_pixel_metrics = font.pixel_metrics();
+    auto const ascent = font_pixel_metrics.ascent;
+    auto const descent = font_pixel_metrics.descent;
+    auto const hanging_baseline = ascent * 0.8f;
+
+    float baseline_offset = 0;
+    switch (drawing_state().text_baseline) {
+    case Bindings::CanvasTextBaseline::Top:
+        baseline_offset = ascent;
+        break;
+    case Bindings::CanvasTextBaseline::Hanging:
+        baseline_offset = hanging_baseline;
+        break;
+    case Bindings::CanvasTextBaseline::Middle:
+        baseline_offset = (ascent - descent) / 2.0f;
+        break;
+    case Bindings::CanvasTextBaseline::Alphabetic:
+        baseline_offset = 0;
+        break;
+    case Bindings::CanvasTextBaseline::Ideographic:
+    case Bindings::CanvasTextBaseline::Bottom:
+        baseline_offset = -descent;
+        break;
+    }
 
     // width attribute: The width of that inline box, in CSS pixels. (The text's advance width.)
     metrics->set_width(prepared_text.bounding_box.width());
@@ -696,23 +742,23 @@ GC::Ref<TextMetrics> CanvasRenderingContext2D::measure_text(Utf16String const& t
     // actualBoundingBoxRight attribute: The distance parallel to the baseline from the alignment point given by the textAlign attribute to the right side of the bounding rectangle of the given text, in CSS pixels; positive numbers indicating a distance going right from the given alignment point.
     metrics->set_actual_bounding_box_right(prepared_text.bounding_box.right());
     // fontBoundingBoxAscent attribute: The distance from the horizontal line indicated by the textBaseline attribute to the ascent metric of the first available font, in CSS pixels; positive numbers indicating a distance going up from the given baseline.
-    metrics->set_font_bounding_box_ascent(font.baseline());
+    metrics->set_font_bounding_box_ascent(ascent - baseline_offset);
     // fontBoundingBoxDescent attribute: The distance from the horizontal line indicated by the textBaseline attribute to the descent metric of the first available font, in CSS pixels; positive numbers indicating a distance going down from the given baseline.
-    metrics->set_font_bounding_box_descent(prepared_text.bounding_box.height() - font.baseline());
+    metrics->set_font_bounding_box_descent(descent + baseline_offset);
     // actualBoundingBoxAscent attribute: The distance from the horizontal line indicated by the textBaseline attribute to the top of the bounding rectangle of the given text, in CSS pixels; positive numbers indicating a distance going up from the given baseline.
-    metrics->set_actual_bounding_box_ascent(font.baseline());
+    metrics->set_actual_bounding_box_ascent(ascent - baseline_offset);
     // actualBoundingBoxDescent attribute: The distance from the horizontal line indicated by the textBaseline attribute to the bottom of the bounding rectangle of the given text, in CSS pixels; positive numbers indicating a distance going down from the given baseline.
-    metrics->set_actual_bounding_box_descent(prepared_text.bounding_box.height() - font.baseline());
+    metrics->set_actual_bounding_box_descent(descent + baseline_offset);
     // emHeightAscent attribute: The distance from the horizontal line indicated by the textBaseline attribute to the highest top of the em squares in the inline box, in CSS pixels; positive numbers indicating that the given baseline is below the top of that em square (so this value will usually be positive). Zero if the given baseline is the top of that em square; half the font size if the given baseline is the middle of that em square.
-    metrics->set_em_height_ascent(font.baseline());
+    metrics->set_em_height_ascent(ascent - baseline_offset);
     // emHeightDescent attribute: The distance from the horizontal line indicated by the textBaseline attribute to the lowest bottom of the em squares in the inline box, in CSS pixels; positive numbers indicating that the given baseline is above the bottom of that em square. (Zero if the given baseline is the bottom of that em square.)
-    metrics->set_em_height_descent(prepared_text.bounding_box.height() - font.baseline());
+    metrics->set_em_height_descent(descent + baseline_offset);
     // hangingBaseline attribute: The distance from the horizontal line indicated by the textBaseline attribute to the hanging baseline of the inline box, in CSS pixels; positive numbers indicating that the given baseline is below the hanging baseline. (Zero if the given baseline is the hanging baseline.)
-    metrics->set_hanging_baseline(font.baseline());
+    metrics->set_hanging_baseline(hanging_baseline - baseline_offset);
     // alphabeticBaseline attribute: The distance from the horizontal line indicated by the textBaseline attribute to the alphabetic baseline of the inline box, in CSS pixels; positive numbers indicating that the given baseline is below the alphabetic baseline. (Zero if the given baseline is the alphabetic baseline.)
-    metrics->set_font_bounding_box_ascent(0);
+    metrics->set_alphabetic_baseline(-baseline_offset);
     // ideographicBaseline attribute: The distance from the horizontal line indicated by the textBaseline attribute to the ideographic-under baseline of the inline box, in CSS pixels; positive numbers indicating that the given baseline is below the ideographic-under baseline. (Zero if the given baseline is the ideographic-under baseline.)
-    metrics->set_font_bounding_box_ascent(0);
+    metrics->set_ideographic_baseline(-descent - baseline_offset);
 
     return metrics;
 }
@@ -739,12 +785,13 @@ CanvasRenderingContext2D::PreparedText CanvasRenderingContext2D::prepare_text(Ut
     // 2. Replace all ASCII whitespace in text with U+0020 SPACE characters.
     StringBuilder builder { StringBuilder::Mode::UTF16, text.length_in_code_units() };
     for (auto c : text) {
-        builder.append(Infra::is_ascii_whitespace(c) ? ' ' : c);
+        builder.append_code_point(Infra::is_ascii_whitespace(c) ? ' ' : c);
     }
     auto replaced_text = builder.to_utf16_string();
 
     // 3. Let font be the current font of target, as given by that object's font attribute.
-    auto glyph_runs = Gfx::shape_text({ 0, 0 }, replaced_text.utf16_view(), *font_cascade_list());
+    auto glyph_runs = Gfx::shape_text({ 0, 0 }, replaced_text.utf16_view(), *font_cascade_list(),
+        resolved_letter_spacing(drawing_state(), canvas_element()));
 
     // FIXME: 4. Let language be the target's language.
     // FIXME: 5. If language is "inherit":
@@ -1078,13 +1125,14 @@ void CanvasRenderingContext2D::set_shadow_color(String color)
     auto& context = canvas_element();
 
     // 2. Let parsedValue be the result of parsing the given value with context if non-null.
-    auto style_value = parse_css_value(CSS::Parser::ParsingParams(), color, CSS::PropertyID::Color);
+    auto style_value = parse_css_value(CSS::Parser::ParsingParams { CSS::Parser::SpecialContext::CanvasContextGenericValue }, color, CSS::PropertyID::Color);
     if (style_value && style_value->has_color()) {
+        DOM::AbstractElement abstract_element { context };
+        context.document().update_style_if_needed_for_element(abstract_element);
+
         CSS::ColorResolutionContext color_resolution_context {};
-        context.document().update_layout(DOM::UpdateLayoutReason::CanvasRenderingContext2DSetShadowColor);
-        if (auto node = context.layout_node()) {
-            color_resolution_context = CSS::ColorResolutionContext::for_layout_node_with_style(*node);
-        }
+        if (context.computed_properties())
+            color_resolution_context = CSS::ColorResolutionContext::for_element(abstract_element);
 
         auto parsedValue = style_value->to_color(color_resolution_context).value_or(Color::Black);
 
@@ -1182,8 +1230,7 @@ void CanvasRenderingContext2D::set_filter(String filter)
         return;
     }
 
-    auto& realm = static_cast<CanvasRenderingContext2D&>(*this).realm();
-    auto parser = CSS::Parser::Parser::create(CSS::Parser::ParsingParams(realm), filter);
+    auto parser = CSS::Parser::Parser::create(CSS::Parser::ParsingParams { CSS::Parser::SpecialContext::CanvasContextGenericValue }, filter);
 
     // 2. Let parsedValue be the result of parsing the given values as a <filter-value-list>.
     //    If any property-independent style sheet syntax like 'inherit' or 'initial' is present,
@@ -1191,18 +1238,27 @@ void CanvasRenderingContext2D::set_filter(String filter)
     auto style_value = parser.parse_as_css_value(CSS::PropertyID::Filter);
 
     if (style_value && style_value->is_filter_value_list()) {
-        auto filter_value_list = style_value->as_filter_value_list().filter_value_list();
+        auto& document = canvas_element().document();
+        DOM::AbstractElement abstract_element { canvas_element() };
+        document.update_style_if_needed_for_element(abstract_element);
 
-        // Note: The layout must be updated to make sure the canvas's layout node isn't null.
-        canvas_element().document().update_layout(DOM::UpdateLayoutReason::CanvasRenderingContext2DSetFilter);
-        auto layout_node = canvas_element().layout_node();
+        // FIXME: Font relative lengths should be resolved against the context's font, not the canvas element's
+        auto length_resolution_context = canvas_element().computed_properties()
+            ? CSS::Length::ResolutionContext::for_element(abstract_element)
+            : CSS::Length::ResolutionContext::for_document(document);
+
+        CSS::ComputationContext computation_context {
+            .length_resolution_context = length_resolution_context,
+            .abstract_element = abstract_element,
+        };
+        auto filter_value_list = style_value->absolutized(computation_context)->as_filter_value_list().filter_value_list();
 
         // 4. Set this's current filter to the given value.
         for (auto& item : filter_value_list) {
             // FIXME: Add support for SVG filters when they get implement by the CSS parser.
             item.visit(
                 [&](CSS::FilterOperation::Blur const& blur_filter) {
-                    float radius = blur_filter.resolved_radius(*layout_node);
+                    float radius = blur_filter.resolved_radius();
                     auto new_filter = Gfx::Filter::blur(radius, radius);
 
                     drawing_state().filter = drawing_state().filter.has_value()
@@ -1218,7 +1274,7 @@ void CanvasRenderingContext2D::set_filter(String filter)
                         : new_filter;
                 },
                 [&](CSS::FilterOperation::HueRotate const& hue_rotate) {
-                    float angle = hue_rotate.angle_degrees(*layout_node);
+                    float angle = hue_rotate.angle_degrees();
                     auto new_filter = Gfx::Filter::hue_rotate(angle);
 
                     drawing_state().filter = drawing_state().filter.has_value()
@@ -1226,21 +1282,19 @@ void CanvasRenderingContext2D::set_filter(String filter)
                         : new_filter;
                 },
                 [&](CSS::FilterOperation::DropShadow const& drop_shadow) {
-                    auto resolution_context = CSS::Length::ResolutionContext::for_layout_node(*layout_node);
-                    CSS::CalculationResolutionContext calculation_context {
-                        .length_resolution_context = resolution_context,
-                    };
-                    auto zero_px = CSS::Length::make_px(0);
-
-                    float offset_x = static_cast<float>(drop_shadow.offset_x.resolved(calculation_context).value_or(zero_px).to_px(resolution_context));
-                    float offset_y = static_cast<float>(drop_shadow.offset_y.resolved(calculation_context).value_or(zero_px).to_px(resolution_context));
+                    float offset_x = static_cast<float>(CSS::Length::from_style_value(drop_shadow.offset_x, {}).absolute_length_to_px());
+                    float offset_y = static_cast<float>(CSS::Length::from_style_value(drop_shadow.offset_y, {}).absolute_length_to_px());
 
                     float radius = 0.0f;
-                    if (drop_shadow.radius.has_value()) {
-                        radius = static_cast<float>(drop_shadow.radius->resolved(calculation_context).value_or(zero_px).to_px(resolution_context));
+                    if (drop_shadow.radius) {
+                        radius = static_cast<float>(CSS::Length::from_style_value(*drop_shadow.radius, {}).absolute_length_to_px());
                     };
 
-                    auto color = drop_shadow.color.value_or(Gfx::Color { 0, 0, 0, 255 });
+                    Gfx::Color color = Gfx::Color::Black;
+                    if (drop_shadow.color && canvas_element().computed_properties()) {
+                        auto color_context = CSS::ColorResolutionContext::for_element(abstract_element);
+                        color = drop_shadow.color->to_color(color_context).value_or(Gfx::Color::Black);
+                    }
 
                     auto new_filter = Gfx::Filter::drop_shadow(offset_x, offset_y, radius, color);
 

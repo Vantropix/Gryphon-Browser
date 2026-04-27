@@ -5,7 +5,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/SubmitEventPrototype.h>
+#include <LibWeb/Bindings/SubmitEvent.h>
 #include <LibWeb/HTML/SubmitEvent.h>
 
 namespace Web::HTML {
@@ -14,7 +14,9 @@ GC_DEFINE_ALLOCATOR(SubmitEvent);
 
 GC::Ref<SubmitEvent> SubmitEvent::create(JS::Realm& realm, FlyString const& event_name, SubmitEventInit const& event_init)
 {
-    return realm.create<SubmitEvent>(realm, event_name, event_init);
+    auto event = realm.create<SubmitEvent>(realm, event_name, event_init);
+    event->set_is_trusted(true);
+    return event;
 }
 
 WebIDL::ExceptionOr<GC::Ref<SubmitEvent>> SubmitEvent::construct_impl(JS::Realm& realm, FlyString const& event_name, SubmitEventInit const& event_init)

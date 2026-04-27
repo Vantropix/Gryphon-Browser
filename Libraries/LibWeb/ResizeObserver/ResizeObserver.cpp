@@ -6,7 +6,7 @@
  */
 
 #include <LibWeb/Bindings/Intrinsics.h>
-#include <LibWeb/Bindings/ResizeObserverPrototype.h>
+#include <LibWeb/Bindings/ResizeObserver.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/HTML/Scripting/ExceptionReporter.h>
 #include <LibWeb/HTML/Window.h>
@@ -49,6 +49,7 @@ void ResizeObserver::visit_edges(JS::Cell::Visitor& visitor)
 
 void ResizeObserver::finalize()
 {
+    Base::finalize();
     if (m_document && m_list_node.is_in_list())
         m_document->unregister_resize_observer({}, *this);
 }
@@ -106,9 +107,9 @@ void ResizeObserver::disconnect()
 void ResizeObserver::invoke_callback(ReadonlySpan<GC::Ref<ResizeObserverEntry>> entries) const
 {
     auto& callback = *m_callback;
-    auto& realm = callback.callback_context;
+    auto& settings_object = callback.callback_context;
 
-    auto wrapped_records = MUST(JS::Array::create(realm, 0));
+    auto wrapped_records = MUST(JS::Array::create(settings_object->realm(), 0));
     for (size_t i = 0; i < entries.size(); ++i) {
         auto& record = entries.at(i);
         auto property_index = JS::PropertyKey { i };

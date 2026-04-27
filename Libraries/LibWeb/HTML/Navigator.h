@@ -20,6 +20,7 @@
 #include <LibWeb/HTML/PluginArray.h>
 #include <LibWeb/HTML/UserActivation.h>
 #include <LibWeb/MediaCapabilitiesAPI/MediaCapabilities.h>
+#include <LibWeb/MediaCapture/MediaDevices.h>
 #include <LibWeb/Serial/Serial.h>
 #include <LibWeb/StorageAPI/NavigatorStorage.h>
 
@@ -66,10 +67,12 @@ public:
     [[nodiscard]] GC::Ref<UserActivation> user_activation();
     [[nodiscard]] GC::Ref<CredentialManagement::CredentialsContainer> credentials();
     [[nodiscard]] GC::Ref<WebIDL::Promise> get_battery();
+    [[nodiscard]] GC::Ref<WebXR::XRSystem> xr();
 
     GC::Ref<ServiceWorker::ServiceWorkerContainer> service_worker();
 
     GC::Ref<MediaCapabilitiesAPI::MediaCapabilities> media_capabilities();
+    GC::Ref<MediaCapture::MediaDevices> media_devices();
 
     static WebIDL::Long max_touch_points();
 
@@ -107,11 +110,17 @@ private:
     // https://w3c.github.io/media-capabilities/#dom-navigator-mediacapabilities
     GC::Ptr<MediaCapabilitiesAPI::MediaCapabilities> m_media_capabilities;
 
+    // https://w3c.github.io/mediacapture-main/#dom-navigator-mediadevices
+    GC::Ptr<MediaCapture::MediaDevices> m_media_devices;
+
     // https://w3c.github.io/webappsec-credential-management/#framework-credential-management
     GC::Ptr<CredentialManagement::CredentialsContainer> m_credentials;
 
     // https://w3c.github.io/battery/
     GC::Ptr<WebIDL::Promise> m_battery_promise;
+
+    // https://immersive-web.github.io/webxr/#dom-navigator-xr
+    GC::Ptr<WebXR::XRSystem> m_xr;
 };
 
 }

@@ -154,6 +154,52 @@ public:
         return !is_nan() && !is_infinity();
     }
 
+    template<DerivedFrom<Object> T>
+    [[nodiscard]] ALWAYS_INLINE bool is() const
+    {
+        return as_if<T>() != nullptr;
+    }
+
+    template<DerivedFrom<Object> T>
+    [[nodiscard]] ALWAYS_INLINE GC::Ptr<T> as_if()
+    {
+        if (!is_object())
+            return nullptr;
+        if constexpr (IsSame<T, Object>) {
+            return as_object();
+        } else {
+            return ::as_if<T>(as_object());
+        }
+    }
+
+    template<DerivedFrom<Object> T>
+    [[nodiscard]] ALWAYS_INLINE GC::Ptr<T const> as_if() const
+    {
+        if (!is_object())
+            return nullptr;
+        if constexpr (IsSame<T, Object>) {
+            return as_object();
+        } else {
+            return ::as_if<T>(as_object());
+        }
+    }
+
+    template<DerivedFrom<Object> T>
+    [[nodiscard]] ALWAYS_INLINE T& as()
+    {
+        auto ptr = as_if<T>();
+        VERIFY(ptr);
+        return *ptr;
+    }
+
+    template<DerivedFrom<Object> T>
+    [[nodiscard]] ALWAYS_INLINE T const& as() const
+    {
+        auto ptr = as_if<T>();
+        VERIFY(ptr);
+        return *ptr;
+    }
+
     constexpr Value()
         : Value(UNDEFINED_TAG << GC::TAG_SHIFT, (u64)0)
     {
@@ -349,7 +395,7 @@ public:
         return *extract_pointer<BigInt>();
     }
 
-    Array& as_array();
+    Array& as_array_exotic_object();
     FunctionObject& as_function();
     FunctionObject const& as_function() const;
 
@@ -547,6 +593,7 @@ enum class NumberToStringMode {
     WithExponent,
     WithoutExponent,
 };
+JS_API void number_to_string(StringBuilder&, double, NumberToStringMode = NumberToStringMode::WithExponent);
 [[nodiscard]] JS_API String number_to_string(double, NumberToStringMode = NumberToStringMode::WithExponent);
 [[nodiscard]] JS_API Utf16String number_to_utf16_string(double, NumberToStringMode = NumberToStringMode::WithExponent);
 [[nodiscard]] ByteString number_to_byte_string(double, NumberToStringMode = NumberToStringMode::WithExponent);
@@ -561,99 +608,15 @@ namespace AK {
 static_assert(sizeof(JS::Value) == sizeof(double));
 
 template<>
-class Optional<JS::Value> : public OptionalBase<JS::Value> {
-    template<typename U>
-    friend class Optional;
+struct SentinelOptionalTraits<JS::Value> {
+    static constexpr JS::Value sentinel_value() { return JS::js_special_empty_value(); }
+    static constexpr bool is_sentinel(JS::Value const& value) { return value.is_special_empty_value(); }
+};
 
+template<>
+class Optional<JS::Value> : public SentinelOptional<JS::Value> {
 public:
-    using ValueType = JS::Value;
-
-    constexpr Optional() = default;
-
-    template<SameAs<OptionalNone> V>
-    constexpr Optional(V) { }
-
-    constexpr Optional(Optional<JS::Value> const& other)
-    {
-        if (other.has_value())
-            m_value = other.m_value;
-    }
-
-    constexpr Optional(Optional&& other)
-        : m_value(other.m_value)
-    {
-    }
-
-    template<typename U = JS::Value>
-    requires(!IsSame<OptionalNone, RemoveCVReference<U>>)
-    explicit(!IsConvertible<U&&, JS::Value>) constexpr Optional(U&& value)
-    requires(!IsSame<RemoveCVReference<U>, Optional<JS::Value>> && IsConstructible<JS::Value, U &&>)
-        : m_value(forward<U>(value))
-    {
-    }
-
-    template<SameAs<OptionalNone> V>
-    constexpr Optional& operator=(V)
-    {
-        clear();
-        return *this;
-    }
-
-    constexpr Optional& operator=(Optional const& other)
-    {
-        if (this != &other) {
-            clear();
-            m_value = other.m_value;
-        }
-        return *this;
-    }
-
-    constexpr Optional& operator=(Optional&& other)
-    {
-        if (this != &other) {
-            clear();
-            m_value = other.m_value;
-        }
-        return *this;
-    }
-
-    constexpr void clear()
-    {
-        m_value = JS::js_special_empty_value();
-    }
-
-    [[nodiscard]] constexpr bool has_value() const
-    {
-        return !m_value.is_special_empty_value();
-    }
-
-    [[nodiscard]] constexpr JS::Value& value() &
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] constexpr JS::Value const& value() const&
-    {
-        VERIFY(has_value());
-        return m_value;
-    }
-
-    [[nodiscard]] constexpr JS::Value value() &&
-    {
-        return release_value();
-    }
-
-    [[nodiscard]] constexpr JS::Value release_value()
-    {
-        VERIFY(has_value());
-        JS::Value released_value = m_value;
-        clear();
-        return released_value;
-    }
-
-private:
-    JS::Value m_value { JS::js_special_empty_value() };
+    using SentinelOptional::SentinelOptional;
 };
 
 }
