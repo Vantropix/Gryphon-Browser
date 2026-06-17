@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <AK/Optional.h>
 #include <AK/RefCounted.h>
+#include <LibGfx/DecodedImageFrame.h>
 #include <LibGfx/ScalingMode.h>
 #include <LibGfx/Size.h>
 #include <LibJS/Heap/Cell.h>
@@ -22,10 +24,13 @@ class DecodedImageData : public JS::Cell {
 public:
     virtual ~DecodedImageData();
 
-    virtual Optional<Gfx::IntRect> frame_rect([[maybe_unused]] size_t frame_index) const = 0;
-    virtual void paint([[maybe_unused]] DisplayListRecordingContext&, [[maybe_unused]] size_t frame_index, [[maybe_unused]] Gfx::IntRect dst_rect, [[maybe_unused]] Gfx::IntRect clip_rect, [[maybe_unused]] Gfx::ScalingMode scaling_mode) const = 0;
+    [[nodiscard]] bool is_cors_cross_origin() const { return m_is_cors_cross_origin; }
+    void set_is_cors_cross_origin(bool value) { m_is_cors_cross_origin = value; }
 
-    virtual RefPtr<Gfx::ImmutableBitmap> bitmap(size_t frame_index, Gfx::IntSize = {}) const = 0;
+    virtual Optional<Gfx::IntRect> frame_rect([[maybe_unused]] size_t frame_index) const = 0;
+    virtual void paint([[maybe_unused]] DisplayListRecordingContext&, [[maybe_unused]] size_t frame_index, [[maybe_unused]] Gfx::IntRect dst_rect, [[maybe_unused]] Gfx::ScalingMode scaling_mode) const = 0;
+
+    virtual Optional<Gfx::DecodedImageFrame> frame(size_t frame_index, Gfx::IntSize = {}) const = 0;
     virtual int frame_duration(size_t frame_index) const = 0;
 
     virtual size_t frame_count() const = 0;
@@ -40,6 +45,9 @@ public:
 
 protected:
     DecodedImageData();
+
+private:
+    bool m_is_cors_cross_origin { false };
 };
 
 }

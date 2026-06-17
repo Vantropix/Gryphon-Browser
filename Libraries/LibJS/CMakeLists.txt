@@ -1,17 +1,16 @@
 include(libjs_generators)
 
 set(SOURCES
-    Bytecode/AsmInterpreter/AsmInterpreter.cpp
-    Bytecode/BasicBlock.cpp
+    Bytecode/AsmInterpreter/AsmSlowPaths.cpp
     Bytecode/Executable.cpp
     Bytecode/IdentifierTable.cpp
     Bytecode/Instruction.cpp
     Bytecode/Interpreter.cpp
-    Bytecode/Label.cpp
     Bytecode/PropertyNameIterator.cpp
     Bytecode/PropertyKeyTable.cpp
     Bytecode/RegexTable.cpp
     Bytecode/StringTable.cpp
+    Bytecode/Validator.cpp
     Console.cpp
     Contrib/Test262/262Object.cpp
     Contrib/Test262/AgentObject.cpp
@@ -63,12 +62,12 @@ set(SOURCES
     Runtime/ClassConstruction.cpp
     Runtime/ClassFieldDefinition.cpp
     Runtime/Completion.cpp
-    Runtime/CompletionCell.cpp
     Runtime/ConsoleObjectPrototype.cpp
     Runtime/ConsoleObject.cpp
     Runtime/DataView.cpp
     Runtime/DataViewConstructor.cpp
     Runtime/DataViewPrototype.cpp
+    Runtime/DescriptorArray.cpp
     Runtime/Date.cpp
     Runtime/DateConstructor.cpp
     Runtime/DatePrototype.cpp
@@ -78,6 +77,7 @@ set(SOURCES
     Runtime/DisposableStackPrototype.cpp
     Runtime/ECMAScriptFunctionObject.cpp
     Runtime/Environment.cpp
+    Runtime/EnvironmentShape.cpp
     Runtime/Error.cpp
     Runtime/ErrorConstructor.cpp
     Runtime/ErrorData.cpp
@@ -269,7 +269,7 @@ set(GENERATED_SOURCES Bytecode/Op.cpp)
 
 ladybird_lib(LibJS js EXPLICIT_SYMBOL_EXPORT)
 
-target_link_libraries(LibJS PRIVATE LibCore LibCrypto LibFileSystem LibRegex LibSyntax LibGC simdjson::simdjson)
+target_link_libraries(LibJS PRIVATE LibCore LibCrypto LibFileSystem LibRegex LibSyntax LibTextCodec LibGC simdjson::simdjson)
 
 # Link LibUnicode publicly to ensure ICU data (which is in libicudata.a) is available in any process using LibJS.
 target_link_libraries(LibJS PUBLIC LibUnicode)
@@ -311,21 +311,33 @@ if(NOT BUILD_SHARED_LIBS)
         COMMENT "Merging Rust archive into LibJS"
     )
     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/rust_merge_tmp)
+
+    # POST_BUILD steps don't track inputs, so when libjs_rust.a changes ninja
+    # leaves liblagom-js.a alone and the merged archive ends up with stale
+    # Rust objects. Force the C++ FFI bridge file to depend on the Rust
+    # archive: when it changes, RustIntegration.cpp recompiles, LibJS gets
+    # re-archived, and POST_BUILD re-merges the fresh Rust objects.
+    get_target_property(_libjs_rust_lib libjs_rust IMPORTED_LOCATION)
+    set_property(SOURCE RustIntegration.cpp APPEND PROPERTY OBJECT_DEPENDS ${_libjs_rust_lib})
 endif()
 
-# AsmInterpreter: generate platform-specific assembly from DSL
-# NB: Win64 uses a different ABI (shadow space, different arg registers)
-#     from SysV AMD64, and the x86_64 backend only supports SysV for now.
-if (NOT WIN32 AND ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(x86_64|amd64|AMD64)$"))
+# AsmInterpreter: generate platform-specific assembly from DSL.
+if ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(x86_64|amd64|AMD64)$")
     set(ASMINT_ARCH "x86_64")
-elseif ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(aarch64|arm64)$")
+elseif ("${CMAKE_SYSTEM_PROCESSOR}" MATCHES "^(aarch64|arm64|ARM64)$")
     set(ASMINT_ARCH "aarch64")
+else()
+    message(FATAL_ERROR "LibJS requires AsmInterpreter support for ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 if (DEFINED ASMINT_ARCH)
     enable_language(ASM)
+    if (WIN32 AND CMAKE_ASM_COMPILER_ID MATCHES "Clang")
+        set(CMAKE_ASM_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_ProgramDatabase "")
+        set(CMAKE_ASM_COMPILE_OPTIONS_MSVC_DEBUG_INFORMATION_FORMAT_EditAndContinue "")
+    endif()
     set(ASMINTGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/AsmIntGen")
-    set(ASMINTGEN_BIN "${ASMINTGEN_DIR}/target/release/asmintgen")
+    set(ASMINTGEN_BIN "${ASMINTGEN_DIR}/target/release/asmintgen${CMAKE_EXECUTABLE_SUFFIX}")
     set(ASMINT_DSL "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/AsmInterpreter/asmint.asm")
     set(ASMINT_GENERATED_S "${CMAKE_CURRENT_BINARY_DIR}/Bytecode/AsmInterpreter/asmint_${ASMINT_ARCH}.S")
     set(ASM_OFFSETS_FILE "${CMAKE_CURRENT_BINARY_DIR}/Bytecode/AsmInterpreter/asm_offsets.conf")
@@ -334,6 +346,9 @@ if (DEFINED ASMINT_ARCH)
     # offsetof() to emit struct field offsets as DSL constants.
     add_executable(gen_asm_offsets "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/AsmInterpreter/gen_asm_offsets.cpp")
     target_link_libraries(gen_asm_offsets PRIVATE AK)
+    if (MSVC)
+        target_compile_definitions(gen_asm_offsets PRIVATE _ALLOW_KEYWORD_MACROS)
+    endif()
     target_compile_definitions(gen_asm_offsets PRIVATE private=public protected=public)
     # NB: Strip fuzzer sanitizer flags so gen_asm_offsets can define its own main().
     if (ENABLE_FUZZERS_LIBFUZZER)
@@ -378,13 +393,21 @@ if (DEFINED ASMINT_ARCH)
 
     set(BYTECODE_DEF "${CMAKE_CURRENT_SOURCE_DIR}/Bytecode/Bytecode.def")
 
-    if (APPLE)
+    if (WIN32)
+        set(ASMINT_OBJ_FORMAT "coff")
+    elseif (APPLE)
         set(ASMINT_OBJ_FORMAT "macho")
     else()
         set(ASMINT_OBJ_FORMAT "elf")
     endif()
 
     set(ASMINT_EXTRA_FLAGS "")
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug"
+        OR ENABLE_ADDRESS_SANITIZER
+        OR ENABLE_MEMORY_SANITIZER
+        OR ENABLE_UNDEFINED_SANITIZER)
+        list(APPEND ASMINT_EXTRA_FLAGS "--enable-assertions")
+    endif()
     # All Apple Silicon chips are ARMv8.5+ which includes FEAT_JSCVT.
     if ("${ASMINT_ARCH}" STREQUAL "aarch64" AND APPLE)
         list(APPEND ASMINT_EXTRA_FLAGS "--has-jscvt")

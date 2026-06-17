@@ -10,6 +10,8 @@ namespace Web::CSS {
 
 bool InvalidationSet::operator==(InvalidationSet const& other) const
 {
+    if (hash() != other.hash())
+        return false;
     if (m_needs_invalidate_self != other.m_needs_invalidate_self)
         return false;
     if (m_needs_invalidate_whole_subtree != other.m_needs_invalidate_whole_subtree)
@@ -30,6 +32,7 @@ void InvalidationSet::include_all_from(InvalidationSet const& other)
     m_needs_invalidate_whole_subtree |= other.m_needs_invalidate_whole_subtree;
     for (auto const& property : other.m_properties)
         m_properties.set(property);
+    m_hash = {};
 }
 
 bool InvalidationSet::is_empty() const
@@ -51,6 +54,28 @@ void InvalidationSet::for_each_property(Function<IterationDecision(Property cons
         if (callback(property) == IterationDecision::Break)
             return;
     }
+}
+
+u32 InvalidationSet::hash() const
+{
+    if (m_hash.has_value())
+        return *m_hash;
+
+    u32 property_hash_sum = 0;
+    u32 property_hash_xor = 0;
+    for (auto const& property : m_properties) {
+        auto property_hash = AK::Traits<Property>::hash(property);
+        property_hash_sum += property_hash;
+        property_hash_xor ^= pair_int_hash(property_hash, 0x9e3779b9);
+    }
+
+    auto hash = pair_int_hash(m_needs_invalidate_self, m_needs_invalidate_whole_subtree);
+    hash = pair_int_hash(hash, m_properties.size());
+    hash = pair_int_hash(hash, property_hash_sum);
+    hash = pair_int_hash(hash, property_hash_xor);
+
+    m_hash = hash;
+    return hash;
 }
 
 }

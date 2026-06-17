@@ -187,7 +187,7 @@ GC::Ref<HTMLCollection> ParentNode::get_elements_by_tag_name_ns(Optional<FlyStri
 }
 
 // https://dom.spec.whatwg.org/#dom-parentnode-prepend
-WebIDL::ExceptionOr<void> ParentNode::prepend(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes)
+WebIDL::ExceptionOr<void> ParentNode::prepend(ReadonlySpan<Variant<GC::Ref<Node>, Utf16String>> const& nodes)
 {
     // 1. Let node be the result of converting nodes into a node given nodes and this’s node document.
     auto node = TRY(convert_nodes_to_single_node(nodes, document()));
@@ -198,7 +198,7 @@ WebIDL::ExceptionOr<void> ParentNode::prepend(Vector<Variant<GC::Root<Node>, Utf
     return {};
 }
 
-WebIDL::ExceptionOr<void> ParentNode::append(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes)
+WebIDL::ExceptionOr<void> ParentNode::append(ReadonlySpan<Variant<GC::Ref<Node>, Utf16String>> const& nodes)
 {
     // 1. Let node be the result of converting nodes into a node given nodes and this’s node document.
     auto node = TRY(convert_nodes_to_single_node(nodes, document()));
@@ -209,7 +209,7 @@ WebIDL::ExceptionOr<void> ParentNode::append(Vector<Variant<GC::Root<Node>, Utf1
     return {};
 }
 
-WebIDL::ExceptionOr<void> ParentNode::replace_children(Vector<Variant<GC::Root<Node>, Utf16String>> const& nodes)
+WebIDL::ExceptionOr<void> ParentNode::replace_children(ReadonlySpan<Variant<GC::Ref<Node>, Utf16String>> const& nodes)
 {
     // 1. Let node be the result of converting nodes into a node given nodes and this’s node document.
     auto node = TRY(convert_nodes_to_single_node(nodes, document()));
@@ -266,6 +266,10 @@ GC::Ptr<Element> ParentNode::get_element_by_id(FlyString const& id) const
             auto const& shadow_root = static_cast<ShadowRoot const&>(*this);
             return shadow_root.element_by_id().get(id, shadow_root);
         }
+        // The document element's inclusive subtree contains every element in the document, so the document's cache
+        // gives the same answer as walking our subtree.
+        if (auto const& document = this->document(); document.document_element() == this)
+            return document.element_by_id().get(id, document);
     }
 
     GC::Ptr<Element> found_element;

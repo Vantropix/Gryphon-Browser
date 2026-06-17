@@ -11,6 +11,11 @@ function resetStyleCounters() {
     internals.resetStyleInvalidationCounters();
 }
 
+function flushPendingStyleWork() {
+    internals.updateStyle();
+    resetStyleCounters();
+}
+
 function styleCounterSummary() {
     const counters = internals.getStyleInvalidationCounters();
     return (
@@ -26,8 +31,39 @@ function styleCounterSummary() {
     );
 }
 
+function styleCounterSummaryWithoutRecomputations() {
+    const counters = internals.getStyleInvalidationCounters();
+    return (
+        `styleInvalidations=${counters.styleInvalidations}, fullStyleInvalidations=${counters.fullStyleInvalidations}, ` +
+        `hasAncestorWalkInvocations=${counters.hasAncestorWalkInvocations}, ` +
+        `hasInvalidationMetadataCandidates=${counters.hasInvalidationMetadataCandidates}, ` +
+        `hasMatchInvocations=${counters.hasMatchInvocations}, ` +
+        `hasResultCacheHits=${counters.hasResultCacheHits}, hasResultCacheMisses=${counters.hasResultCacheMisses}`
+    );
+}
+
+function styleCounters() {
+    return internals.getStyleInvalidationCounters();
+}
+
 function printPassWithCounters(testName) {
     println(`PASS: ${testName} | ${styleCounterSummary()}`);
+}
+
+function printPassWithoutRecomputeCounters(testName) {
+    println(`PASS: ${testName} | ${styleCounterSummaryWithoutRecomputations()}`);
+}
+
+function hasWalkCounterDetailSummary() {
+    const counters = styleCounters();
+    return (
+        `hasAncestorWalkVisits=${counters.hasAncestorWalkVisits}, ` +
+        `hasAncestorSiblingElementChecks=${counters.hasAncestorSiblingElementChecks}`
+    );
+}
+
+function printPassWithHasWalkCounters(testName) {
+    println(`PASS: ${testName} | ${styleCounterSummary()}, ${hasWalkCounterDetailSummary()}`);
 }
 
 function makeElement(tagName, options = {}) {
@@ -58,9 +94,17 @@ function addStyle(root, cssText) {
     return style;
 }
 
+function addProbeStyle(root, selectorText, duplicateRuleCount = 1) {
+    const rules = [];
+    for (let i = 0; i < duplicateRuleCount; ++i) rules.push(`${selectorText} { ${MATCH_DECLARATION} }`);
+    return addStyle(root, rules.join("\n"));
+}
+
 function makeSubject(options = {}) {
-    const tagName = options.tagName || (options.shadowHost ? "x-subject" : "div");
-    const subject = makeElement(tagName, { className: "subject", attributes: options.attributes });
+    const tagName = options.svgTagName || options.tagName || (options.shadowHost ? "x-subject" : "div");
+    const subject = options.svgTagName
+        ? makeSvgElement(tagName, { className: "subject", attributes: options.attributes })
+        : makeElement(tagName, { className: "subject", attributes: options.attributes });
     if (options.shadowHost) subject.attachShadow({ mode: "open" }).appendChild(document.createElement("slot"));
     return subject;
 }
@@ -92,6 +136,7 @@ appendSvgUseDocumentStyledSubject.nextId = 0;
 function buildFixture(scope, selector, pseudoElement, options = {}) {
     const fixture = makeElement("section");
     document.body.appendChild(fixture);
+    const duplicateRuleCount = options.duplicateRuleCount ?? 1;
 
     let subject = makeSubject(options.subjectOptions);
     let target = subject;
@@ -100,13 +145,13 @@ function buildFixture(scope, selector, pseudoElement, options = {}) {
 
     if (scope === "document") {
         fixture.appendChild(subject);
-        ruleStyle = addStyle(document.head, `.subject${selector}${pseudoElement} { ${MATCH_DECLARATION} }`);
+        ruleStyle = addProbeStyle(document.head, `.subject${selector}${pseudoElement}`, duplicateRuleCount);
     } else if (scope === "shadow-internal") {
         const host = makeElement("div");
         fixture.appendChild(host);
         const shadowRoot = host.attachShadow({ mode: "open" });
         shadowRoot.appendChild(subject);
-        addStyle(shadowRoot, `.subject${selector}${pseudoElement} { ${MATCH_DECLARATION} }`);
+        addProbeStyle(shadowRoot, `.subject${selector}${pseudoElement}`, duplicateRuleCount);
     } else if (scope === "shadow-host") {
         target = makeElement("div");
         fixture.appendChild(target);
@@ -114,14 +159,14 @@ function buildFixture(scope, selector, pseudoElement, options = {}) {
         shadowRoot.appendChild(document.createElement("slot"));
         target.className = "subject";
         subject = target;
-        addStyle(shadowRoot, `:host(.subject${selector})${pseudoElement} { ${MATCH_DECLARATION} }`);
+        addProbeStyle(shadowRoot, `:host(.subject${selector})${pseudoElement}`, duplicateRuleCount);
     } else if (scope === "slotted-default") {
         const host = makeElement("div");
         fixture.appendChild(host);
         host.appendChild(subject);
         const shadowRoot = host.attachShadow({ mode: "open" });
         shadowRoot.appendChild(document.createElement("slot"));
-        addStyle(shadowRoot, `::slotted(.subject${selector}) { ${MATCH_DECLARATION} }`);
+        addProbeStyle(shadowRoot, `::slotted(.subject${selector})`, duplicateRuleCount);
     } else if (scope === "slotted-named") {
         const host = makeElement("div");
         fixture.appendChild(host);
@@ -130,7 +175,7 @@ function buildFixture(scope, selector, pseudoElement, options = {}) {
         const shadowRoot = host.attachShadow({ mode: "open" });
         const slot = makeElement("slot", { attributes: { name: "named" } });
         shadowRoot.appendChild(slot);
-        addStyle(shadowRoot, `::slotted(.subject${selector}) { ${MATCH_DECLARATION} }`);
+        addProbeStyle(shadowRoot, `::slotted(.subject${selector})`, duplicateRuleCount);
     } else if (scope === "slotted-shadow-host-default") {
         subject = makeSubject({ shadowHost: true });
         target = subject;
@@ -139,7 +184,7 @@ function buildFixture(scope, selector, pseudoElement, options = {}) {
         host.appendChild(subject);
         const shadowRoot = host.attachShadow({ mode: "open" });
         shadowRoot.appendChild(document.createElement("slot"));
-        addStyle(shadowRoot, `::slotted(.subject${selector}) { ${MATCH_DECLARATION} }`);
+        addProbeStyle(shadowRoot, `::slotted(.subject${selector})`, duplicateRuleCount);
     } else if (scope === "slotted-shadow-host-named") {
         subject = makeSubject({ shadowHost: true });
         target = subject;
@@ -150,27 +195,27 @@ function buildFixture(scope, selector, pseudoElement, options = {}) {
         const shadowRoot = host.attachShadow({ mode: "open" });
         const slot = makeElement("slot", { attributes: { name: "named" } });
         shadowRoot.appendChild(slot);
-        addStyle(shadowRoot, `::slotted(.subject${selector}) { ${MATCH_DECLARATION} }`);
+        addProbeStyle(shadowRoot, `::slotted(.subject${selector})`, duplicateRuleCount);
     } else if (scope === "part-document") {
         const partFixture = appendShadowPartHost(fixture, options);
         subject = partFixture.subject;
         target = subject;
-        ruleStyle = addStyle(document.head, `x-host::part(foo)${selector}${pseudoElement} { ${MATCH_DECLARATION} }`);
+        ruleStyle = addProbeStyle(document.head, `x-host::part(foo)${selector}${pseudoElement}`, duplicateRuleCount);
     } else if (scope === "part-shadow-host-document") {
         const partFixture = appendShadowPartHost(fixture, { subjectIsShadowHost: true });
         subject = partFixture.subject;
         target = subject;
-        ruleStyle = addStyle(document.head, `x-host::part(foo)${selector}${pseudoElement} { ${MATCH_DECLARATION} }`);
+        ruleStyle = addProbeStyle(document.head, `x-host::part(foo)${selector}${pseudoElement}`, duplicateRuleCount);
     } else if (scope === "part-shadow-internal") {
         const partFixture = appendShadowPartHost(fixture, options);
         subject = partFixture.subject;
         target = subject;
-        addStyle(partFixture.shadowRoot, `:host::part(foo)${selector}${pseudoElement} { ${MATCH_DECLARATION} }`);
+        addProbeStyle(partFixture.shadowRoot, `:host::part(foo)${selector}${pseudoElement}`, duplicateRuleCount);
     } else if (scope === "part-shadow-host-internal") {
         const partFixture = appendShadowPartHost(fixture, { subjectIsShadowHost: true });
         subject = partFixture.subject;
         target = subject;
-        addStyle(partFixture.shadowRoot, `:host::part(foo)${selector}${pseudoElement} { ${MATCH_DECLARATION} }`);
+        addProbeStyle(partFixture.shadowRoot, `:host::part(foo)${selector}${pseudoElement}`, duplicateRuleCount);
     } else if (scope === "part-shadow-ancestor") {
         const outerHost = makeElement("x-outer-host");
         fixture.appendChild(outerHost);
@@ -181,7 +226,7 @@ function buildFixture(scope, selector, pseudoElement, options = {}) {
         subject = makeElement("div", { className: "subject", attributes: { part: "foo" } });
         target = subject;
         innerShadowRoot.appendChild(subject);
-        addStyle(outerShadowRoot, `x-host::part(foo)${selector}${pseudoElement} { ${MATCH_DECLARATION} }`);
+        addProbeStyle(outerShadowRoot, `x-host::part(foo)${selector}${pseudoElement}`, duplicateRuleCount);
     } else if (scope === "part-shadow-host-ancestor") {
         const outerHost = makeElement("x-outer-host");
         fixture.appendChild(outerHost);
@@ -192,9 +237,9 @@ function buildFixture(scope, selector, pseudoElement, options = {}) {
         subject = makeSubject({ shadowHost: true, attributes: { part: "foo" } });
         target = subject;
         innerShadowRoot.appendChild(subject);
-        addStyle(outerShadowRoot, `x-host::part(foo)${selector}${pseudoElement} { ${MATCH_DECLARATION} }`);
+        addProbeStyle(outerShadowRoot, `x-host::part(foo)${selector}${pseudoElement}`, duplicateRuleCount);
     } else if (scope === "document-styled-use-shadow") {
-        ruleStyle = addStyle(document.head, `.subject${selector}${pseudoElement} { ${MATCH_DECLARATION} }`);
+        ruleStyle = addProbeStyle(document.head, `.subject${selector}${pseudoElement}`, duplicateRuleCount);
         subject = appendSvgUseDocumentStyledSubject(fixture);
         target = subject;
     } else {
@@ -216,6 +261,31 @@ function readProbe(target, pseudoElement) {
     );
 }
 
+function isSlottedScope(scope) {
+    return scope.startsWith("slotted-");
+}
+
+function caseSupportedInScope(scope, selectorCase, pseudoElement = "") {
+    // Bare ::slotted() rules style the assigned element itself, not a pseudo-element of the assigned element.
+    // These cases can be enabled once ::slotted(...)::before selector chaining is supported.
+    if (pseudoElement && isSlottedScope(scope)) return false;
+
+    if (selectorCase.requiresSvgSubject) {
+        if (pseudoElement) return false;
+        return ![
+            "document-styled-use-shadow",
+            "shadow-host",
+            "slotted-shadow-host-default",
+            "slotted-shadow-host-named",
+            "part-shadow-host-document",
+            "part-shadow-host-internal",
+            "part-shadow-ancestor",
+            "part-shadow-host-ancestor",
+        ].includes(scope);
+    }
+    return true;
+}
+
 function runCase({
     suite,
     scope,
@@ -227,8 +297,18 @@ function runCase({
     after,
     pseudoElement = "",
     skipInitialRead = false,
+    omitRecomputeCounters = false,
     fixtureOptions = {},
 }) {
+    if (
+        !caseSupportedInScope(
+            scope,
+            { requiresSvgSubject: fixtureOptions.subjectOptions?.svgTagName !== undefined },
+            pseudoElement
+        )
+    )
+        return;
+
     const testName = `${suite}: ${scope}: ${name}`;
     const { cleanup, fixture, subject, target } = buildFixture(scope, selector, pseudoElement, fixtureOptions);
     try {
@@ -238,10 +318,120 @@ function runCase({
         resetStyleCounters();
         mutate(subject, fixture);
         assertEqual(`${testName} after mutation`, readProbe(target, pseudoElement), after ? MATCH : BASE);
-        printPassWithCounters(testName);
+        if (omitRecomputeCounters) printPassWithoutRecomputeCounters(testName);
+        else printPassWithCounters(testName);
     } finally {
         cleanup();
+        flushPendingStyleWork();
     }
+}
+
+function appendScopedDuplicateRuleFixture(scope, ruleText) {
+    const fixture = makeElement("section");
+    document.body.appendChild(fixture);
+
+    if (scope === "document") {
+        const style = addStyle(document.head, ruleText);
+        return {
+            fixture,
+            cleanup: () => {
+                style.remove();
+                fixture.remove();
+            },
+        };
+    }
+
+    if (scope === "shadow-internal") {
+        const host = makeElement("div");
+        fixture.appendChild(host);
+        const shadowRoot = host.attachShadow({ mode: "open" });
+        addStyle(shadowRoot, ruleText);
+        return { fixture: shadowRoot, cleanup: () => fixture.remove() };
+    }
+
+    throw new Error(`Unsupported duplicate rule scope ${scope}`);
+}
+
+function runDuplicateDescendantInvalidationRuleCase(scope) {
+    const ruleText = `
+        .active .target { ${MATCH_DECLARATION} }
+        .active .target { ${MATCH_DECLARATION} }
+    `;
+    const scoped = appendScopedDuplicateRuleFixture(scope, ruleText);
+    const ancestor = makeElement("div");
+    const target = makeElement("div", { className: "target" });
+    ancestor.appendChild(target);
+    scoped.fixture.appendChild(ancestor);
+
+    try {
+        assertEqual(`duplicate descendant invalidation rule ${scope} initial`, readProbe(target), BASE);
+        resetStyleCounters();
+        ancestor.classList.add("active");
+        assertEqual(`duplicate descendant invalidation rule ${scope} after mutation`, readProbe(target), MATCH);
+        printPassWithCounters(`duplicate descendant invalidation rules merge: ${scope}`);
+    } finally {
+        scoped.cleanup();
+        flushPendingStyleWork();
+    }
+}
+
+function runDuplicateSiblingInvalidationRuleCase(scope) {
+    const ruleText = `
+        .trigger.active + .target { ${MATCH_DECLARATION} }
+        .trigger.active + .target { ${MATCH_DECLARATION} }
+    `;
+    const scoped = appendScopedDuplicateRuleFixture(scope, ruleText);
+    const trigger = makeElement("div", { className: "trigger" });
+    const target = makeElement("div", { className: "target" });
+    scoped.fixture.append(trigger, target);
+
+    try {
+        assertEqual(`duplicate sibling invalidation rule ${scope} initial`, readProbe(target), BASE);
+        resetStyleCounters();
+        trigger.classList.add("active");
+        assertEqual(`duplicate sibling invalidation rule ${scope} after mutation`, readProbe(target), MATCH);
+        printPassWithCounters(`duplicate sibling invalidation rules merge: ${scope}`);
+    } finally {
+        scoped.cleanup();
+        flushPendingStyleWork();
+    }
+}
+
+function runBatchedHasMutationCase({
+    name,
+    selector,
+    setup,
+    unrelatedMutation,
+    relatedMutation,
+    extraRuleText = "",
+    expectedAfter = true,
+}) {
+    const style = addStyle(
+        document.head,
+        `
+        :root:has(.flag) .subgrid:has(${selector}) { ${MATCH_DECLARATION} }
+        ${extraRuleText}
+    `
+    );
+    const fixture = makeElement("section");
+    const flag = makeElement("div", { className: "flag" });
+    const subgrid = makeElement("div", { className: "subgrid" });
+    fixture.append(flag, subgrid);
+    document.body.appendChild(fixture);
+
+    const parts = { fixture, subgrid, ...setup(subgrid, fixture) };
+    assertEqual(`${name} initial`, readProbe(subgrid), BASE);
+    document.body.offsetWidth;
+
+    resetStyleCounters();
+    unrelatedMutation(parts);
+    relatedMutation(parts);
+    assertEqual(`${name} after batched mutations`, readProbe(subgrid), expectedAfter ? MATCH : BASE);
+    printPassWithCounters(`batched :has mutation invalidates after earlier unrelated mutation: ${name}`);
+
+    style.remove();
+    fixture.remove();
+    flushPendingStyleWork();
 }
 
 function appendHitDescendant(subject) {
@@ -267,6 +457,7 @@ const childMutationCases = [
         selector: ":empty",
         initial: true,
         after: false,
+        omitRecomputeCounters: true,
         mutate: subject => subject.appendChild(makeElement("span")),
     },
     {
@@ -275,6 +466,33 @@ const childMutationCases = [
         initial: true,
         after: false,
         mutate: subject => (subject.textContent = "text"),
+    },
+    {
+        name: "mixed-case SVG type selector with :empty becomes false after element append",
+        selector: ":is(linearGradient.subject):empty",
+        initial: true,
+        after: false,
+        requiresSvgSubject: true,
+        fixtureOptions: { subjectOptions: { svgTagName: "linearGradient" } },
+        mutate: subject => subject.appendChild(makeSvgElement("stop")),
+    },
+    {
+        name: "mixed-case SVG type selector with :not(:empty) becomes true after element append",
+        selector: ":is(linearGradient.subject):not(:empty)",
+        initial: false,
+        after: true,
+        requiresSvgSubject: true,
+        fixtureOptions: { subjectOptions: { svgTagName: "linearGradient" } },
+        mutate: subject => subject.appendChild(makeSvgElement("stop")),
+    },
+    {
+        name: "mixed-case SVG foreignObject type selector with :empty becomes false after element append",
+        selector: ":is(foreignObject.subject):empty",
+        initial: true,
+        after: false,
+        requiresSvgSubject: true,
+        fixtureOptions: { subjectOptions: { svgTagName: "foreignObject" } },
+        mutate: subject => subject.appendChild(makeSvgElement("g")),
     },
     {
         name: ":has(.hit) after direct child append",
@@ -562,6 +780,171 @@ childMutationCases.push(
     {
         name: ":has(> *) after child append",
         selector: ":has(> *)",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("span")),
+    },
+    {
+        name: ":has(:checked) after checked checkbox append",
+        selector: ":has(:checked)",
+        initial: false,
+        after: true,
+        mutate: subject => {
+            const input = makeElement("input", { attributes: { type: "checkbox" } });
+            input.checked = true;
+            subject.appendChild(input);
+        },
+    },
+    {
+        name: ":has(:checked) becomes false after checked checkbox removal",
+        selector: ":has(:checked)",
+        initial: true,
+        after: false,
+        setup: subject => {
+            const input = makeElement("input", { attributes: { type: "checkbox" } });
+            input.checked = true;
+            subject.appendChild(input);
+        },
+        mutate: subject => subject.firstChild.remove(),
+    },
+    {
+        name: ":has(:not(:checked)) after unchecked checkbox append",
+        selector: ":has(:not(:checked))",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("input", { attributes: { type: "checkbox" } })),
+    },
+    {
+        name: ":has(:enabled) after enabled input append",
+        selector: ":has(:enabled)",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("input")),
+    },
+    {
+        name: ":has(:disabled) after disabled input append",
+        selector: ":has(:disabled)",
+        initial: false,
+        after: true,
+        mutate: subject => {
+            const input = makeElement("input");
+            input.disabled = true;
+            subject.appendChild(input);
+        },
+    },
+    {
+        name: ":has(:required) after required input append",
+        selector: ":has(:required)",
+        initial: false,
+        after: true,
+        mutate: subject => {
+            const input = makeElement("input");
+            input.required = true;
+            subject.appendChild(input);
+        },
+    },
+    {
+        name: ":has(:optional) after optional input append",
+        selector: ":has(:optional)",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("input")),
+    },
+    {
+        name: ":has(:empty) becomes false after text inserted into only child",
+        selector: ":has(:empty)",
+        initial: true,
+        after: false,
+        setup: subject => subject.appendChild(makeElement("span")),
+        mutate: subject => subject.firstChild.appendChild(document.createTextNode("x")),
+    },
+    {
+        name: ":has(:not(:empty)) after non-empty child append",
+        selector: ":has(:not(:empty))",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("span", { text: "x" })),
+    },
+    {
+        name: ":has(:dir(rtl)) after dir=auto child append",
+        selector: ":has(:dir(rtl))",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("span", { text: "א", attributes: { dir: "auto" } })),
+    },
+    {
+        name: ":has(:lang(he)) after Hebrew language child append",
+        selector: ":has(:lang(he))",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("span", { attributes: { lang: "he" } })),
+    },
+    {
+        name: ":has(:link) after linked anchor append",
+        selector: ":has(:link)",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("a", { attributes: { href: "https://example.com/" } })),
+    },
+    {
+        name: ":has(:any-link) after linked anchor append",
+        selector: ":has(:any-link)",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("a", { attributes: { href: "https://example.com/" } })),
+    },
+    {
+        name: ":has(:only-child) after only child append",
+        selector: ":has(:only-child)",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("span")),
+    },
+    {
+        name: ":has(:only-child) becomes false after sibling append",
+        selector: ":has(:only-child)",
+        initial: true,
+        after: false,
+        setup: subject => subject.appendChild(makeElement("span")),
+        mutate: subject => subject.appendChild(makeElement("span")),
+    },
+    {
+        name: ":has(:nth-child(2)) after second child append",
+        selector: ":has(:nth-child(2))",
+        initial: false,
+        after: true,
+        setup: subject => subject.appendChild(makeElement("span")),
+        mutate: subject => subject.appendChild(makeElement("span")),
+    },
+    {
+        name: ":has(:nth-last-child(2)) after trailing child append",
+        selector: ":has(:nth-last-child(2))",
+        initial: false,
+        after: true,
+        setup: subject => subject.appendChild(makeElement("span")),
+        mutate: subject => subject.appendChild(makeElement("span")),
+    },
+    {
+        name: ":has(:first-of-type) after typed child append",
+        selector: ":has(:first-of-type)",
+        initial: false,
+        after: true,
+        mutate: subject => subject.appendChild(makeElement("span")),
+    },
+    {
+        name: ":has(:is(:checked, :disabled)) after disabled input append",
+        selector: ":has(:is(:checked, :disabled))",
+        initial: false,
+        after: true,
+        mutate: subject => {
+            const input = makeElement("input");
+            input.disabled = true;
+            subject.appendChild(input);
+        },
+    },
+    {
+        name: ":has(:where(:empty, :checked)) after empty child append",
+        selector: ":has(:where(:empty, :checked))",
         initial: false,
         after: true,
         mutate: subject => subject.appendChild(makeElement("span")),
@@ -903,6 +1286,23 @@ const attributeMutationCases = [
         name: ":has(.hit) after descendant class change",
         selector: ":has(.hit)",
         mutate: child => child.classList.add("hit"),
+    },
+    {
+        name: ":has(.HIT) after matching uppercase descendant class change",
+        selector: ":has(.HIT)",
+        mutate: child => child.classList.add("HIT"),
+    },
+    {
+        name: ":has(.HIT) ignores lowercase descendant class change in standards mode",
+        selector: ":has(.HIT)",
+        after: false,
+        mutate: child => child.classList.add("hit"),
+    },
+    {
+        name: ":has(.hit) ignores uppercase descendant class change in standards mode",
+        selector: ":has(.hit)",
+        after: false,
+        mutate: child => child.classList.add("HIT"),
     },
     {
         name: ":has([data-hit]) after descendant attribute change",
@@ -1258,6 +1658,10 @@ const partChildMutationCases = [
         selector: ":empty",
         initial: true,
         after: false,
+        // This is the first case to run in this test. whichever scope runs first triggers some lazy style-system
+        // initialization whose recomputation counters differ depending on non-deterministic state — so the counters
+        // here aren't a stable thing to assert on. childMutationCases sets the same flag on its equivalent first case.
+        omitRecomputeCounters: true,
         mutate: subject => subject.appendChild(makeElement("span")),
     },
     {
@@ -1663,13 +2067,14 @@ const descendantStateMutationCases = [
     },
 ];
 
-function runDetachedReconnectCase(scope, selectorCase, pseudoElement = "") {
+function runDetachedReconnectCase(scope, selectorCase, pseudoElement = "", options = {}) {
     runCase({
         suite: pseudoElement ? "detached pseudo-element child mutation" : "detached child mutation",
         scope,
         initial: selectorCase.initial,
         after: selectorCase.after,
         pseudoElement,
+        omitRecomputeCounters: options.omitRecomputeCounters,
         ...selectorCase,
         mutate: (subject, fixture) => {
             fixture.remove();
@@ -1680,6 +2085,8 @@ function runDetachedReconnectCase(scope, selectorCase, pseudoElement = "") {
 }
 
 function runInheritedLanguageCase(scope, selectorCase, pseudoElement = "") {
+    if (!caseSupportedInScope(scope, selectorCase, pseudoElement)) return;
+
     const suite = pseudoElement ? "inherited language pseudo-element mutation" : "inherited language mutation";
     const testName = `${suite}: ${scope}: ${selectorCase.name}`;
     const { cleanup, fixture, subject, target } = buildFixture(scope, selectorCase.selector, pseudoElement);
@@ -1693,6 +2100,7 @@ function runInheritedLanguageCase(scope, selectorCase, pseudoElement = "") {
         printPassWithCounters(testName);
     } finally {
         cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -1758,11 +2166,12 @@ function runPrecomputedDetachedInsertionCase(selectorCase) {
         subtree.remove();
         resetStyleCounters();
         container.appendChild(subtree);
-        assertEqual(`${selectorCase.name} after insertion`, readProbe(target), MATCH);
+        assertEqual(`${selectorCase.name} after insertion`, readProbe(target), selectorCase.after ?? MATCH);
         printPassWithCounters(`precomputed detached insertion: ${selectorCase.name}`);
     } finally {
         style.remove();
         fixture.remove();
+        flushPendingStyleWork();
     }
 }
 
@@ -1793,6 +2202,37 @@ const precomputedDetachedInsertionCases = [
         makeSubtree: () => {
             const root = makeElement("div");
             root.appendChild(makeElement("span", { id: "detached-leaf" }));
+            return root;
+        },
+        target: subtree => subtree.firstChild,
+    },
+    {
+        name: "mixed-case ancestor id selector",
+        cssText: `.container #Foo .leaf { ${MATCH_DECLARATION} }`,
+        makeSubtree: () => {
+            const root = makeElement("div", { id: "Foo" });
+            root.appendChild(makeElement("span", { className: "leaf" }));
+            return root;
+        },
+        target: subtree => subtree.firstChild,
+    },
+    {
+        name: "mixed-case ancestor id selector rejects lowercase id",
+        cssText: `.container #Foo .leaf { ${MATCH_DECLARATION} }`,
+        after: BASE,
+        makeSubtree: () => {
+            const root = makeElement("div", { id: "foo" });
+            root.appendChild(makeElement("span", { className: "leaf" }));
+            return root;
+        },
+        target: subtree => subtree.firstChild,
+    },
+    {
+        name: "mixed-case ancestor id selector inside selector list",
+        cssText: `.container :is(#Foo) .leaf { ${MATCH_DECLARATION} }`,
+        makeSubtree: () => {
+            const root = makeElement("div", { id: "Foo" });
+            root.appendChild(makeElement("span", { className: "leaf" }));
             return root;
         },
         target: subtree => subtree.firstChild,
@@ -1874,6 +2314,7 @@ const precomputedDetachedInsertionCases = [
 ];
 
 function stressCaseSupportedInScope(scope, selectorCase) {
+    if (!caseSupportedInScope(scope, selectorCase)) return false;
     return !(scope === "document-styled-use-shadow" && selectorCase.selector.startsWith(":dir("));
 }
 
@@ -1974,6 +2415,8 @@ function runStateStressCase(scope, selectorCase, mode) {
 
 function runInheritedLanguageStressCase(scope, selectorCase, mode) {
     const pseudoElement = mode.includes("pseudo") ? "::before" : "";
+    if (!caseSupportedInScope(scope, selectorCase, pseudoElement)) return;
+
     const suite = `inherited language stress ${mode}`;
     const testName = `${suite}: ${scope}: ${selectorCase.name}`;
     const { cleanup, fixture, subject, target } = buildFixture(scope, selectorCase.selector, pseudoElement);
@@ -1990,6 +2433,7 @@ function runInheritedLanguageStressCase(scope, selectorCase, mode) {
         printPassWithCounters(testName);
     } finally {
         cleanup();
+        flushPendingStyleWork();
     }
 }
 
@@ -2016,26 +2460,42 @@ function runPrecomputedDetachedInsertionStressCase(selectorCase, mode) {
             const { subtree, target } = cloneSubtreeForPrecomputedStress(fixture, selectorCase);
             resetStyleCounters();
             container.appendChild(subtree);
-            assertEqual(`${selectorCase.name} append stress after insertion`, readProbe(target), MATCH);
+            assertEqual(
+                `${selectorCase.name} append stress after insertion`,
+                readProbe(target),
+                selectorCase.after ?? MATCH
+            );
         } else if (mode === "prepend") {
             container.appendChild(makeElement("span"));
             const { subtree, target } = cloneSubtreeForPrecomputedStress(fixture, selectorCase);
             resetStyleCounters();
             container.prepend(subtree);
-            assertEqual(`${selectorCase.name} prepend stress after insertion`, readProbe(target), MATCH);
+            assertEqual(
+                `${selectorCase.name} prepend stress after insertion`,
+                readProbe(target),
+                selectorCase.after ?? MATCH
+            );
         } else if (mode === "replaceChildren") {
             container.appendChild(makeElement("span"));
             const { subtree, target } = cloneSubtreeForPrecomputedStress(fixture, selectorCase);
             resetStyleCounters();
             container.replaceChildren(subtree);
-            assertEqual(`${selectorCase.name} replaceChildren stress after insertion`, readProbe(target), MATCH);
+            assertEqual(
+                `${selectorCase.name} replaceChildren stress after insertion`,
+                readProbe(target),
+                selectorCase.after ?? MATCH
+            );
         } else if (mode === "fragment") {
             const { subtree, target } = cloneSubtreeForPrecomputedStress(fixture, selectorCase);
             const fragment = document.createDocumentFragment();
             fragment.appendChild(subtree);
             resetStyleCounters();
             container.appendChild(fragment);
-            assertEqual(`${selectorCase.name} fragment stress after insertion`, readProbe(target), MATCH);
+            assertEqual(
+                `${selectorCase.name} fragment stress after insertion`,
+                readProbe(target),
+                selectorCase.after ?? MATCH
+            );
         } else {
             throw new Error(`Unknown precomputed detached insertion stress mode ${mode}`);
         }
@@ -2043,6 +2503,7 @@ function runPrecomputedDetachedInsertionStressCase(selectorCase, mode) {
     } finally {
         style.remove();
         fixture.remove();
+        flushPendingStyleWork();
     }
 }
 
@@ -2073,6 +2534,7 @@ function runSlotMoveCase() {
         printPassWithCounters("scope move: slotted shadow-host target moves between slot scopes");
     } finally {
         fixture.remove();
+        flushPendingStyleWork();
     }
 }
 
@@ -2099,5 +2561,6 @@ function runNestedSlotPartCase() {
         printPassWithCounters("combined topology: ancestor shadow exposes part slot with generated pseudo-element");
     } finally {
         fixture.remove();
+        flushPendingStyleWork();
     }
 }

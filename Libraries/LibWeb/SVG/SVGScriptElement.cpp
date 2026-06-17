@@ -6,6 +6,7 @@
  */
 
 #include <AK/ScopeGuard.h>
+#include <LibCore/ImmutableBytes.h>
 #include <LibWeb/Bindings/SVGScriptElement.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/Fetch/Fetching/Fetching.h>
@@ -38,6 +39,14 @@ void SVGScriptElement::visit_edges(Cell::Visitor& visitor)
     Base::visit_edges(visitor);
     SVGURIReferenceMixin::visit_edges(visitor);
     visitor.visit(m_script);
+}
+
+void SVGScriptElement::adopted_from(DOM::Document& old_document)
+{
+    Base::adopted_from(old_document);
+
+    if (m_document_load_event_delayer.has_value())
+        m_document_load_event_delayer.emplace(document());
 }
 
 void SVGScriptElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
@@ -128,11 +137,14 @@ void SVGScriptElement::process_the_script_element()
         Fetch::Infrastructure::FetchAlgorithms::Input fetch_algorithms_input {};
         fetch_algorithms_input.process_response_consume_body
             = [self = GC::Ref { *this }, script_url](auto response, auto body_bytes) {
-                  ByteBuffer body;
-                  if (!response->is_network_error())
-                      body_bytes.visit([&](ByteBuffer& bytes) { body = move(bytes); }, [](auto) {});
+                  if (response->is_network_error()) {
+                      self->finish_external_script_fetch(script_url, {});
+                      return;
+                  }
 
-                  self->finish_external_script_fetch(script_url, body);
+                  body_bytes.visit(
+                      [&](Core::ImmutableBytes& bytes) { self->finish_external_script_fetch(script_url, bytes.bytes()); },
+                      [&](auto) { self->finish_external_script_fetch(script_url, {}); });
               };
 
         (void)Fetch::Fetching::fetch(realm(), request,
@@ -151,7 +163,7 @@ void SVGScriptElement::process_the_script_element()
     execute_script();
 }
 
-void SVGScriptElement::finish_external_script_fetch(URL::URL const& script_url, ByteBuffer const& body)
+void SVGScriptElement::finish_external_script_fetch(URL::URL const& script_url, ReadonlyBytes body)
 {
     if (!body.is_empty() && in_a_document_tree() && !is_scripting_disabled()) {
         auto script_content = String::from_utf8(body);

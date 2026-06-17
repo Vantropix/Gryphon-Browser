@@ -52,7 +52,10 @@ void LineBuilder::begin_new_line(bool increment_y, bool is_first_break_in_sequen
     if (increment_y) {
         if (is_first_break_in_sequence) {
             // First break is simple, just go to the start of the next line.
-            m_current_block_offset += max(m_max_height_on_current_line, m_context.containing_block().computed_values().line_height());
+            if (m_should_advance_to_last_line_box_bottom && m_containing_block_used_values.line_boxes.size() > 1)
+                m_current_block_offset = m_containing_block_used_values.line_boxes[m_containing_block_used_values.line_boxes.size() - 2].bottom();
+            else
+                m_current_block_offset += max(m_max_height_on_current_line, m_context.containing_block().computed_values().line_height());
         } else {
             // We're doing more than one break in a row.
             // This means we're trying to squeeze past intruding floats.
@@ -72,6 +75,7 @@ void LineBuilder::begin_new_line(bool increment_y, bool is_first_break_in_sequen
     line_box.m_original_available_width = m_available_width_for_current_line;
     m_max_height_on_current_line = 0;
     m_last_line_needs_update = true;
+    m_should_advance_to_last_line_box_bottom = false;
 
     bool should_indent = m_containing_block_used_values.line_boxes.size() <= 1
         || (m_text_indent_each_line && forced_break == ForcedBreak::Yes);
@@ -99,10 +103,17 @@ void LineBuilder::append_box(Box const& box, CSSPixels leading_size, CSSPixels t
         box_state.content_width(), box_state.content_height(), box_state.border_box_top(), box_state.border_box_bottom());
     m_max_height_on_current_line = max(m_max_height_on_current_line, box_state.margin_box_height());
 
-    box_state.containing_line_box_fragment = LineBoxFragmentCoordinate {
-        .line_box_index = m_containing_block_used_values.line_boxes.size() - 1,
-        .fragment_index = line_box.fragments().size() - 1,
-    };
+    box_state.containing_line_box_fragment = {};
+
+    // https://drafts.csswg.org/css-display/#atomic-inline
+    // Inline-level boxes that are not inline boxes are called atomic inline-level boxes because they
+    // participate in their inline formatting context as a single opaque box.
+    if (box.is_atomic_inline()) {
+        box_state.containing_line_box_fragment = LineBoxFragmentCoordinate {
+            .line_box_index = m_containing_block_used_values.line_boxes.size() - 1,
+            .fragment_index = line_box.fragments().size() - 1,
+        };
+    }
 }
 
 void LineBuilder::append_text_chunk(TextNode const& text_node, size_t offset_in_node, size_t length_in_node, CSSPixels leading_size, CSSPixels trailing_size, CSSPixels leading_margin, CSSPixels trailing_margin, CSSPixels content_width, CSSPixels content_height, RefPtr<Gfx::GlyphRun> glyph_run)
@@ -112,6 +123,11 @@ void LineBuilder::append_text_chunk(TextNode const& text_node, size_t offset_in_
         trailing_margin, content_width, content_height, 0, 0, move(glyph_run));
 
     m_max_height_on_current_line = max(m_max_height_on_current_line, line_box.block_length());
+}
+
+void LineBuilder::append_static_position_marker(Box const& box)
+{
+    ensure_last_line_box().add_static_position_marker(box);
 }
 
 CSSPixels LineBuilder::y_for_float_to_be_inserted_here(Box const& box)
@@ -267,6 +283,7 @@ void LineBuilder::update_last_line()
         return CSSPixels::nearest_value_for(font_metrics.ascent) + half_leading;
     }();
 
+    bool should_align_strut_to_line_box_baseline = false;
     auto line_box_baseline = [&] {
         CSSPixels line_box_baseline = strut_baseline;
         for (auto& fragment : line_box.fragments()) {
@@ -284,7 +301,7 @@ void LineBuilder::update_last_line()
                 fragment_baseline = CSSPixels::nearest_value_for(font_metrics.ascent) + half_leading;
             } else {
                 auto const& box = as<Layout::Box>(fragment.layout_node());
-                fragment_baseline = m_context.box_baseline(box);
+                fragment_baseline = m_context.box_baseline(box, FormattingContext::BaselineSet::Last);
             }
 
             // Remember the baseline used for this fragment. This will be used when painting the fragment.
@@ -296,14 +313,27 @@ void LineBuilder::update_last_line()
                 fragment_baseline += length_percentage->to_px(fragment.layout_node(), line_height);
             }
 
-            line_box_baseline = max(line_box_baseline, fragment_baseline);
+            if (fragment_baseline > line_box_baseline) {
+                if (!fragment.layout_node().is_text_node()) {
+                    auto const& box = as<Layout::Box>(fragment.layout_node());
+                    auto const& vertical_align = fragment.layout_node().computed_values().vertical_align();
+                    should_align_strut_to_line_box_baseline |= box.display().is_inline_outside()
+                        && box.display().is_flex_inside()
+                        && vertical_align.has<CSS::VerticalAlign>()
+                        && vertical_align.get<CSS::VerticalAlign>() == CSS::VerticalAlign::Baseline;
+                }
+                line_box_baseline = fragment_baseline;
+            }
         }
         return line_box_baseline;
     }();
 
     // Start with the "strut", an imaginary zero-width box at the start of each line box.
+    auto const strut_line_height = m_context.containing_block().computed_values().line_height();
     auto strut_top = m_current_block_offset;
-    auto strut_bottom = m_current_block_offset + m_context.containing_block().computed_values().line_height();
+    auto strut_bottom = should_align_strut_to_line_box_baseline
+        ? m_current_block_offset + line_box_baseline + (strut_line_height - strut_baseline)
+        : m_current_block_offset + strut_line_height;
 
     CSSPixels uppermost_box_top = strut_top;
     CSSPixels lowermost_box_bottom = strut_bottom;
@@ -393,8 +423,17 @@ void LineBuilder::update_last_line()
         lowermost_box_bottom = max(lowermost_box_bottom, bottom_of_inline_box);
     }
 
+    auto marker_inline_offset = line_box.fragments().is_empty()
+        ? max(inline_offset_top, inline_offset_bottom)
+        : inline_offset;
+    for (auto& marker : line_box.static_position_markers()) {
+        marker.inline_offset += marker_inline_offset;
+        marker.block_offset += block_offset + m_current_block_offset;
+    }
+
     // 3. The line box height is the distance between the uppermost box top and the lowermost box bottom.
     line_box.m_block_length = lowermost_box_bottom - uppermost_box_top;
+    m_should_advance_to_last_line_box_bottom = should_align_strut_to_line_box_baseline;
 
     line_box.m_bottom = m_current_block_offset + line_box.m_block_length;
     line_box.m_baseline = line_box_baseline;

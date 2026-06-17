@@ -1,13 +1,13 @@
 /*
  * Copyright (c) 2020-2021, Andreas Kling <andreas@ladybird.org>
- * Copyright (c) 2023-2025, Sam Atkins <sam@ladybird.org>
+ * Copyright (c) 2023-2026, Sam Atkins <sam@ladybird.org>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #include <LibWeb/Bindings/HTMLIFrameElement.h>
-#include <LibWeb/CSS/CascadedProperties.h>
 #include <LibWeb/CSS/ComputedProperties.h>
+#include <LibWeb/CSS/Invalidation/EmbeddedContentInvalidator.h>
 #include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/CSS/StyleValues/LengthStyleValue.h>
 #include <LibWeb/DOM/DOMTokenList.h>
@@ -20,6 +20,7 @@
 #include <LibWeb/HTML/Parser/HTMLParser.h>
 #include <LibWeb/HTML/TraversableNavigable.h>
 #include <LibWeb/Layout/NavigableContainerViewport.h>
+#include <LibWeb/ResourceTiming/PerformanceResourceTiming.h>
 #include <LibWeb/TrustedTypes/RequireTrustedTypesForDirective.h>
 #include <LibWeb/TrustedTypes/TrustedTypePolicy.h>
 
@@ -40,9 +41,9 @@ void HTMLIFrameElement::initialize(JS::Realm& realm)
     Base::initialize(realm);
 }
 
-GC::Ptr<Layout::Node> HTMLIFrameElement::create_layout_node(GC::Ref<CSS::ComputedProperties> style)
+RefPtr<Layout::Node> HTMLIFrameElement::create_layout_node(CSS::ComputedProperties const& style)
 {
-    return heap().allocate<Layout::NavigableContainerViewport>(document(), *this, move(style));
+    return make_ref_counted<Layout::NavigableContainerViewport>(document(), *this, style);
 }
 
 void HTMLIFrameElement::adjust_computed_style(CSS::ComputedProperties& style)
@@ -87,10 +88,8 @@ void HTMLIFrameElement::attribute_changed(FlyString const& name, Optional<String
         }
     }
 
-    if (name == HTML::AttributeNames::width || name == HTML::AttributeNames::height) {
-        // FIXME: This should only invalidate the layout, not the style.
-        invalidate_style(DOM::StyleInvalidationReason::HTMLIFrameElementGeometryChange);
-    }
+    if (name == HTML::AttributeNames::width || name == HTML::AttributeNames::height)
+        CSS::Invalidation::invalidate_style_after_embedded_content_geometry_change(*this);
 
     if (name == HTML::AttributeNames::marginwidth || name == HTML::AttributeNames::marginheight) {
         if (auto* document = this->content_document_without_origin_check()) {
@@ -215,7 +214,7 @@ void HTMLIFrameElement::removed_from(IsSubtreeRoot is_subtree_root, DOM::Node* o
 }
 
 // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#iframe-load-event-steps
-void run_iframe_load_event_steps(HTML::HTMLIFrameElement& element)
+void run_iframe_load_event_steps(HTMLIFrameElement& element)
 {
     // FIXME: 1. Assert: element's content navigable is not null.
     if (!element.content_navigable()) {
@@ -229,12 +228,45 @@ void run_iframe_load_event_steps(HTML::HTMLIFrameElement& element)
 
     // FIXME: 3. If childDocument has its mute iframe load flag set, then return.
 
-    // FIXME: 4. Set childDocument's iframe load in progress flag.
+    // 4. If element's pending resource-timing start time is not null:
+    if (element.pending_resource_start_time().has_value()) {
+        // 1. Assert: element's pending resource-timing URL is not null.
+        VERIFY(element.pending_resource_timing_url().has_value());
 
-    // 5. Fire an event named load at element.
+        // 2. Let global be element's node document's relevant global object.
+        auto& global = relevant_global_object(element.document());
+
+        // 3. Let fallbackTimingInfo be a new fetch timing info whose start time is element's pending resource-timing
+        //    start time and whose response end time is the current high resolution time given global.
+        auto fallback_timing_info = Fetch::Infrastructure::FetchTimingInfo::create(element.vm());
+        fallback_timing_info->set_start_time(element.pending_resource_start_time().value());
+        fallback_timing_info->set_end_time(HighResolutionTime::current_high_resolution_time(global));
+
+        // 4. Mark resource timing given fallbackTimingInfo, the result of parsing element's pending resource-timing
+        //    URL, "iframe", global, the empty string, a new response body info, and 0.
+        // FIXME: Our URL is already parsed, how are we supposed to parse it?
+        ResourceTiming::PerformanceResourceTiming::mark_resource_timing(
+            fallback_timing_info,
+            element.pending_resource_timing_url()->to_string(),
+            "iframe"_fly_string,
+            global,
+            Optional<Fetch::Infrastructure::Response::CacheState> {},
+            Fetch::Infrastructure::Response::BodyInfo {},
+            0);
+
+        // 5. Set element's pending resource-timing start time to null.
+        element.set_pending_resource_start_time({});
+
+        // 6. Set element's pending resource-timing URL to null.
+        element.set_pending_resource_timing_url({});
+    }
+
+    // FIXME: 5. Set childDocument's iframe load in progress flag.
+
+    // 6. Fire an event named load at element.
     element.dispatch_event(DOM::Event::create(element.realm(), HTML::EventNames::load));
 
-    // FIXME: 6. Unset childDocument's iframe load in progress flag.
+    // FIXME: 7. Unset childDocument's iframe load in progress flag.
 }
 
 // https://html.spec.whatwg.org/multipage/interaction.html#dom-tabindex
@@ -252,9 +284,9 @@ bool HTMLIFrameElement::is_presentational_hint(FlyString const& name) const
     return name == HTML::AttributeNames::frameborder;
 }
 
-void HTMLIFrameElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperties> cascaded_properties) const
+void HTMLIFrameElement::apply_presentational_hints(Vector<CSS::StyleProperty>& properties) const
 {
-    Base::apply_presentational_hints(cascaded_properties);
+    Base::apply_presentational_hints(properties);
 
     // https://html.spec.whatwg.org/multipage/rendering.html#attributes-for-embedded-content-and-images:attr-iframe-frameborder
     // When an iframe element has a frameborder attribute whose value, when parsed using the rules for parsing integers,
@@ -264,10 +296,10 @@ void HTMLIFrameElement::apply_presentational_hints(GC::Ref<CSS::CascadedProperti
         auto frameborder = parse_integer(*frameborder_attribute);
         if (!frameborder.has_value() || frameborder == 0) {
             auto zero = CSS::LengthStyleValue::create(CSS::Length::make_px(0));
-            cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderTopWidth, zero);
-            cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderRightWidth, zero);
-            cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderBottomWidth, zero);
-            cascaded_properties->set_property_from_presentational_hint(CSS::PropertyID::BorderLeftWidth, zero);
+            properties.append({ .property_id = CSS::PropertyID::BorderTopWidth, .value = zero });
+            properties.append({ .property_id = CSS::PropertyID::BorderRightWidth, .value = zero });
+            properties.append({ .property_id = CSS::PropertyID::BorderBottomWidth, .value = zero });
+            properties.append({ .property_id = CSS::PropertyID::BorderLeftWidth, .value = zero });
         }
     }
 }
@@ -322,6 +354,19 @@ WebIDL::ExceptionOr<void> HTMLIFrameElement::set_srcdoc(TrustedTypes::TrustedHTM
     // 2. Set an attribute value given this, srcdoc's local name, and compliantString.
     set_attribute_value(AttributeNames::srcdoc, compliant_string.to_utf8_but_should_be_ported_to_utf16());
     return {};
+}
+
+// https://html.spec.whatwg.org/multipage/browsers.html#determining-the-iframe-element-referrer-policy
+ReferrerPolicy::ReferrerPolicy determine_iframe_element_referrer_policy(GC::Ptr<DOM::Element> embedder)
+{
+    // 1. If embedder is an iframe element, then return embedder's referrerpolicy attribute's state's corresponding
+    //    keyword.
+    if (auto* iframe = as_if<HTMLIFrameElement>(embedder.ptr())) {
+        return ReferrerPolicy::from_string(iframe->get_attribute_value(HTML::AttributeNames::referrerpolicy)).value_or(ReferrerPolicy::ReferrerPolicy::EmptyString);
+    }
+
+    // 2. Return the empty string.
+    return ReferrerPolicy::ReferrerPolicy::EmptyString;
 }
 
 }

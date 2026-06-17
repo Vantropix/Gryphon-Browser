@@ -221,7 +221,6 @@ class PrototypeChainValidity;
 class Value;
 class WrappedFunction;
 enum class DeclarationKind;
-struct AlreadyResolved;
 class JobCallback;
 struct ModuleRequest;
 struct LoadedModuleRequest;
@@ -316,7 +315,6 @@ using NativeFunctionPointer = ThrowCompletionOr<Value> (*)(VM&);
 
 namespace Bytecode {
 
-class BasicBlock;
 enum class Builtin : u8;
 class Executable;
 class Generator;

@@ -56,6 +56,14 @@ void HTMLScriptElement::visit_edges(Cell::Visitor& visitor)
     visitor.visit(m_preparation_time_document);
 }
 
+void HTMLScriptElement::adopted_from(DOM::Document& old_document)
+{
+    Base::adopted_from(old_document);
+
+    if (m_document_load_event_delayer.has_value())
+        m_document_load_event_delayer.emplace(document());
+}
+
 void HTMLScriptElement::attribute_changed(FlyString const& name, Optional<String> const& old_value, Optional<String> const& value, Optional<FlyString> const& namespace_)
 {
     Base::attribute_changed(name, old_value, value, namespace_);
@@ -70,13 +78,9 @@ void HTMLScriptElement::attribute_changed(FlyString const& name, Optional<String
         if (namespace_.has_value())
             return;
 
-        // AD-HOC: This ensures that prepare_script() is not called when the src attribute is removed.
-        //         See: https://github.com/whatwg/html/pull/10188/files#r1685905457 for more information.
-        if (!value.has_value())
-            return;
-
-        // 2. If localName is src and element is connected, then run the script HTML element post-connection steps, given element.
-        if (is_connected())
+        // 2. If localName is src, value is not null, and element is connected, then run the script HTML element
+        //    post-connection steps, given element.
+        if (value.has_value() && is_connected())
             post_connection();
     } else if (name == HTML::AttributeNames::async) {
         // https://html.spec.whatwg.org/multipage/scripting.html#script-processing-model:script-force-async
@@ -120,10 +124,6 @@ void HTMLScriptElement::begin_delaying_document_load_event(DOM::Document& docume
 // https://html.spec.whatwg.org/multipage/scripting.html#execute-the-script-block
 void HTMLScriptElement::execute_script()
 {
-    // https://html.spec.whatwg.org/multipage/document-lifecycle.html#read-html
-    // Before any script execution occurs, the user agent must wait for scripts may run for the newly-created document to be true for document.
-    VERIFY(document().ready_to_run_scripts());
-
     // 1. Let document be el's node document.
     GC::Ref<DOM::Document> document = this->document();
 
@@ -132,6 +132,10 @@ void HTMLScriptElement::execute_script()
         dbgln("HTMLScriptElement: Refusing to run script because the preparation time document is not the same as the node document.");
         return;
     }
+
+    // https://html.spec.whatwg.org/multipage/document-lifecycle.html#read-html
+    // Before any script execution occurs, the user agent must wait for scripts may run for the newly-created document to be true for document.
+    VERIFY(document->ready_to_run_scripts());
 
     // 3. Unblock rendering on el.
     unblock_rendering();
@@ -764,7 +768,7 @@ WebIDL::ExceptionOr<void> HTMLScriptElement::set_src(TrustedTypes::TrustedScript
 }
 
 // https://w3c.github.io/trusted-types/dist/spec/#the-textContent-idl-attribute
-Variant<GC::Root<TrustedTypes::TrustedScript>, Utf16String, Empty> HTMLScriptElement::text_content() const
+Variant<GC::Ref<TrustedTypes::TrustedScript>, Utf16String, Empty> HTMLScriptElement::text_content() const
 {
     // 1. Return the result of running get text content with this.
     return descendant_text_content();

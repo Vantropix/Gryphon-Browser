@@ -84,6 +84,15 @@ public:
         return run_executable(context, executable, entry_point);
     }
 
+    void enter_module_execution() { ++m_module_execution_depth; }
+    void leave_module_execution()
+    {
+        VERIFY(m_module_execution_depth > 0);
+        --m_module_execution_depth;
+    }
+    [[nodiscard]] bool is_executing_module() const { return m_module_execution_depth > 0; }
+    u64 increment_module_async_evaluation_count() { return m_module_async_evaluation_count++; }
+
     ALWAYS_INLINE Value& accumulator() { return reg(Bytecode::Register::accumulator()); }
     Value& reg(Bytecode::Register const& r)
     {
@@ -103,7 +112,6 @@ public:
         m_running_execution_context->registers_and_constants_and_locals_and_arguments_span().data()[op.raw()] = value;
     }
 
-    Value do_yield(Value value, Optional<Bytecode::Label> continuation);
     void do_return(Value value)
     {
         if (value.is_special_empty_value())
@@ -111,8 +119,6 @@ public:
         reg(Bytecode::Register::return_value()) = value;
         reg(Bytecode::Register::exception()) = js_special_empty_value();
     }
-
-    void catch_exception(Bytecode::Operand dst);
 
     Bytecode::Executable& current_executable() { return *m_running_execution_context->executable; }
     Bytecode::Executable const& current_executable() const { return *m_running_execution_context->executable; }
@@ -133,7 +139,6 @@ public:
     };
     [[nodiscard]] COLD HandleExceptionResponse handle_exception(u32 program_counter, Value exception);
 
-    NEVER_INLINE void pop_inline_frame(Value return_value);
     NEVER_INLINE void unwind_inline_frame_for_exception();
 
     ExecutionContext* push_inline_frame(
@@ -318,6 +323,7 @@ public:
     // The value of the Function component of the running execution context is also called the active function object.
     FunctionObject const* active_function_object() const { return running_execution_context().function; }
     FunctionObject* active_function_object() { return running_execution_context().function; }
+    SharedFunctionInstanceData* active_shared_function_data();
 
     size_t argument_count() const
     {
@@ -507,10 +513,6 @@ private:
     void set_well_known_symbols(WellKnownSymbols well_known_symbols) { m_well_known_symbols = move(well_known_symbols); }
 
     void run_queued_promise_jobs_impl();
-    void run_bytecode(size_t entry_point);
-
-    [[nodiscard]] NEVER_INLINE bool try_inline_call(Bytecode::Instruction const&, u32 current_pc);
-    [[nodiscard]] NEVER_INLINE bool try_inline_call_construct(Bytecode::Instruction const&, u32 current_pc);
 
     static VM* s_the;
 
@@ -562,6 +564,9 @@ private:
     WellKnownSymbols m_well_known_symbols;
 
     u32 m_execution_generation { 0 };
+    u32 m_run_executable_depth { 0 };
+    u32 m_module_execution_depth { 0 };
+    u64 m_module_async_evaluation_count { 0 }; // [[ModuleAsyncEvaluationCount]]
 
     OwnPtr<Agent> m_agent;
 

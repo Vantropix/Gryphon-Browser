@@ -9,6 +9,7 @@
 #include <LibWeb/ARIA/Roles.h>
 #include <LibWeb/Bindings/HTMLOptionElement.h>
 #include <LibWeb/Bindings/Intrinsics.h>
+#include <LibWeb/CSS/Invalidation/ElementStateInvalidator.h>
 #include <LibWeb/DOM/Document.h>
 #include <LibWeb/DOM/DocumentFragment.h>
 #include <LibWeb/DOM/Node.h>
@@ -92,7 +93,7 @@ void HTMLOptionElement::set_selected(bool selected)
 void HTMLOptionElement::set_selected_internal(bool selected)
 {
     if (m_selected != selected)
-        invalidate_style(DOM::StyleInvalidationReason::HTMLOptionElementSelectedChange);
+        CSS::Invalidation::invalidate_style_after_option_selected_state_change(*this);
 
     m_selected = selected;
     if (selected)
@@ -228,7 +229,7 @@ void HTMLOptionElement::update_nearest_select_element()
     auto old_select = m_cached_nearest_select_element;
 
     // 2. Let newSelect be option's option element nearest ancestor select.
-    auto new_select = compute_nearest_select_element();
+    auto new_select = get_nearest_ancestor_select(*this);
 
     // 3. If oldSelect is not newSelect:
     if (old_select != new_select) {
@@ -243,39 +244,6 @@ void HTMLOptionElement::update_nearest_select_element()
 
     // 4. Set option's cached nearest ancestor select element to newSelect.
     m_cached_nearest_select_element = new_select;
-}
-
-// https://html.spec.whatwg.org/multipage/form-elements.html#option-element-nearest-ancestor-select
-GC::Ptr<HTMLSelectElement> HTMLOptionElement::compute_nearest_select_element()
-{
-    // 1. Let ancestorOptgroup be null.
-    GC::Ptr<HTMLOptGroupElement> ancestor_optgroup;
-
-    // 2. For each ancestor of option's ancestors, in reverse tree order:
-    for (auto* ancestor = parent(); ancestor; ancestor = ancestor->parent()) {
-        // 1. If ancestor is a datalist, hr, or option element, then return null.
-        if (is<HTMLDataListElement>(*ancestor)
-            || is<HTMLHRElement>(*ancestor)
-            || is<HTMLOptionElement>(*ancestor))
-            return nullptr;
-
-        // 2. If ancestor is an optgroup element:
-        if (auto* optgroup_element = as_if<HTMLOptGroupElement>(*ancestor)) {
-            // 1. If ancestorOptgroup is not null, then return null.
-            if (ancestor_optgroup)
-                return nullptr;
-
-            // 2. Set ancestorOptgroup to ancestor.
-            ancestor_optgroup = optgroup_element;
-        }
-
-        // 3. If ancestor is a select, then return ancestor.
-        if (auto* select_element = as_if<HTMLSelectElement>(*ancestor))
-            return select_element;
-    }
-
-    // 3. Return null.
-    return nullptr;
 }
 
 Optional<ARIA::Role> HTMLOptionElement::default_role() const

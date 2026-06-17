@@ -20,8 +20,11 @@
 #include <LibCore/Notifier.h>
 #include <LibIPC/Attachment.h>
 #include <LibIPC/AutoCloseFileDescriptor.h>
+#include <LibIPC/Forward.h>
+#include <LibIPC/ReceivedMessageBytes.h>
 #include <LibIPC/TransportHandle.h>
-#include <LibThreading/ConditionVariable.h>
+#include <LibSync/ConditionVariable.h>
+#include <LibSync/Mutex.h>
 #include <LibThreading/Thread.h>
 
 namespace IPC {
@@ -48,14 +51,14 @@ public:
 
     void wait_until_readable();
 
-    void post_message(Vector<u8> const&, Vector<Attachment>& attachments);
+    void post_message(MessageDataType, Vector<Attachment>& attachments);
 
     enum class ShouldShutdown {
         No,
         Yes,
     };
     struct Message {
-        Vector<u8> bytes;
+        ReceivedMessageBytes bytes;
         Queue<Attachment> attachments;
     };
     ShouldShutdown read_as_many_messages_as_possible_without_blocking(Function<void(Message&&)>&&);
@@ -67,7 +70,7 @@ private:
     static constexpr unsigned int IPC_WAKEUP_MESSAGE_ID = 0x4950C003;
 
     struct PendingMessage {
-        Vector<u8> bytes;
+        MessageDataType bytes;
         Vector<Attachment> attachments;
     };
 
@@ -101,11 +104,11 @@ private:
     Atomic<bool> m_peer_eof { false };
 
     Vector<PendingMessage> m_pending_send_messages;
-    Threading::Mutex m_send_mutex;
+    Sync::Mutex m_send_mutex;
     Vector<u8> m_send_buffer;
 
-    Threading::Mutex m_incoming_mutex;
-    Threading::ConditionVariable m_incoming_cv { m_incoming_mutex };
+    Sync::Mutex m_incoming_mutex;
+    Sync::ConditionVariable m_incoming_cv { m_incoming_mutex };
     Vector<NonnullOwnPtr<Message>> m_incoming_messages;
 
     RefPtr<AutoCloseFileDescriptor> m_notify_hook_read_fd;

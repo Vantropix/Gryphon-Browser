@@ -104,7 +104,7 @@ Optional<DOM::BoundaryPoint> previous_equivalent_point(DOM::BoundaryPoint);
 void push_down_values(FlyString const&, GC::Ref<DOM::Node>, Optional<Utf16String const&>);
 Vector<RecordedOverride> record_current_overrides(DOM::Document const&);
 Vector<RecordedOverride> record_current_states_and_values(DOM::Document const&);
-GC::ConservativeVector<RecordedNodeValue> record_the_values_of_nodes(GC::Heap&, Vector<GC::Ref<DOM::Node>> const&);
+GC::ConservativeVector<RecordedNodeValue> record_the_values_of_nodes(Vector<GC::Ref<DOM::Node>> const&);
 void remove_extraneous_line_breaks_at_the_end_of_node(GC::Ref<DOM::Node>);
 void remove_extraneous_line_breaks_before_node(GC::Ref<DOM::Node>);
 void remove_extraneous_line_breaks_from_a_node(GC::Ref<DOM::Node>);
@@ -117,6 +117,8 @@ void set_the_selections_value(DOM::Document&, FlyString const&, Optional<Utf16St
 GC::Ref<DOM::Element> set_the_tag_name(GC::Ref<DOM::Element>, FlyString const&);
 Optional<Utf16String> specified_command_value(GC::Ref<DOM::Element>, FlyString const& command);
 void split_the_parent_of_nodes(Vector<GC::Ref<DOM::Node>> const&);
+bool standard_inline_indeterminate(DOM::Document const&, FlyString const& command);
+Utf16String standard_inline_value(DOM::Document const&, FlyString const& command);
 void toggle_lists(DOM::Document&, FlyString const&);
 bool values_are_equivalent(FlyString const&, Optional<Utf16String const&>, Optional<Utf16String const&>);
 bool values_are_loosely_equivalent(FlyString const&, Optional<Utf16String const&>, Optional<Utf16String const&>);

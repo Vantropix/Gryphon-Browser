@@ -6,6 +6,9 @@
 
 #include "TestWebView.h"
 
+#include "Application.h"
+
+#include <LibCore/AnonymousBuffer.h>
 #include <LibGfx/Bitmap.h>
 #include <LibGfx/ShareableBitmap.h>
 
@@ -25,9 +28,14 @@ TestWebView::TestWebView(Core::AnonymousBuffer theme, Web::DevicePixelSize viewp
 {
 }
 
-void TestWebView::clear_content_filters()
+void TestWebView::clear_content_blockers()
 {
-    client().async_set_content_filters(m_client_state.page_index, {});
+    client().async_set_content_blockers(m_client_state.page_index, MUST(Core::AnonymousBuffer::create_with_size(0)));
+}
+
+NonnullRefPtr<Core::Promise<Empty>> TestWebView::reset_session_history()
+{
+    return WebView::ViewImplementation::reset_session_history_for_testing();
 }
 
 pid_t TestWebView::web_content_pid() const
@@ -40,7 +48,7 @@ NonnullRefPtr<Core::Promise<RefPtr<Gfx::Bitmap const>>> TestWebView::take_screen
     VERIFY(!m_pending_screenshot);
 
     m_pending_screenshot = Core::Promise<RefPtr<Gfx::Bitmap const>>::construct();
-    client().async_take_document_screenshot(0);
+    client().async_take_document_screenshot(page_id());
 
     return *m_pending_screenshot;
 }

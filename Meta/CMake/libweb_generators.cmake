@@ -87,6 +87,17 @@ function (generate_css_implementation)
     )
 
     invoke_py_generator(
+        "GeneratedValueTypesParsing.cpp"
+        "generate_libweb_css_value_types_parsing.py"
+        "${LIBWEB_INPUT_FOLDER}/CSS/ValueTypes.json"
+        "CSS/Parser/GeneratedValueTypesParsing.h"
+        "CSS/Parser/GeneratedValueTypesParsing.cpp"
+        arguments -j "${LIBWEB_INPUT_FOLDER}/CSS/ValueTypes.json"
+                  -u "${LIBWEB_INPUT_FOLDER}/CSS/Units.json"
+        dependencies "${LIBWEB_INPUT_FOLDER}/CSS/Units.json"
+    )
+
+    invoke_py_generator(
         "Units.cpp"
         "generate_libweb_css_units.py"
         "${LIBWEB_INPUT_FOLDER}/CSS/Units.json"
@@ -189,9 +200,9 @@ endfunction()
 function (generate_html_implementation)
     set(LIBWEB_INPUT_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}")
 
-    invoke_cpp_generator(
+    invoke_py_generator(
         "NamedCharacterReferences.cpp"
-        Lagom::GenerateNamedCharacterReferences
+        "generate_libweb_html_named_character_references.py"
         "${LIBWEB_INPUT_FOLDER}/HTML/Parser/Entities.json"
         "HTML/Parser/NamedCharacterReferences.h"
         "HTML/Parser/NamedCharacterReferences.cpp"
@@ -230,14 +241,39 @@ function (generate_html_implementation)
     set(LIBWEB_ALL_GENERATED_HEADERS ${LIBWEB_ALL_GENERATED_HEADERS} PARENT_SCOPE)
 endfunction()
 
+function (generate_webgl_implementation)
+    set(LIBWEB_INPUT_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}")
+
+    invoke_py_generator(
+        "GLFunctions.cpp"
+        "generate_libweb_webgl_functions.py"
+        "${LIBWEB_INPUT_FOLDER}/WebGL/GLFunctions.json"
+        "WebGL/GLFunctions.h"
+        "WebGL/GLFunctions.cpp"
+        arguments -j "${LIBWEB_INPUT_FOLDER}/WebGL/GLFunctions.json"
+        dependencies "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_webgl.py"
+    )
+
+    set(WEBGL_GENERATED_HEADERS
+       "WebGL/GLFunctions.h"
+    )
+    list(TRANSFORM WEBGL_GENERATED_HEADERS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/")
+    if (ENABLE_INSTALL_HEADERS)
+        install(FILES ${WEBGL_GENERATED_HEADERS} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/LibWeb/WebGL")
+    endif()
+    list(APPEND LIBWEB_ALL_GENERATED_HEADERS ${WEBGL_GENERATED_HEADERS})
+    set(LIBWEB_ALL_GENERATED_HEADERS ${LIBWEB_ALL_GENERATED_HEADERS} PARENT_SCOPE)
+endfunction()
+
 function (generate_js_bindings target)
     set(LIBWEB_INPUT_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}")
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     set(generated_idl_targets ${LIBWEB_ALL_GENERATED_IDL})
     list(TRANSFORM generated_idl_targets PREPEND "generate_")
     set(LIBWEB_ALL_BINDINGS_SOURCES)
     set(LIBWEB_ALL_IDL_FILES)
     set(LIBWEB_ALL_PARSED_IDL_FILES)
-    function(libweb_js_bindings class)
+    macro(libweb_add_bindings_source class)
         get_filename_component(basename "${class}" NAME)
 
         set(BINDINGS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/Bindings/${basename}.h")
@@ -254,70 +290,79 @@ function (generate_js_bindings target)
 
         list(APPEND LIBWEB_ALL_BINDINGS_SOURCES ${BINDINGS_SOURCES})
         set(LIBWEB_ALL_BINDINGS_SOURCES ${LIBWEB_ALL_BINDINGS_SOURCES} PARENT_SCOPE)
+    endmacro()
 
-        list(APPEND LIBWEB_ALL_IDL_FILES "${LIBWEB_INPUT_FOLDER}/${class}.idl")
-        set(LIBWEB_ALL_IDL_FILES ${LIBWEB_ALL_IDL_FILES} PARENT_SCOPE)
-
-        list(APPEND LIBWEB_ALL_PARSED_IDL_FILES "${LIBWEB_INPUT_FOLDER}/${class}.idl")
-        set(LIBWEB_ALL_PARSED_IDL_FILES ${LIBWEB_ALL_PARSED_IDL_FILES} PARENT_SCOPE)
-    endfunction()
-
-    function(libweb_support_idl class)
-        list(APPEND LIBWEB_ALL_PARSED_IDL_FILES "${LIBWEB_INPUT_FOLDER}/${class}.idl")
-        set(LIBWEB_ALL_PARSED_IDL_FILES ${LIBWEB_ALL_PARSED_IDL_FILES} PARENT_SCOPE)
-    endfunction()
-
-    function(libweb_generated_support_idl class)
-        list(APPEND LIBWEB_ALL_PARSED_IDL_FILES "${CMAKE_CURRENT_BINARY_DIR}/${class}.idl")
-        set(LIBWEB_ALL_PARSED_IDL_FILES ${LIBWEB_ALL_PARSED_IDL_FILES} PARENT_SCOPE)
-    endfunction()
-
-    function(generate_exposed_interface_files)
-        set(exposed_interface_sources
-            IntrinsicDefinitions.cpp IntrinsicDefinitions.h
-            DedicatedWorkerExposedInterfaces.cpp DedicatedWorkerExposedInterfaces.h
-            SharedWorkerExposedInterfaces.cpp SharedWorkerExposedInterfaces.h
-            WindowExposedInterfaces.cpp WindowExposedInterfaces.h)
-        list(TRANSFORM exposed_interface_sources PREPEND "Bindings/")
-        add_custom_command(
-            OUTPUT  ${exposed_interface_sources}
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "tmp"
-            COMMAND $<TARGET_FILE:Lagom::GenerateWindowOrWorkerInterfaces> -o "${CMAKE_CURRENT_BINARY_DIR}/tmp" ${LIBWEB_ALL_IDL_FILES_ARGUMENT}
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different tmp/IntrinsicDefinitions.h "Bindings/IntrinsicDefinitions.h"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different tmp/IntrinsicDefinitions.cpp "Bindings/IntrinsicDefinitions.cpp"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different tmp/DedicatedWorkerExposedInterfaces.h "Bindings/DedicatedWorkerExposedInterfaces.h"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different tmp/DedicatedWorkerExposedInterfaces.cpp "Bindings/DedicatedWorkerExposedInterfaces.cpp"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different tmp/SharedWorkerExposedInterfaces.h "Bindings/SharedWorkerExposedInterfaces.h"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different tmp/SharedWorkerExposedInterfaces.cpp "Bindings/SharedWorkerExposedInterfaces.cpp"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different tmp/WindowExposedInterfaces.h "Bindings/WindowExposedInterfaces.h"
-            COMMAND "${CMAKE_COMMAND}" -E copy_if_different tmp/WindowExposedInterfaces.cpp "Bindings/WindowExposedInterfaces.cpp"
-            COMMAND "${CMAKE_COMMAND}" -E remove_directory "${CMAKE_CURRENT_BINARY_DIR}/tmp"
-            VERBATIM
-            DEPENDS Lagom::GenerateWindowOrWorkerInterfaces ${LIBWEB_ALL_IDL_FILES}
-        )
-        target_sources(${target} PRIVATE ${exposed_interface_sources})
-        add_custom_target(generate_exposed_interfaces DEPENDS ${exposed_interface_sources})
-        add_dependencies(ladybird_codegen_accumulator generate_exposed_interfaces)
-        add_dependencies(${target} generate_exposed_interfaces)
-        add_dependencies(generate_exposed_interfaces ${generated_idl_targets})
-
-        list(TRANSFORM exposed_interface_sources PREPEND "${CMAKE_CURRENT_BINARY_DIR}/")
-        set(exposed_interface_headers ${exposed_interface_sources})
-        list(FILTER exposed_interface_headers INCLUDE REGEX "\.h$")
-
-        if (ENABLE_INSTALL_HEADERS)
-            install(FILES ${exposed_interface_headers} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/LibWeb/Bindings")
+    function(libweb_js_bindings class)
+        get_filename_component(basename "${class}" NAME)
+        set(idl_path "${LIBWEB_INPUT_FOLDER}/${class}.idl")
+        if ("${basename}.idl" IN_LIST LIBWEB_ALL_GENERATED_IDL)
+            set(idl_path "${CMAKE_CURRENT_BINARY_DIR}/${class}.idl")
         endif()
 
-        list(APPEND LIBWEB_ALL_GENERATED_HEADERS ${exposed_interface_headers})
-        set(LIBWEB_ALL_GENERATED_HEADERS ${LIBWEB_ALL_GENERATED_HEADERS} PARENT_SCOPE)
+        libweb_add_bindings_source(${class})
+
+        list(APPEND LIBWEB_ALL_IDL_FILES "${idl_path}")
+        set(LIBWEB_ALL_IDL_FILES ${LIBWEB_ALL_IDL_FILES} PARENT_SCOPE)
+
+        list(APPEND LIBWEB_ALL_PARSED_IDL_FILES "${idl_path}")
+        set(LIBWEB_ALL_PARSED_IDL_FILES ${LIBWEB_ALL_PARSED_IDL_FILES} PARENT_SCOPE)
     endfunction()
+
+    set(bindings_generator "${LADYBIRD_SOURCE_DIR}/Meta/Generators/generate_libweb_bindings.py")
+    set(bindings_generator_dependencies
+        "${bindings_generator}"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/__init__.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/arguments.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/attributes.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/callback_interfaces.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/constants.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/constructors.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/context.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/cpp_types.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/default_values.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/extended_attributes.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/global_mixins.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/includes.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/interface_declaration.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/interfaces.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/intrinsics.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/iterables.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/named_and_indexed_properties.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/namespaces.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/operations.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/overload_resolution.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/to_idl_value.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Generators/libweb_bindings/to_js_value.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Utils/lexer.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Utils/utils.py"
+        "${LADYBIRD_SOURCE_DIR}/Meta/Utils/webidl_parser.py")
+
+    set(exposed_interface_sources
+        Forward.h
+        IntrinsicDefinitions.cpp IntrinsicDefinitions.h
+        DedicatedWorkerExposedInterfaces.cpp DedicatedWorkerExposedInterfaces.h
+        SharedWorkerExposedInterfaces.cpp SharedWorkerExposedInterfaces.h
+        WindowExposedInterfaces.cpp WindowExposedInterfaces.h)
+    list(TRANSFORM exposed_interface_sources PREPEND "Bindings/")
+    target_sources(${target} PRIVATE ${exposed_interface_sources})
+
+    set(exposed_interface_headers ${exposed_interface_sources})
+    list(FILTER exposed_interface_headers INCLUDE REGEX "\.h$")
+    list(TRANSFORM exposed_interface_headers PREPEND "${CMAKE_CURRENT_BINARY_DIR}/")
+
+    if (ENABLE_INSTALL_HEADERS)
+        install(FILES ${exposed_interface_headers} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/LibWeb/Bindings")
+    endif()
+
+    list(APPEND LIBWEB_ALL_GENERATED_HEADERS ${exposed_interface_headers})
+    set(LIBWEB_ALL_GENERATED_HEADERS ${LIBWEB_ALL_GENERATED_HEADERS} PARENT_SCOPE)
 
     include("idl_files.cmake")
     list(REMOVE_DUPLICATES LIBWEB_ALL_PARSED_IDL_FILES)
 
     set(LIBWEB_ALL_IDL_FILES_ARGUMENT ${LIBWEB_ALL_IDL_FILES})
     set(LIBWEB_ALL_PARSED_IDL_FILES_ARGUMENT ${LIBWEB_ALL_PARSED_IDL_FILES})
+    set(LIBWEB_BINDINGS_DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Bindings/LibWebBindings.d")
     if (WIN32)
         list(JOIN LIBWEB_ALL_IDL_FILES "\n" idl_file_list)
         file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/all_idl_files.txt" CONTENT "${idl_file_list}" NEWLINE_STYLE UNIX)
@@ -329,14 +374,15 @@ function (generate_js_bindings target)
     endif()
 
     add_custom_command(
-        OUTPUT ${LIBWEB_ALL_BINDINGS_SOURCES}
+        OUTPUT ${LIBWEB_ALL_BINDINGS_SOURCES} ${exposed_interface_sources}
         COMMAND "${CMAKE_COMMAND}" -E make_directory "Bindings"
-        COMMAND "$<TARGET_FILE:Lagom::BindingsGenerator>" -o "Bindings" --depfile "Bindings/all_bindings.d"
+        COMMAND "${Python3_EXECUTABLE}" "${bindings_generator}" -o "Bindings"
+                --depfile "${LIBWEB_BINDINGS_DEPFILE}"
                 ${LIBWEB_ALL_PARSED_IDL_FILES_ARGUMENT}
         VERBATIM
         COMMENT "Generating LibWeb bindings"
-        DEPENDS Lagom::BindingsGenerator ${LIBWEB_ALL_IDL_FILES} ${LIBWEB_ALL_PARSED_IDL_FILES}
-        DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/Bindings/all_bindings.d
+        DEPFILE "${LIBWEB_BINDINGS_DEPFILE}"
+        DEPENDS ${bindings_generator_dependencies} ${LIBWEB_ALL_IDL_FILES} ${LIBWEB_ALL_PARSED_IDL_FILES}
     )
 
     add_custom_target(generate_bindings DEPENDS ${LIBWEB_ALL_BINDINGS_SOURCES})
@@ -344,7 +390,10 @@ function (generate_js_bindings target)
     add_dependencies(${target} generate_bindings)
     add_dependencies(generate_bindings ${generated_idl_targets})
 
-    generate_exposed_interface_files()
+    add_custom_target(generate_exposed_interfaces DEPENDS ${exposed_interface_sources})
+    add_dependencies(ladybird_codegen_accumulator generate_exposed_interfaces)
+    add_dependencies(${target} generate_exposed_interfaces)
+    add_dependencies(generate_exposed_interfaces ${generated_idl_targets})
 
     set(LIBWEB_ALL_GENERATED_HEADERS ${LIBWEB_ALL_GENERATED_HEADERS} PARENT_SCOPE)
 endfunction()

@@ -26,7 +26,6 @@ public:
     virtual void run(AvailableSpace const&) override;
     virtual CSSPixels automatic_content_height() const override;
     virtual CSSPixels automatic_content_width() const override;
-    StaticPositionRect calculate_static_position_rect(Box const&) const;
 
     void dimension_box_on_line(Box const&, LayoutMode);
 
@@ -42,6 +41,7 @@ private:
     void generate_line_boxes();
     void apply_text_overflow_ellipsis(Vector<LineBox>&);
     void apply_justification_to_fragments(CSS::TextJustify, LineBox&, bool is_last_line);
+    StaticPositionRect calculate_inline_end_static_position_rect() const;
 
     LayoutState::UsedValues& m_containing_block_used_values;
 

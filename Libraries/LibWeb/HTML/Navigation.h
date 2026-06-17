@@ -8,40 +8,13 @@
 
 #include <LibJS/Runtime/Promise.h>
 #include <LibWeb/Bindings/Navigation.h>
+#include <LibWeb/Bindings/NavigationType.h>
 #include <LibWeb/DOM/EventTarget.h>
 #include <LibWeb/HTML/HistoryHandlingBehavior.h>
-#include <LibWeb/HTML/NavigationType.h>
 #include <LibWeb/HTML/StructuredSerializeTypes.h>
 #include <LibWeb/HTML/UserNavigationInvolvement.h>
 
 namespace Web::HTML {
-
-// https://html.spec.whatwg.org/multipage/nav-history-apis.html#navigationupdatecurrententryoptions
-struct NavigationUpdateCurrentEntryOptions {
-    JS::Value state;
-};
-
-// https://html.spec.whatwg.org/multipage/nav-history-apis.html#navigationoptions
-struct NavigationOptions {
-    Optional<JS::Value> info;
-};
-
-// https://html.spec.whatwg.org/multipage/nav-history-apis.html#navigationnavigateoptions
-struct NavigationNavigateOptions : public NavigationOptions {
-    Optional<JS::Value> state;
-    Bindings::NavigationHistoryBehavior history = Bindings::NavigationHistoryBehavior::Auto;
-};
-
-// https://html.spec.whatwg.org/multipage/nav-history-apis.html#navigationreloadoptions
-struct NavigationReloadOptions : public NavigationOptions {
-    Optional<JS::Value> state;
-};
-
-// https://html.spec.whatwg.org/multipage/nav-history-apis.html#navigationresult
-struct NavigationResult {
-    GC::Ref<WebIDL::Promise> committed;
-    GC::Ref<WebIDL::Promise> finished;
-};
 
 // https://html.spec.whatwg.org/multipage/nav-history-apis.html#navigation-api-method-tracker
 struct NavigationAPIMethodTracker final : public JS::Cell {
@@ -78,7 +51,7 @@ public:
     // IDL properties and methods
     Vector<GC::Ref<NavigationHistoryEntry>> entries() const;
     GC::Ptr<NavigationHistoryEntry> current_entry() const;
-    WebIDL::ExceptionOr<void> update_current_entry(NavigationUpdateCurrentEntryOptions);
+    WebIDL::ExceptionOr<void> update_current_entry(Bindings::NavigationUpdateCurrentEntryOptions);
 
     // https://html.spec.whatwg.org/multipage/nav-history-apis.html#dom-navigation-transition
     GC::Ptr<NavigationTransition> transition() const { return m_transition; }
@@ -86,12 +59,12 @@ public:
     bool can_go_back() const;
     bool can_go_forward() const;
 
-    WebIDL::ExceptionOr<NavigationResult> navigate(String url, NavigationNavigateOptions const&);
-    WebIDL::ExceptionOr<NavigationResult> reload(NavigationReloadOptions const&);
+    WebIDL::ExceptionOr<Bindings::NavigationResult> navigate(String url, Bindings::NavigationNavigateOptions const&);
+    WebIDL::ExceptionOr<Bindings::NavigationResult> reload(Bindings::NavigationReloadOptions const&);
 
-    WebIDL::ExceptionOr<NavigationResult> traverse_to(String key, NavigationOptions const&);
-    WebIDL::ExceptionOr<NavigationResult> back(NavigationOptions const&);
-    WebIDL::ExceptionOr<NavigationResult> forward(NavigationOptions const&);
+    WebIDL::ExceptionOr<Bindings::NavigationResult> traverse_to(String key, Bindings::NavigationOptions const&);
+    WebIDL::ExceptionOr<Bindings::NavigationResult> back(Bindings::NavigationOptions const&);
+    WebIDL::ExceptionOr<Bindings::NavigationResult> forward(Bindings::NavigationOptions const&);
 
     // Event Handlers
     void set_onnavigate(WebIDL::CallbackType*);
@@ -124,6 +97,7 @@ public:
     bool fire_a_download_request_navigate_event(URL::URL destination_url, UserNavigationInvolvement user_involvement, GC::Ptr<DOM::Element> source_element, String filename);
 
     void initialize_the_navigation_api_entries_for_a_new_document(Vector<NonnullRefPtr<SessionHistoryEntry>> const& new_shes, NonnullRefPtr<SessionHistoryEntry> initial_she);
+    void initialize_the_navigation_api_entries_for_reconstructed_session_history(Vector<NonnullRefPtr<SessionHistoryEntry>> const& new_shes, NonnullRefPtr<SessionHistoryEntry> initial_she);
     void update_the_navigation_api_entries_for_a_same_document_navigation(NonnullRefPtr<SessionHistoryEntry> destination_she, Bindings::NavigationType);
 
     virtual ~Navigation() override;
@@ -134,6 +108,8 @@ public:
     bool focus_changed_during_ongoing_navigation() const { return m_focus_changed_during_ongoing_navigation; }
     void set_focus_changed_during_ongoing_navigation(bool b) { m_focus_changed_during_ongoing_navigation = b; }
 
+    bool suppress_normal_scroll_restoration_during_ongoing_navigation() const { return m_suppress_normal_scroll_restoration_during_ongoing_navigation; }
+
     void set_was_initial_about_blank_opened(bool b) { m_was_initial_about_blank_opened = b; }
 
 private:
@@ -143,16 +119,17 @@ private:
     virtual void visit_edges(Visitor&) override;
 
     using AnyException = decltype(declval<WebIDL::ExceptionOr<void>>().exception());
-    NavigationResult early_error_result(AnyException);
+    Bindings::NavigationResult early_error_result(AnyException);
 
     GC::Ref<NavigationAPIMethodTracker> maybe_set_the_upcoming_non_traverse_api_method_tracker(JS::Value info, Optional<SerializationRecord>);
     GC::Ref<NavigationAPIMethodTracker> add_an_upcoming_traverse_api_method_tracker(String destination_key, JS::Value info);
-    WebIDL::ExceptionOr<NavigationResult> perform_a_navigation_api_traversal(String key, NavigationOptions const&);
+    WebIDL::ExceptionOr<Bindings::NavigationResult> perform_a_navigation_api_traversal(String key, Bindings::NavigationOptions const&);
     void promote_an_upcoming_api_method_tracker_to_ongoing(Optional<String> destination_key);
     void resolve_the_finished_promise(GC::Ref<NavigationAPIMethodTracker>);
     void reject_the_finished_promise(GC::Ref<NavigationAPIMethodTracker>, JS::Value exception);
     void clean_up(GC::Ref<NavigationAPIMethodTracker>);
     void notify_about_the_committed_to_entry(GC::Ref<NavigationAPIMethodTracker>, GC::Ref<NavigationHistoryEntry>);
+    void run_the_navigate_event_intercept_commit_handler_steps(GC::Ref<NavigateEvent>, GC::Ptr<NavigationAPIMethodTracker>);
 
     bool inner_navigate_event_firing_algorithm(
         Bindings::NavigationType,
@@ -182,7 +159,7 @@ private:
     bool m_focus_changed_during_ongoing_navigation { false };
 
     // https://html.spec.whatwg.org/multipage/nav-history-apis.html#suppress-normal-scroll-restoration-during-ongoing-navigation
-    bool m_suppress_scroll_restoration_during_ongoing_navigation { false };
+    bool m_suppress_normal_scroll_restoration_during_ongoing_navigation { false };
 
     // https://html.spec.whatwg.org/multipage/nav-history-apis.html#ongoing-api-method-tracker
     GC::Ptr<NavigationAPIMethodTracker> m_ongoing_api_method_tracker = nullptr;

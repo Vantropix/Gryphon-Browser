@@ -252,7 +252,17 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
     // custom element registry: A new CustomElementRegistry object.
     document->set_custom_element_registry(realm.create<CustomElementRegistry>(realm));
 
-    // 16. If creator is non-null, then:
+    // 16. Let iframeReferrerPolicy be the result of determining the iframe element referrer policy given embedder.
+    auto iframe_referrer_policy = determine_iframe_element_referrer_policy(embedder);
+
+    // 17. Set document's internal ancestor origin objects list to the result of running the internal ancestor origin
+    //     objects list creation steps given document and iframeReferrerPolicy.
+    document->set_internal_ancestor_origin_objects_list(document->internal_ancestor_origin_objects_list_creation_steps(iframe_referrer_policy));
+
+    // 18. Set document's ancestor origins list to the result of running the ancestor origins list creation steps given document.
+    document->set_ancestor_origins_list(document->ancestor_origins_list_creation_steps());
+
+    // 19. If creator is non-null:
     if (creator) {
         // 1. Set document's referrer to the serialization of creator's URL.
         document->set_referrer(creator->url().serialize());
@@ -269,23 +279,25 @@ BrowsingContext::BrowsingContextAndDocument BrowsingContext::create_a_new_browsi
         }
     }
 
-    // 17. Assert: document's URL and document's relevant settings object's creation URL are about:blank.
+    // 20. Assert: document's URL and document's relevant settings object's creation URL are about:blank.
     VERIFY(document->url() == URL::about_blank());
     VERIFY(document->relevant_settings_object().creation_url == URL::about_blank());
 
-    // 18. Mark document as ready for post-load tasks.
+    // 21. Mark document as ready for post-load tasks.
     document->set_ready_for_post_load_tasks(true);
 
-    // 19. Populate with html/head/body given document.
+    // 22. Populate with html/head/body given document.
     populate_with_html_head_body(*document);
+    if (!embedder)
+        document->set_supported_color_schemes({ "light"_string, "dark"_string });
 
-    // 20. Make active document.
+    // 23. Make active document.
     document->make_active();
 
-    // 21. Completely finish loading document.
+    // 24. Completely finish loading document.
     document->completely_finish_loading();
 
-    // 22. Return browsingContext and document.
+    // 25. Return browsingContext and document.
     return BrowsingContext::BrowsingContextAndDocument { browsing_context, document };
 }
 
@@ -302,6 +314,7 @@ void BrowsingContext::visit_edges(Cell::Visitor& visitor)
 
     visitor.visit(m_page);
     visitor.visit(m_window_proxy);
+    visitor.visit(m_active_document);
     visitor.visit(m_group);
     visitor.visit(m_opener_browsing_context);
 }
@@ -344,31 +357,40 @@ GC::Ptr<BrowsingContext> BrowsingContext::top_level_browsing_context() const
     return navigable->active_browsing_context();
 }
 
+// https://html.spec.whatwg.org/multipage/document-sequences.html#active-document
 DOM::Document const* BrowsingContext::active_document() const
 {
-    auto* window = active_window();
-    if (!window)
-        return nullptr;
-    return &window->associated_document();
+    // AD-HOC: The HTML Standard currently defines this as the active window's associated Document.
+    //         That changes too early when the initial about:blank Window is reused for its first
+    //         same-origin navigation, because create-and-initialize updates the associated Document
+    //         before the new Document is made active.
+    //         Spec issue: https://github.com/whatwg/html/issues/12415
+    return m_active_document;
 }
 
+// https://html.spec.whatwg.org/multipage/document-sequences.html#active-document
 DOM::Document* BrowsingContext::active_document()
 {
-    auto* window = active_window();
-    if (!window)
-        return nullptr;
-    return &window->associated_document();
+    // AD-HOC: See the const overload above.
+    return m_active_document;
+}
+
+void BrowsingContext::set_active_document(GC::Ptr<DOM::Document> document)
+{
+    m_active_document = document;
 }
 
 // https://html.spec.whatwg.org/multipage/browsers.html#active-window
 HTML::Window* BrowsingContext::active_window()
 {
+    // A browsing context's active window is its WindowProxy object's [[Window]] internal slot value.
     return m_window_proxy->window();
 }
 
 // https://html.spec.whatwg.org/multipage/browsers.html#active-window
 HTML::Window const* BrowsingContext::active_window() const
 {
+    // A browsing context's active window is its WindowProxy object's [[Window]] internal slot value.
     return m_window_proxy->window();
 }
 
